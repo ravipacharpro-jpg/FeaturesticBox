@@ -82,7 +82,13 @@ public class BActivityManagerService extends IBActivityManagerService.Stub imple
 
     @Override
     public Intent sendBroadcast(Intent intent, String resolvedType, int userId) {
-        List<ResolveInfo> resolves = BPackageManagerService.get().queryBroadcastReceivers(intent, GET_META_DATA, resolvedType, userId);
+        List<ResolveInfo> resolves;
+        try {
+            resolves = BPackageManagerService.get().queryBroadcastReceivers(intent, GET_META_DATA, resolvedType, userId);
+        } catch (RemoteException e) {
+            e.printStackTrace();
+            resolves = new java.util.ArrayList<>();
+        }
 
         for (ResolveInfo resolve : resolves) {
             ProcessRecord processRecord = BProcessManagerService.get().findProcessRecord(resolve.activityInfo.packageName, resolve.activityInfo.processName, userId);
@@ -230,7 +236,14 @@ public class BActivityManagerService extends IBActivityManagerService.Stub imple
 
     @Override
     public void scheduleBroadcastReceiver(Intent intent, PendingResultData pendingResultData, int userId) {
-        List<ResolveInfo> resolves = BPackageManagerService.get().queryBroadcastReceivers(intent, GET_META_DATA, null, userId);
+        List<ResolveInfo> resolves;
+        try {
+            resolves = BPackageManagerService.get().queryBroadcastReceivers(intent, GET_META_DATA, null, userId);
+        } catch (RemoteException e) {
+            e.printStackTrace();
+            pendingResultData.build().finish();
+            return;
+        }
 
         if (resolves.isEmpty()) {
             pendingResultData.build().finish();
@@ -245,7 +258,11 @@ public class BActivityManagerService extends IBActivityManagerService.Stub imple
                 data.intent = intent;
                 data.activityInfo = resolve.activityInfo;
                 data.data = pendingResultData;
-                processRecord.bActivityThread.scheduleReceiver(data);
+                try {
+                    processRecord.bActivityThread.scheduleReceiver(data);
+                } catch (RemoteException e) {
+                    e.printStackTrace();
+                }
             }
         }
     }
@@ -326,7 +343,12 @@ public class BActivityManagerService extends IBActivityManagerService.Stub imple
         if (uid == 0) {
             return PackageManager.PERMISSION_GRANTED;
         }
-        return BPackageManagerService.get().checkUidPermission(permission, uid,packageName);
+        try {
+            return BPackageManagerService.get().checkUidPermission(permission, uid, packageName);
+        } catch (RemoteException e) {
+            e.printStackTrace();
+            return PackageManager.PERMISSION_DENIED;
+        }
     }
 
     @Override
