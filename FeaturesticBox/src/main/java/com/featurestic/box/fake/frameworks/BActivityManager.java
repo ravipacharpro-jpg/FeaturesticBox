@@ -1,0 +1,391 @@
+package com.featurestic.box.fake.frameworks;
+
+import android.app.Activity;
+import android.content.ComponentName;
+import android.content.Intent;
+import android.content.pm.ProviderInfo;
+import android.os.Bundle;
+import android.os.IBinder;
+import android.os.RemoteException;
+
+import black.android.app.ActivityThread;
+import black.android.app.ActivityThreadContext;
+import black.android.app.BRActivityThread;
+import black.android.app.BRActivityThreadActivityClientRecord;
+import com.featurestic.box.app.BActivityThread;
+import com.featurestic.box.core.system.ServiceManager;
+import com.featurestic.box.core.system.am.IBActivityManagerService;
+import com.featurestic.box.entity.AppConfig;
+import com.featurestic.box.entity.UnbindRecord;
+import com.featurestic.box.entity.am.PendingResultData;
+import com.featurestic.box.entity.am.RunningAppProcessInfo;
+import com.featurestic.box.entity.am.RunningServiceInfo;
+
+/**
+ * Created by @FeaturesticBox on 3/30/21.
+ * * ∧＿∧
+ * (`･ω･∥
+ * 丶　つ０
+ * しーＪ
+ * 此处无Bug
+ */
+public class BActivityManager extends FeaturesticManager<IBActivityManagerService> {
+    private static final BActivityManager sActivityManager = new BActivityManager();
+
+    public static BActivityManager get() {
+        return sActivityManager;
+    }
+
+    @Override
+    protected String getServiceName() {
+        return ServiceManager.ACTIVITY_MANAGER;
+    }
+
+    public AppConfig initProcess(String packageName, String processName, int userId) {
+        try {
+            return getService().initProcess(packageName, processName, userId);
+        } catch (RemoteException e) {
+            e.printStackTrace();
+        }
+        return null;
+    }
+
+    public void restartProcess(String packageName, String processName, int userId) {
+        try {
+            getService().restartProcess(packageName, processName, userId);
+        } catch (RemoteException e) {
+            e.printStackTrace();
+        }
+    }
+
+    public void startActivity(Intent intent, int userId) {
+        try {
+            getService().startActivity(intent, userId);
+        } catch (RemoteException e) {
+            e.printStackTrace();
+        }
+    }
+
+    public int startActivityAms(int userId, Intent intent, String resolvedType, IBinder resultTo, String resultWho, int requestCode, int flags, Bundle options) {
+        try {
+            return getService().startActivityAms(userId, intent, resolvedType, resultTo, resultWho, requestCode, flags, options);
+        } catch (RemoteException e) {
+            e.printStackTrace();
+        }
+        return -1;
+    }
+
+    public int startActivities(int userId, Intent[] intent, String[] resolvedType, IBinder resultTo, Bundle options) {
+        try {
+            return getService().startActivities(userId, intent, resolvedType, resultTo, options);
+        } catch (RemoteException e) {
+            e.printStackTrace();
+        }
+        return -1;
+    }
+
+    public ComponentName startService(Intent intent, String resolvedType, boolean requireForeground, int userId) {
+        try {
+            return getService().startService(intent, resolvedType, requireForeground, userId);
+        } catch (RemoteException e) {
+            e.printStackTrace();
+        }
+        return null;
+    }
+
+    public int stopService(Intent intent, String resolvedType, int userId) {
+        try {
+            return getService().stopService(intent, resolvedType, userId);
+        } catch (RemoteException e) {
+            e.printStackTrace();
+        }
+        return -1;
+    }
+
+    public Intent bindService(Intent service, IBinder binder, String resolvedType, int userId) {
+        try {
+            return getService().bindService(service, binder, resolvedType, userId);
+        } catch (RemoteException e) {
+            e.printStackTrace();
+        }
+        return null;
+    }
+
+    public void unbindService(IBinder binder, int userId) {
+        try {
+            getService().unbindService(binder, userId);
+        } catch (RemoteException e) {
+            e.printStackTrace();
+        }
+    }
+
+    public void stopServiceToken(ComponentName componentName, IBinder token, int userId) {
+        try {
+            getService().stopServiceToken(componentName, token, userId);
+        } catch (RemoteException e) {
+            e.printStackTrace();
+        }
+    }
+
+    public void onStartCommand(Intent proxyIntent, int userId) {
+        try {
+            getService().onStartCommand(proxyIntent, userId);
+        } catch (RemoteException e) {
+            e.printStackTrace();
+        }
+    }
+
+    public UnbindRecord onServiceUnbind(Intent proxyIntent, int userId) {
+        try {
+            return getService().onServiceUnbind(proxyIntent, userId);
+        } catch (RemoteException e) {
+            e.printStackTrace();
+        }
+        return null;
+    }
+
+    public int checkPermission(String permission, int pid, int uid, String packageName) {
+        try {
+            return getService().checkPermission(permission, pid, uid, packageName);
+        } catch (RemoteException e) {
+            e.printStackTrace();
+        }
+        return 0;
+    }
+
+    public void onServiceDestroy(Intent proxyIntent, int userId) {
+        try {
+            getService().onServiceDestroy(proxyIntent, userId);
+        } catch (RemoteException e) {
+            e.printStackTrace();
+        }
+    }
+
+    public Activity findActivityByToken(IBinder token) {
+        if (token == null) {
+            return null;
+        }
+        try {
+            Object mainThread = com.featurestic.box.FeaturesticBoxCore.mainThread();
+            java.util.Map<IBinder, Object> activities = BRActivityThread.get(mainThread).mActivities();
+            if (activities != null) {
+                Object r = activities.get(token);
+                if (r != null) {
+                    return BRActivityThreadActivityClientRecord.get(r).activity();
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        return null;
+    }
+
+    public void sendCancelActivityResult(IBinder resultTo, String resultWho, int requestCode) {
+        sendActivityResult(resultTo, resultWho, requestCode, null, 0);
+    }
+
+    public void sendActivityResult(final IBinder resultTo, final String resultWho, final int requestCode, final Intent data, final int resultCode) {
+        if (resultTo == null || requestCode < 0) {
+            return;
+        }
+        Runnable deliverTask = () -> {
+            try {
+                if (data != null && BActivityThread.getApplication() != null) {
+                    data.setExtrasClassLoader(BActivityThread.getApplication().getClassLoader());
+                    if (com.featurestic.box.compat.auth.GoogleSignInTokenHelper.enrichSignInResultIntent(data)) {
+                        // Ensure RESULT_OK if enriched
+                    }
+                }
+            } catch (Throwable ignored) {
+            }
+            try {
+                Activity activity = findActivityByToken(resultTo);
+                if (activity != null) {
+                    if (dispatchActivityResultReflectively(activity, resultWho, requestCode, resultCode, data)) {
+                        return;
+                    }
+                    black.android.app.BRActivity.get(activity).onActivityResult(requestCode, resultCode, data);
+                    return;
+                }
+            } catch (Throwable ignored) {
+            }
+            try {
+                Object mainThread = com.featurestic.box.FeaturesticBoxCore.mainThread();
+                BRActivityThread.get(mainThread).sendActivityResult(
+                        resultTo, resultWho, requestCode, resultCode, data);
+            } catch (Throwable ignored) {
+            }
+        };
+        if (android.os.Looper.myLooper() == android.os.Looper.getMainLooper()) {
+            deliverTask.run();
+        } else {
+            com.featurestic.box.FeaturesticBoxCore.get().getHandler().post(deliverTask);
+        }
+    }
+
+    private static boolean dispatchActivityResultReflectively(
+            Activity activity, String resultWho, int requestCode, int resultCode, Intent data) {
+        if (activity == null) return false;
+        try {
+            java.lang.reflect.Method m5 = Activity.class.getDeclaredMethod(
+                    "dispatchActivityResult",
+                    String.class, int.class, int.class, Intent.class, String.class);
+            m5.setAccessible(true);
+            m5.invoke(activity, resultWho, requestCode, resultCode, data, "ACTIVITY_RESULT");
+            return true;
+        } catch (Throwable ignored) {
+        }
+        try {
+            java.lang.reflect.Method m4 = Activity.class.getDeclaredMethod(
+                    "dispatchActivityResult",
+                    String.class, int.class, int.class, Intent.class);
+            m4.setAccessible(true);
+            m4.invoke(activity, resultWho, requestCode, resultCode, data);
+            return true;
+        } catch (Throwable ignored) {
+        }
+        return false;
+    }
+
+    public IBinder acquireContentProviderClient(ProviderInfo providerInfo) {
+        try {
+            return getService().acquireContentProviderClient(providerInfo);
+        } catch (RemoteException e) {
+            e.printStackTrace();
+        }
+        return null;
+    }
+
+    public Intent sendBroadcast(Intent intent, String resolvedType, int userId) {
+        try {
+            return getService().sendBroadcast(intent, resolvedType, userId);
+        } catch (RemoteException e) {
+            e.printStackTrace();
+        }
+        return null;
+    }
+
+    public IBinder peekService(Intent intent, String resolvedType, int userId) {
+        try {
+            return getService().peekService(intent, resolvedType, userId);
+        } catch (RemoteException e) {
+            e.printStackTrace();
+        }
+        return null;
+    }
+
+    public void onActivityCreated(int taskId, IBinder token, IBinder activityRecord) {
+        try {
+            getService().onActivityCreated(taskId, token, activityRecord);
+        } catch (RemoteException e) {
+            e.printStackTrace();
+        }
+    }
+
+    public void onActivityResumed(IBinder token) {
+        try {
+            // Fix https://github.com/FeaturesticBox/FeaturesticBox/issues/28
+            if ("com.tencent.mm".equals(BActivityThread.getAppPackageName())) {
+                Activity activityByToken = BActivityThread.getActivityByToken(token);
+                if (activityByToken != null) {
+                    activityByToken.getWindow().getDecorView().clearFocus();
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        try {
+            getService().onActivityResumed(token);
+        } catch (RemoteException e) {
+            e.printStackTrace();
+        }
+    }
+
+    public void onActivityDestroyed(IBinder token) {
+        try {
+            getService().onActivityDestroyed(token);
+        } catch (RemoteException e) {
+            e.printStackTrace();
+        }
+    }
+
+    public void onFinishActivity(IBinder token) {
+        try {
+            getService().onFinishActivity(token);
+        } catch (RemoteException e) {
+            e.printStackTrace();
+        }
+    }
+
+    public RunningAppProcessInfo getRunningAppProcesses(String callerPackage, int userId) throws RemoteException {
+        try {
+            return getService().getRunningAppProcesses(callerPackage, userId);
+        } catch (RemoteException e) {
+            e.printStackTrace();
+        }
+        return null;
+    }
+
+    public RunningServiceInfo getRunningServices(String callerPackage, int userId) throws RemoteException {
+        try {
+            return getService().getRunningServices(callerPackage, userId);
+        } catch (RemoteException e) {
+            e.printStackTrace();
+        }
+        return null;
+    }
+
+    public void scheduleBroadcastReceiver(Intent intent, PendingResultData pendingResultData, int userId) throws RemoteException {
+        getService().scheduleBroadcastReceiver(intent, pendingResultData, userId);
+    }
+
+    public void finishBroadcast(PendingResultData data) {
+        try {
+            getService().finishBroadcast(data);
+        } catch (RemoteException e) {
+            e.printStackTrace();
+        }
+    }
+
+    public String getCallingPackage(IBinder token, int userId) {
+        try {
+            return getService().getCallingPackage(token, userId);
+        } catch (RemoteException e) {
+            e.printStackTrace();
+        }
+        return null;
+    }
+
+    public ComponentName getCallingActivity(IBinder token, int userId) {
+        try {
+            return getService().getCallingActivity(token, userId);
+        } catch (RemoteException e) {
+            e.printStackTrace();
+        }
+        return null;
+    }
+
+    public void getIntentSender(IBinder target, String packageName, int uid) {
+        try {
+            getService().getIntentSender(target, packageName, uid, BActivityThread.getUserId());
+        } catch (RemoteException e) {
+            e.printStackTrace();
+        }
+    }
+
+    public String getPackageForIntentSender(IBinder target) {
+        try {
+            return getService().getPackageForIntentSender(target, BActivityThread.getUserId());
+        } catch (RemoteException e) {
+            e.printStackTrace();
+        }
+        return null;
+    }
+
+    public int getUidForIntentSender(IBinder target) {
+        try {
+            return getService().getUidForIntentSender(target, BActivityThread.getUserId());
+        } catch (RemoteException e) {
+            e.printStackTrace();
+        }
+        return -1;
+    }
+}

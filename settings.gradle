@@ -1,0 +1,4 @@
+include ':FeaturesticBox'
+project(':FeaturesticBox').projectDir = file('FeaturesticBox')
+
+rootProject.name = "FeaturesticBox"

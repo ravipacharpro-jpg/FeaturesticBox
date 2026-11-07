@@ -1,0 +1,302 @@
+package com.featurestic.box.core;
+
+import android.content.ComponentName;
+import android.content.Intent;
+import android.content.pm.ActivityInfo;
+import android.content.pm.ApplicationInfo;
+import android.content.pm.PackageManager;
+import android.content.pm.ProviderInfo;
+import android.content.pm.ServiceInfo;
+import android.net.Uri;
+import android.os.Build;
+import android.os.Bundle;
+
+import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.Locale;
+import java.util.Set;
+
+import com.featurestic.box.FeaturesticBoxCore;
+import com.featurestic.box.app.BActivityThread;
+import com.featurestic.box.entity.pm.InstallResult;
+import com.featurestic.box.utils.auth.Auth;
+
+public class GmsCore {
+    private static final HashSet<String> GOOGLE_APP = new HashSet<>();
+    private static final HashSet<String> GOOGLE_SERVICE = new HashSet<>();
+    public static final String GMS_PKG = "com.google.android.gms";
+    public static final String GSF_PKG = "com.google.android.gsf";
+    public static final String VENDING_PKG = "com.android.vending";
+    public static final String GMS_DYNAMITE_AUTHORITY = "com.google.android.gms.chimera";
+
+    private static final String FIREBASE_ANALYTICS_DEACTIVATED =
+            "firebase_analytics_collection_deactivated";
+    private static final String FIREBASE_ANALYTICS_ENABLED =
+            "firebase_analytics_collection_enabled";
+    private static final String GOOGLE_ANALYTICS_ADID_ENABLED =
+            "google_analytics_adid_collection_enabled";
+    private static final String FIREBASE_INIT_PROVIDER =
+            "com.google.firebase.provider.FirebaseInitProvider";
+    private static final String FIREBASE_COMPONENT_DISCOVERY_SERVICE =
+            "com.google.firebase.components.ComponentDiscoveryService";
+    private static final String FIREBASE_COMPONENT_PREFIX =
+            "com.google.firebase.components:";
+
+    static {
+        GOOGLE_APP.add(VENDING_PKG);
+        GOOGLE_APP.add("com.google.android.play.games");
+        GOOGLE_APP.add("com.google.android.wearable.app");
+        GOOGLE_APP.add("com.google.android.wearable.app.cn");
+
+        GOOGLE_SERVICE.add(GMS_PKG);
+        GOOGLE_SERVICE.add(GSF_PKG);
+        GOOGLE_SERVICE.add("com.google.android.gsf.login");
+        GOOGLE_SERVICE.add("com.google.android.backuptransport");
+        GOOGLE_SERVICE.add("com.google.android.backup");
+        GOOGLE_SERVICE.add("com.google.android.configupdater");
+        GOOGLE_SERVICE.add("com.google.android.syncadapters.contacts");
+        GOOGLE_SERVICE.add("com.google.android.feedback");
+        GOOGLE_SERVICE.add("com.google.android.onetimeinitializer");
+        GOOGLE_SERVICE.add("com.google.android.partnersetup");
+        GOOGLE_SERVICE.add("com.google.android.setupwizard");
+        GOOGLE_SERVICE.add("com.google.android.syncadapters.calendar");
+    }
+
+    public static boolean isGoogleAppOrService(String str) {
+        return GOOGLE_APP.contains(str) || GOOGLE_SERVICE.contains(str);
+    }
+
+    public static ApplicationInfo applyVirtualAppGmsSafety(ApplicationInfo info) {
+        if (info == null || info.packageName == null || Build.VERSION.SDK_INT < 30) {
+            return info;
+        }
+
+        String virtualPackage = BActivityThread.getAppPackageName();
+        if (virtualPackage == null || !virtualPackage.equals(info.packageName)) {
+            return info;
+        }
+        return applyAnalyticsSafety(info);
+    }
+
+    public static ApplicationInfo applyGeneratedVirtualAppGmsSafety(ApplicationInfo info) {
+        if (info == null || info.packageName == null || Build.VERSION.SDK_INT < 30) {
+            return info;
+        }
+        return applyAnalyticsSafety(info);
+    }
+
+    private static ApplicationInfo applyAnalyticsSafety(ApplicationInfo info) {
+        if (info == null || info.packageName == null) {
+            return info;
+        }
+        if (info.packageName.equals(FeaturesticBoxCore.getHostPkg())
+                || isGoogleAppOrService(info.packageName)) {
+            return info;
+        }
+
+        Bundle metaData = info.metaData == null ? new Bundle() : new Bundle(info.metaData);
+        metaData.putBoolean(FIREBASE_ANALYTICS_DEACTIVATED, true);
+        metaData.putBoolean(FIREBASE_ANALYTICS_ENABLED, false);
+        metaData.putBoolean(GOOGLE_ANALYTICS_ADID_ENABLED, false);
+        info.metaData = metaData;
+        return info;
+    }
+
+    public static ServiceInfo applyGeneratedVirtualServiceGmsSafety(ServiceInfo info) {
+        if (info == null || Build.VERSION.SDK_INT < 30 || info.packageName == null) {
+            return info;
+        }
+        if (info.packageName.equals(FeaturesticBoxCore.getHostPkg())
+                || isGoogleAppOrService(info.packageName)) {
+            return info;
+        }
+
+        if (FIREBASE_COMPONENT_DISCOVERY_SERVICE.equals(info.name) && info.metaData != null) {
+            Bundle filtered = new Bundle(info.metaData);
+            for (String key : new ArrayList<>(filtered.keySet())) {
+                String lower = key == null ? "" : key.toLowerCase(Locale.US);
+                if (lower.startsWith(FIREBASE_COMPONENT_PREFIX)
+                        && (lower.contains("analytics") || lower.contains("measurement"))) {
+                    filtered.remove(key);
+                }
+            }
+            info.metaData = filtered;
+        }
+
+        return isMeasurementComponentName(info.name) ? null : info;
+    }
+
+    public static ProviderInfo applyGeneratedVirtualProviderGmsSafety(ProviderInfo info) {
+        if (info == null || Build.VERSION.SDK_INT < 30 || info.packageName == null) {
+            return info;
+        }
+        if (info.packageName.equals(FeaturesticBoxCore.getHostPkg())
+                || isGoogleAppOrService(info.packageName)) {
+            return info;
+        }
+
+        // Keep FirebaseInitProvider alive. BGMI/IMSDK calls Firebase APIs during
+        // Google sign-in and fails with "Default FirebaseApp is not initialized"
+        // if this bootstrap is removed. Android 16 safety is handled below by
+        // stripping only measurement/analytics components and metadata.
+        return isMeasurementComponentName(info.name) ? null : info;
+    }
+
+    public static ActivityInfo applyGeneratedVirtualActivityGmsSafety(ActivityInfo info) {
+        if (info == null || Build.VERSION.SDK_INT < 30 || info.packageName == null) {
+            return info;
+        }
+        if (info.packageName.equals(FeaturesticBoxCore.getHostPkg())
+                || isGoogleAppOrService(info.packageName)) {
+            return info;
+        }
+        return isMeasurementComponentName(info.name) ? null : info;
+    }
+
+    /**
+     * Runtime guard for Android 16. A virtual package runs under the host UID, so
+     * Play Services measurement must not receive a virtual package identity over
+     * a real system/GMS binder. Authentication services are intentionally not
+     * matched here.
+     */
+    public static boolean isMeasurementIntent(Intent intent) {
+        if (intent == null || Build.VERSION.SDK_INT < 30) {
+            return false;
+        }
+
+        ComponentName component = intent.getComponent();
+        if (component != null && isMeasurementComponentName(component.getClassName())) {
+            return true;
+        }
+
+        String action = intent.getAction();
+        if (action == null) {
+            return false;
+        }
+        String lower = action.toLowerCase(Locale.US);
+        if (!isMeasurementName(lower)) {
+            return false;
+        }
+
+        String targetPackage = component != null ? component.getPackageName() : intent.getPackage();
+        return targetPackage == null
+                || GMS_PKG.equals(targetPackage)
+                || action.startsWith("com.google.android.gms.measurement");
+    }
+
+    /**
+     * Dynamite uses the GMS chimera provider to discover modules. Returning an
+     * empty result for the measurement module prevents explicit analytics calls
+     * from re-loading measurement after manifest components were removed, while
+     * leaving every other Dynamite module (including auth-related modules) alone.
+     */
+    public static boolean isMeasurementDynamiteUri(Uri uri) {
+        if (uri == null || Build.VERSION.SDK_INT < 30
+                || !GMS_DYNAMITE_AUTHORITY.equals(uri.getAuthority())) {
+            return false;
+        }
+        String lower = uri.toString().toLowerCase(Locale.US);
+        return lower.contains("measurementdynamite")
+                || lower.contains("/measurement")
+                || lower.contains("firebaseanalytics")
+                || lower.contains("appmeasurement");
+    }
+
+    private static boolean isMeasurementComponentName(String name) {
+        if (name == null) {
+            return false;
+        }
+        return isMeasurementName(name.toLowerCase(Locale.US));
+    }
+
+    private static boolean isMeasurementName(String lower) {
+        return lower.startsWith("com.google.android.gms.measurement.")
+                || lower.contains("appmeasurement")
+                || lower.contains("firebaseanalytics")
+                || lower.contains("measurementdynamite");
+    }
+
+    public static boolean setGoogleAppOrService(String pkg) {
+        if (pkg == null) return false;
+        for (String p : Auth.AUTH_PKG_SET) {
+            if (pkg.equals(p) || pkg.contains(p)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    public static boolean isGmsIntent(Intent intent) {
+        if (intent == null) return false;
+        String action = intent.getAction();
+        if (action == null) return false;
+        return action.startsWith("com.google.android.gms")
+                || action.startsWith("com.google.android.gsf")
+                || action.contains(".gms.")
+                || action.contains(".play.");
+    }
+
+    private static InstallResult installPackages(Set<String> list, int userId) {
+        FeaturesticBoxCore sFeaturesticBoxCore = FeaturesticBoxCore.get();
+        for (String packageName : list) {
+            if (sFeaturesticBoxCore.isInstalled(packageName, userId)) {
+                continue;
+            }
+
+            try {
+                FeaturesticBoxCore.getContext().getPackageManager().getApplicationInfo(packageName, 0);
+            } catch (PackageManager.NameNotFoundException ignored) {
+                continue;
+            }
+
+            InstallResult installResult = sFeaturesticBoxCore.installPackageAsUser(packageName, userId);
+            if (!installResult.success) {
+                return installResult;
+            }
+        }
+        return new InstallResult();
+    }
+
+    private static void uninstallPackages(Set<String> list, int userId) {
+        FeaturesticBoxCore sFeaturesticBoxCore = FeaturesticBoxCore.get();
+        for (String packageName : list) {
+            sFeaturesticBoxCore.uninstallPackageAsUser(packageName, userId);
+        }
+    }
+
+    public static InstallResult installGApps(int userId) {
+        Set<String> googleApps = new HashSet<>();
+        googleApps.addAll(GOOGLE_SERVICE);
+        googleApps.addAll(GOOGLE_APP);
+
+        InstallResult installResult = installPackages(googleApps, userId);
+        if (!installResult.success) {
+            uninstallGApps(userId);
+            return installResult;
+        }
+        return installResult;
+    }
+
+    public static void uninstallGApps(int userId) {
+        uninstallPackages(GOOGLE_SERVICE, userId);
+        uninstallPackages(GOOGLE_APP, userId);
+    }
+
+    public static void remove(String packageName) {
+        GOOGLE_SERVICE.remove(packageName);
+        GOOGLE_APP.remove(packageName);
+    }
+
+    public static boolean isSupportGms() {
+        try {
+            FeaturesticBoxCore.getPackageManager().getPackageInfo(GMS_PKG, 0);
+            return true;
+        } catch (PackageManager.NameNotFoundException ignored) {
+            return false;
+        }
+    }
+
+    public static boolean isInstalledGoogleService(int userId) {
+        return FeaturesticBoxCore.get().isInstalled(GMS_PKG, userId);
+    }
+}

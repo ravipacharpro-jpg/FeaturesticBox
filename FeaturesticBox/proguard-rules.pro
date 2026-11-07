@@ -1,0 +1,28 @@
+-renamesourcefileattribute FeaturesticGuard
+-repackageclasses 'f.b'
+-allowaccessmodification
+
+-keep class com.featurestic.box.core.system.api.MetaActivationManager { *; }
+-keep class net_62v.external.** { *; }
+-keep class com.featurestic.box.** { *; }
+-keep class top.niunaijun.blackbox.** { *; }
+-keep class com.vcore.** { *; }
+-keep class top.niunaijun.jnihook.** { *; }
+-keep class black.** { *; }
+-keep class android.** { *; }
+-keep class com.android.** { *; }
+
+-keepclassmembers class com.featurestic.box.FeaturesticBoxCore {
+    public *;
+    public native *;
+}
+
+-keepclassmembers class com.featurestic.box.core.RNative {
+    *;
+    native <methods>;
+}
+
+-dontwarn okhttp3.**
+-dontwarn okio.**
+-keep class okhttp3.** { *; }
+-keep class okio.** { *; }
