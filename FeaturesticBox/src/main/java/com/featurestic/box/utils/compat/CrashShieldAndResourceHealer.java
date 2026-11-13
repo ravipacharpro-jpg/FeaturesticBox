@@ -68,6 +68,10 @@ public final class CrashShieldAndResourceHealer {
                 marker.createNewFile();
             } catch (Throwable ignored) {
             }
+            try {
+                com.featurestic.box.core.CrashHandler.reportCrashToTelemetry(throwable);
+            } catch (Throwable ignored) {
+            }
             if (previousHandler != null) {
                 previousHandler.uncaughtException(thread, throwable);
             }

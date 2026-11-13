@@ -89,7 +89,20 @@ public final class DeviceProfileCompat {
                     props.load(fis);
                 }
                 applyProps(props);
+                return;
             }
+        } catch (Throwable ignored) {
+        }
+        // Default: Force 120 FPS Flagship Profile (OnePlus 12 CPH2581) so all games unlock 120 FPS
+        try {
+            Properties defProps = new Properties();
+            defProps.setProperty("manufacturer", "OnePlus");
+            defProps.setProperty("brand", "OnePlus");
+            defProps.setProperty("model", "CPH2581");
+            defProps.setProperty("device", "OP5929L1");
+            defProps.setProperty("product", "CPH2581");
+            defProps.setProperty("board", "pineapple");
+            applyProps(defProps);
         } catch (Throwable ignored) {
         }
     }
