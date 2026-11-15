@@ -371,7 +371,7 @@ public class FeaturesticBoxCore extends ClientConfiguration {
         }
         ensureInitialized(sContext);
         ClientConfiguration cfg = mClientConfiguration;
-        if (cfg != null && cfg.isEnableLauncherActivity()) {
+        if (cfg == null || cfg.isEnableLauncherActivity()) {
             LauncherActivity.launch(intent, userId);
         } else {
             getBActivityManager().startActivity(intent, userId);

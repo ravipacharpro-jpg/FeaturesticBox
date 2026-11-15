@@ -32,7 +32,7 @@ public abstract class ClientConfiguration {
     }
 
     public boolean isEnableLauncherActivity() {
-        return false;
+        return true;
     }
 
     public boolean requestInstallPackage(File file) {

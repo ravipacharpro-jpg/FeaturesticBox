@@ -2,25 +2,28 @@ package com.featurestic.box.app;
 
 import android.app.Activity;
 import android.content.Intent;
-import android.content.pm.PackageInfo;
 import android.graphics.Color;
-import android.graphics.Typeface;
-import android.graphics.drawable.Drawable;
-import android.graphics.drawable.GradientDrawable;
+import android.media.MediaPlayer;
+import android.net.Uri;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
-import android.util.TypedValue;
 import android.view.Gravity;
-import android.widget.ImageView;
-import android.widget.LinearLayout;
-import android.widget.ProgressBar;
-import android.widget.TextView;
+import android.view.View;
+import android.view.Window;
+import android.view.WindowManager;
+import android.widget.FrameLayout;
+import android.widget.VideoView;
 
 import androidx.annotation.Nullable;
 
 import com.featurestic.box.FeaturesticBoxCore;
 import com.featurestic.box.utils.Slog;
+
+import java.io.File;
+import java.io.FileOutputStream;
+import java.io.InputStream;
 
 public class LauncherActivity extends Activity {
     public static final String TAG = "SplashScreen";
@@ -28,9 +31,11 @@ public class LauncherActivity extends Activity {
     public static final String KEY_INTENT = "launch_intent";
     public static final String KEY_PKG = "launch_pkg";
     public static final String KEY_USER_ID = "launch_user_id";
+
     private volatile boolean isRunning = false;
     private volatile boolean mLaunchDispatched = false;
     private final Handler mHandler = new Handler(Looper.getMainLooper());
+    private VideoView mVideoView;
 
     public static void launch(Intent intent, int userId) {
         Intent splash = new Intent();
@@ -54,6 +59,23 @@ public class LauncherActivity extends Activity {
         } catch (Throwable ignored) {
         }
         super.onCreate(savedInstanceState);
+
+        // Immersive Fullscreen Mode
+        try {
+            requestWindowFeature(Window.FEATURE_NO_TITLE);
+            getWindow().setFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN,
+                    WindowManager.LayoutParams.FLAG_FULLSCREEN);
+            getWindow().setBackgroundDrawableResource(android.R.color.black);
+            View decorView = getWindow().getDecorView();
+            int uiOptions = View.SYSTEM_UI_FLAG_FULLSCREEN
+                    | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                    | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+                    | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                    | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION;
+            decorView.setSystemUiVisibility(uiOptions);
+        } catch (Throwable ignored) {
+        }
+
         Intent intent = getIntent();
         if (intent == null) {
             finish();
@@ -66,129 +88,128 @@ public class LauncherActivity extends Activity {
             finish();
             return;
         }
-        if ((pkg == null || pkg.isEmpty()) && launchIntent.getComponent() != null) {
-            pkg = launchIntent.getComponent().getPackageName();
-        }
 
-        PackageInfo packageInfo = pkg != null
-                ? FeaturesticBoxCore.getBPackageManager().getPackageInfo(pkg, 0, userId)
-                : null;
-        Drawable icon = null;
-        String appLabel = pkg != null ? pkg : "Virtual Target";
-        if (packageInfo != null && packageInfo.applicationInfo != null) {
-            try {
-                icon = packageInfo.applicationInfo.loadIcon(FeaturesticBoxCore.getPackageManager());
-            } catch (Throwable ignored) {
+        File videoFile = extractIntroVideoIfNeeded();
+        if (videoFile != null && videoFile.exists() && videoFile.length() > 0) {
+            playIntroAndLaunch(videoFile, launchIntent, userId);
+        } else {
+            // Fallback: immediate launch if video is missing
+            dispatchTargetLaunch(launchIntent, userId);
+        }
+    }
+
+    private File extractIntroVideoIfNeeded() {
+        try {
+            File target = new File(getFilesDir(), "intro_4s.mp4");
+            if (target.exists() && target.length() >= 100000) {
+                return target;
             }
+            // Check assets in host context or current context
+            InputStream in = null;
             try {
-                CharSequence labelSeq = packageInfo.applicationInfo.loadLabel(FeaturesticBoxCore.getPackageManager());
-                if (labelSeq != null && labelSeq.length() > 0) {
-                    appLabel = labelSeq.toString();
+                in = getAssets().open("intro_4s.mp4");
+            } catch (Throwable t1) {
+                try {
+                    in = FeaturesticBoxCore.getContext().getAssets().open("intro_4s.mp4");
+                } catch (Throwable ignored) {
                 }
-            } catch (Throwable ignored) {
             }
+            if (in == null) {
+                return null;
+            }
+            File temp = new File(getFilesDir(), "intro_4s.tmp");
+            try (FileOutputStream out = new FileOutputStream(temp)) {
+                byte[] buf = new byte[8192];
+                int r;
+                while ((r = in.read(buf)) != -1) {
+                    out.write(buf, 0, r);
+                }
+                out.flush();
+            } finally {
+                try { in.close(); } catch (Throwable ignored) {}
+            }
+            if (temp.length() > 0) {
+                target.delete();
+                temp.renameTo(target);
+                return target;
+            }
+        } catch (Throwable t) {
+            Slog.e(TAG, "extractIntroVideoIfNeeded error", t);
         }
+        return null;
+    }
 
+    private void playIntroAndLaunch(File videoFile, Intent launchIntent, int userId) {
+        FrameLayout root = new FrameLayout(this);
+        root.setBackgroundColor(Color.BLACK);
+
+        mVideoView = new VideoView(this);
+        FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                Gravity.CENTER
+        );
+        mVideoView.setLayoutParams(lp);
+        root.addView(mVideoView);
+        setContentView(root);
+
+        mVideoView.setVideoPath(videoFile.getAbsolutePath());
+
+        mVideoView.setOnPreparedListener(new MediaPlayer.OnPreparedListener() {
+            @Override
+            public void onPrepared(MediaPlayer mp) {
+                try {
+                    mp.setLooping(false);
+                } catch (Throwable ignored) {}
+                mVideoView.start();
+            }
+        });
+
+        mVideoView.setOnCompletionListener(new MediaPlayer.OnCompletionListener() {
+            @Override
+            public void onCompletion(MediaPlayer mp) {
+                dispatchTargetLaunch(launchIntent, userId);
+            }
+        });
+
+        mVideoView.setOnErrorListener(new MediaPlayer.OnErrorListener() {
+            @Override
+            public boolean onError(MediaPlayer mp, int what, int extra) {
+                dispatchTargetLaunch(launchIntent, userId);
+                return true;
+            }
+        });
+
+        // 4-second hard dispatch safety timer
+        mHandler.postDelayed(() -> {
+            dispatchTargetLaunch(launchIntent, userId);
+        }, 4100L);
+
+        // Max safety finish
+        mHandler.postDelayed(() -> {
+            if (!isFinishing()) {
+                finish();
+            }
+        }, 9000L);
+    }
+
+    private void dispatchTargetLaunch(Intent launchIntent, int userId) {
+        if (mLaunchDispatched) {
+            return;
+        }
+        mLaunchDispatched = true;
         new Thread(() -> {
             try {
                 FeaturesticBoxCore.getBActivityManager().startActivity(launchIntent, userId);
             } catch (Throwable t) {
                 Slog.e(TAG, "Failed to start target activity", t);
+                mHandler.post(() -> {
+                    if (!isFinishing()) {
+                        finish();
+                    }
+                });
             }
-        }, "Featurestic-Instant-Launch").start();
-        finish();
-    }
-
-    private void buildEnterpriseSplashView(@Nullable Drawable appIcon, String appLabel) {
-        LinearLayout root = new LinearLayout(this);
-        root.setOrientation(LinearLayout.VERTICAL);
-        root.setGravity(Gravity.CENTER);
-        GradientDrawable bg = new GradientDrawable(
-                GradientDrawable.Orientation.TOP_BOTTOM,
-                new int[]{Color.parseColor("#0B0F19"), Color.parseColor("#111827"), Color.parseColor("#090D16")}
-        );
-        root.setBackground(bg);
-
-        LinearLayout card = new LinearLayout(this);
-        card.setOrientation(LinearLayout.VERTICAL);
-        card.setGravity(Gravity.CENTER_HORIZONTAL);
-        int padH = dp(32);
-        int padV = dp(28);
-        card.setPadding(padH, padV, padH, padV);
-
-        GradientDrawable cardBg = new GradientDrawable();
-        cardBg.setColor(Color.parseColor("#1A2333"));
-        cardBg.setCornerRadius(dp(22));
-        cardBg.setStroke(dp(1), Color.parseColor("#2E3C56"));
-        card.setBackground(cardBg);
-
-        ImageView ivIcon = new ImageView(this);
-        int iconSize = dp(76);
-        LinearLayout.LayoutParams iconLp = new LinearLayout.LayoutParams(iconSize, iconSize);
-        iconLp.bottomMargin = dp(16);
-        ivIcon.setLayoutParams(iconLp);
-        if (appIcon != null) {
-            ivIcon.setImageDrawable(appIcon);
-        }
-        card.addView(ivIcon);
-
-        TextView titleView = new TextView(this);
-        titleView.setText(appLabel);
-        titleView.setTextColor(Color.parseColor("#F9FAFB"));
-        titleView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 19);
-        titleView.setTypeface(Typeface.create("sans-serif-medium", Typeface.BOLD));
-        titleView.setGravity(Gravity.CENTER);
-        card.addView(titleView);
-
-        TextView subView = new TextView(this);
-        subView.setText("Featurestic Enterprise Sandbox • Zero-Lag Engine");
-        subView.setTextColor(Color.parseColor("#38BDF8"));
-        subView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
-        subView.setGravity(Gravity.CENTER);
-        LinearLayout.LayoutParams subLp = new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.WRAP_CONTENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT
-        );
-        subLp.topMargin = dp(6);
-        subLp.bottomMargin = dp(20);
-        subView.setLayoutParams(subLp);
-        card.addView(subView);
-
-        ProgressBar bar = new ProgressBar(this);
-        LinearLayout.LayoutParams barLp = new LinearLayout.LayoutParams(dp(34), dp(34));
-        bar.setLayoutParams(barLp);
-        card.addView(bar);
-
-        TextView statusView = new TextView(this);
-        statusView.setText("Mounting isolated VFS & anti-detection shield...");
-        statusView.setTextColor(Color.parseColor("#9CA3AF"));
-        statusView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11);
-        statusView.setGravity(Gravity.CENTER);
-        LinearLayout.LayoutParams stLp = new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.WRAP_CONTENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT
-        );
-        stLp.topMargin = dp(14);
-        statusView.setLayoutParams(stLp);
-        card.addView(statusView);
-
-        LinearLayout.LayoutParams cardLp = new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.WRAP_CONTENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT
-        );
-        cardLp.leftMargin = dp(28);
-        cardLp.rightMargin = dp(28);
-        root.addView(card, cardLp);
-
-        setContentView(root);
-    }
-
-    private int dp(int value) {
-        return (int) TypedValue.applyDimension(
-                TypedValue.COMPLEX_UNIT_DIP,
-                value,
-                getResources().getDisplayMetrics()
-        );
+        }, "Featurestic-Video-Launch").start();
     }
 
     @Override
@@ -210,6 +231,11 @@ public class LauncherActivity extends Activity {
     @Override
     protected void onDestroy() {
         mHandler.removeCallbacksAndMessages(null);
+        if (mVideoView != null) {
+            try {
+                mVideoView.stopPlayback();
+            } catch (Throwable ignored) {}
+        }
         super.onDestroy();
     }
 }
