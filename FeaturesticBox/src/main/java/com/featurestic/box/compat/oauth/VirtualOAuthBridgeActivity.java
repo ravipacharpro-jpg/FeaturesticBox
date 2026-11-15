@@ -1,5 +1,8 @@
 package com.featurestic.box.compat.oauth;
 
+import android.accounts.Account;
+import android.accounts.AccountManager;
+import android.accounts.AccountPicker;
 import android.annotation.SuppressLint;
 import android.app.Activity;
 import android.content.ComponentName;
@@ -52,6 +55,7 @@ public final class VirtualOAuthBridgeActivity extends Activity {
     private static final String AUTH_TAG = "FeaturesticAuth";
     private static final int REQUEST_AUTH_TAB = 0x5041;
     private static final int REQUEST_EXTERNAL_AUTH = 0x5042;
+    private static final int REQUEST_CHOOSE_GOOGLE_ACCOUNT = 0x5043;
     private static final long FACEBOOK_FALLBACK_WAIT_MS = 600L;
     private static final long FACEBOOK_HANDOFF_SETTLE_MS = 80L;
 
@@ -112,7 +116,7 @@ public final class VirtualOAuthBridgeActivity extends Activity {
             }
             String serverClientId = launchIntent.getStringExtra(
                     ExternalAuthRouter.EXTRA_GOOGLE_SERVER_CLIENT_ID);
-            launchGoogleWebLoginView(serverClientId);
+            launchGoogleNativeAccountPickerOrWebView(serverClientId);
             return;
         }
 
@@ -199,6 +203,216 @@ public final class VirtualOAuthBridgeActivity extends Activity {
                 facebookDiagnostic("session_started", RESULT_CANCELED, null, null, false);
             }
             launchAuthTab(authUri, lower(expectedRedirectUri.getScheme()), authProvider);
+        }
+    }
+
+    private void launchGoogleNativeAccountPickerOrWebView(final String serverClientId) {
+        try {
+            AccountManager am = AccountManager.get(this);
+            Account[] accounts = null;
+            try {
+                accounts = am.getAccountsByType("com.google");
+            } catch (Throwable ignored) {
+            }
+
+            if (accounts != null && accounts.length > 0) {
+                showPremiumGoogleAccountPicker(accounts, serverClientId);
+                return;
+            }
+
+            try {
+                Intent chooseIntent = AccountPicker.newChooseAccountIntent(
+                        null, null, new String[]{"com.google"}, false, null, null, null, null);
+                if (chooseIntent.resolveActivity(getPackageManager()) != null) {
+                    startActivityForResult(chooseIntent, REQUEST_CHOOSE_GOOGLE_ACCOUNT);
+                    return;
+                }
+            } catch (Throwable ignored) {
+            }
+
+            launchGoogleWebLoginView(serverClientId);
+        } catch (Throwable t) {
+            launchGoogleWebLoginView(serverClientId);
+        }
+    }
+
+    private void showPremiumGoogleAccountPicker(final Account[] accounts, final String serverClientId) {
+        try {
+            LinearLayout root = new LinearLayout(this);
+            root.setOrientation(LinearLayout.VERTICAL);
+            root.setGravity(Gravity.CENTER_HORIZONTAL);
+            root.setPadding(dp(16), dp(18), dp(16), dp(18));
+
+            android.graphics.drawable.GradientDrawable cardBg = new android.graphics.drawable.GradientDrawable();
+            cardBg.setColor(Color.parseColor("#150F24"));
+            cardBg.setCornerRadius(dp(24));
+            cardBg.setStroke(dp(2), Color.parseColor("#4A2E70"));
+            root.setBackground(cardBg);
+
+            LinearLayout header = new LinearLayout(this);
+            header.setOrientation(LinearLayout.VERTICAL);
+            header.setGravity(Gravity.CENTER_HORIZONTAL);
+            header.setPadding(0, dp(4), 0, dp(14));
+
+            TextView logoView = new TextView(this);
+            logoView.setText("G");
+            logoView.setTextSize(22f);
+            logoView.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
+            logoView.setGravity(Gravity.CENTER);
+            logoView.setTextColor(Color.WHITE);
+            android.graphics.drawable.GradientDrawable logoBg = new android.graphics.drawable.GradientDrawable();
+            logoBg.setShape(android.graphics.drawable.GradientDrawable.OVAL);
+            logoBg.setColors(new int[]{Color.parseColor("#A855F7"), Color.parseColor("#EC4899")});
+            logoView.setBackground(logoBg);
+            int logoSize = dp(44);
+            header.addView(logoView, new LinearLayout.LayoutParams(logoSize, logoSize));
+
+            TextView titleView = new TextView(this);
+            titleView.setText("Choose Google Account");
+            titleView.setTextColor(Color.parseColor("#F8F5FF"));
+            titleView.setTextSize(16.5f);
+            titleView.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
+            titleView.setPadding(0, dp(10), 0, dp(2));
+            header.addView(titleView);
+
+            TextView subtitleView = new TextView(this);
+            subtitleView.setText("1-Tap to continue to game");
+            subtitleView.setTextColor(Color.parseColor("#A99BBE"));
+            subtitleView.setTextSize(12.5f);
+            header.addView(subtitleView);
+
+            root.addView(header, new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+            android.view.View divider = new android.view.View(this);
+            divider.setBackgroundColor(Color.parseColor("#281C3D"));
+            root.addView(divider, new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, dp(1)));
+
+            android.widget.ScrollView scrollView = new android.widget.ScrollView(this);
+            LinearLayout listContainer = new LinearLayout(this);
+            listContainer.setOrientation(LinearLayout.VERTICAL);
+            listContainer.setPadding(0, dp(8), 0, dp(8));
+
+            int[][] avatarGradients = new int[][]{
+                {Color.parseColor("#A855F7"), Color.parseColor("#7C3AED")},
+                {Color.parseColor("#EC4899"), Color.parseColor("#BE185D")},
+                {Color.parseColor("#3B82F6"), Color.parseColor("#1D4ED8")},
+                {Color.parseColor("#10B981"), Color.parseColor("#047857")},
+                {Color.parseColor("#F59E0B"), Color.parseColor("#B45309")}
+            };
+
+            for (int i = 0; i < accounts.length; i++) {
+                final Account account = accounts[i];
+                final String email = account.name;
+                String initial = (email != null && !email.isEmpty())
+                        ? email.substring(0, 1).toUpperCase(Locale.US) : "G";
+                final String userName = (email != null && email.contains("@"))
+                        ? email.split("@")[0] : "Google User";
+
+                LinearLayout itemRow = new LinearLayout(this);
+                itemRow.setOrientation(LinearLayout.HORIZONTAL);
+                itemRow.setGravity(Gravity.CENTER_VERTICAL);
+                itemRow.setPadding(dp(12), dp(10), dp(12), dp(10));
+                itemRow.setClickable(true);
+                itemRow.setFocusable(true);
+
+                android.graphics.drawable.GradientDrawable itemBg = new android.graphics.drawable.GradientDrawable();
+                itemBg.setColor(Color.parseColor("#1E1730"));
+                itemBg.setCornerRadius(dp(14));
+                itemBg.setStroke(dp(1), Color.parseColor("#382352"));
+                itemRow.setBackground(itemBg);
+
+                TextView avatar = new TextView(this);
+                avatar.setText(initial);
+                avatar.setTextSize(16f);
+                avatar.setTextColor(Color.WHITE);
+                avatar.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
+                avatar.setGravity(Gravity.CENTER);
+                android.graphics.drawable.GradientDrawable avBg = new android.graphics.drawable.GradientDrawable();
+                avBg.setShape(android.graphics.drawable.GradientDrawable.OVAL);
+                int[] grad = avatarGradients[i % avatarGradients.length];
+                avBg.setColors(grad);
+                avatar.setBackground(avBg);
+                int avSize = dp(38);
+                itemRow.addView(avatar, new LinearLayout.LayoutParams(avSize, avSize));
+
+                LinearLayout textCol = new LinearLayout(this);
+                textCol.setOrientation(LinearLayout.VERTICAL);
+                textCol.setPadding(dp(12), 0, 0, 0);
+
+                TextView nameTv = new TextView(this);
+                nameTv.setText(userName);
+                nameTv.setTextSize(14f);
+                nameTv.setTextColor(Color.parseColor("#F8F5FF"));
+                nameTv.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
+                textCol.addView(nameTv);
+
+                TextView emailTv = new TextView(this);
+                emailTv.setText(email);
+                emailTv.setTextSize(12f);
+                emailTv.setTextColor(Color.parseColor("#A99BBE"));
+                textCol.addView(emailTv);
+
+                LinearLayout.LayoutParams textLp = new LinearLayout.LayoutParams(
+                        0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+                itemRow.addView(textCol, textLp);
+
+                TextView arrow = new TextView(this);
+                arrow.setText("➔");
+                arrow.setTextColor(Color.parseColor("#A855F7"));
+                arrow.setTextSize(14f);
+                itemRow.addView(arrow);
+
+                itemRow.setOnClickListener(v -> {
+                    callbackDispatched = true;
+                    android.widget.Toast.makeText(this, "Signing in with " + email + "...", android.widget.Toast.LENGTH_SHORT).show();
+                    finishGoogleWebSignInWithProfile(email, userName);
+                });
+
+                LinearLayout.LayoutParams itemLp = new LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+                itemLp.setMargins(0, dp(4), 0, dp(4));
+                listContainer.addView(itemRow, itemLp);
+            }
+
+            scrollView.addView(listContainer, new ViewGroup.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+            LinearLayout.LayoutParams scrollLp = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f);
+            root.addView(scrollView, scrollLp);
+
+            LinearLayout footer = new LinearLayout(this);
+            footer.setOrientation(LinearLayout.HORIZONTAL);
+            footer.setGravity(Gravity.CENTER_VERTICAL);
+            footer.setPadding(0, dp(12), 0, dp(4));
+
+            TextView cancelBtn = new TextView(this);
+            cancelBtn.setText("Cancel");
+            cancelBtn.setTextColor(Color.parseColor("#A99BBE"));
+            cancelBtn.setTextSize(13f);
+            cancelBtn.setPadding(dp(10), dp(8), dp(10), dp(8));
+            cancelBtn.setOnClickListener(v -> completeBridgeResult(RESULT_CANCELED, null));
+            footer.addView(cancelBtn);
+
+            android.view.View spacer = new android.view.View(this);
+            footer.addView(spacer, new LinearLayout.LayoutParams(0, 1, 1f));
+
+            TextView useAnotherBtn = new TextView(this);
+            useAnotherBtn.setText("+ Other Account (Web)");
+            useAnotherBtn.setTextColor(Color.parseColor("#A855F7"));
+            useAnotherBtn.setTextSize(13f);
+            useAnotherBtn.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
+            useAnotherBtn.setPadding(dp(10), dp(8), dp(10), dp(8));
+            useAnotherBtn.setOnClickListener(v -> launchGoogleWebLoginView(serverClientId));
+            footer.addView(useAnotherBtn);
+
+            root.addView(footer, new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+            setContentView(root);
+        } catch (Throwable t) {
+            launchGoogleWebLoginView(serverClientId);
         }
     }
 
@@ -847,6 +1061,20 @@ public final class VirtualOAuthBridgeActivity extends Activity {
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
+
+        if (requestCode == REQUEST_CHOOSE_GOOGLE_ACCOUNT) {
+            if (resultCode == RESULT_OK && data != null) {
+                String accountName = data.getStringExtra(android.accounts.AccountManager.KEY_ACCOUNT_NAME);
+                if (accountName != null && accountName.contains("@")) {
+                    callbackDispatched = true;
+                    String displayName = accountName.split("@")[0];
+                    finishGoogleWebSignInWithProfile(accountName.trim(), displayName);
+                    return;
+                }
+            }
+            completeBridgeResult(RESULT_CANCELED, null);
+            return;
+        }
 
         if (requestCode == REQUEST_EXTERNAL_AUTH && externalAuthMode) {
             String providerPkg = providerPackageFromBridge();
