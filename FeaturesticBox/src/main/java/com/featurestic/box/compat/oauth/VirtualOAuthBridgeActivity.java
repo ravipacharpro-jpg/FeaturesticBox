@@ -641,13 +641,49 @@ public final class VirtualOAuthBridgeActivity extends Activity {
     @SuppressLint("SetJavaScriptEnabled")
     private void launchEmbeddedOAuthWebView(Uri targetAuthUri) {
         try {
+            final boolean isTwitter = twitterFlow || isTwitterHost(targetAuthUri);
+            final boolean isFacebook = facebookFlow || isFacebookHost(targetAuthUri);
+            final boolean isDiscord = isDiscordHost(targetAuthUri);
+
+            final String brandTitle;
+            final String brandSubtitle;
+            final String brandIconText;
+            final int brandColor;
+            final int brandBgColor;
+
+            if (isTwitter) {
+                brandTitle = "Sign in with 𝕏";
+                brandSubtitle = "Authorize Battlegrounds Mobile India";
+                brandIconText = "𝕏";
+                brandColor = Color.parseColor("#1D9BF0");
+                brandBgColor = Color.parseColor("#000000");
+            } else if (isFacebook) {
+                brandTitle = "Log in with Facebook";
+                brandSubtitle = "Continue to Battlegrounds Mobile India";
+                brandIconText = "f";
+                brandColor = Color.parseColor("#1877F2");
+                brandBgColor = Color.parseColor("#1877F2");
+            } else if (isDiscord) {
+                brandTitle = "Authorize with Discord";
+                brandSubtitle = "Connect to Battlegrounds Mobile India";
+                brandIconText = "D";
+                brandColor = Color.parseColor("#5865F2");
+                brandBgColor = Color.parseColor("#5865F2");
+            } else {
+                brandTitle = "Sign In";
+                brandSubtitle = "Continue to game";
+                brandIconText = "★";
+                brandColor = Color.parseColor("#A855F7");
+                brandBgColor = Color.parseColor("#A855F7");
+            }
+
             LinearLayout root = new LinearLayout(this);
             root.setOrientation(LinearLayout.VERTICAL);
-            android.graphics.drawable.GradientDrawable compactBg = new android.graphics.drawable.GradientDrawable();
-            compactBg.setColor(Color.parseColor("#F51C1C1E"));
-            compactBg.setCornerRadius(dp(22));
-            compactBg.setStroke(dp(1), Color.parseColor("#33FFFFFF"));
-            root.setBackground(compactBg);
+            android.graphics.drawable.GradientDrawable cardBg = new android.graphics.drawable.GradientDrawable();
+            cardBg.setColor(Color.parseColor("#13151B"));
+            cardBg.setCornerRadius(dp(20));
+            cardBg.setStroke(dp(1.5f), Color.parseColor("#2A2E3D"));
+            root.setBackground(cardBg);
             if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.LOLLIPOP) {
                 root.setClipToOutline(true);
             }
@@ -655,27 +691,55 @@ public final class VirtualOAuthBridgeActivity extends Activity {
             LinearLayout header = new LinearLayout(this);
             header.setOrientation(LinearLayout.HORIZONTAL);
             header.setGravity(Gravity.CENTER_VERTICAL);
-            header.setBackgroundColor(Color.parseColor("#1C1F26"));
-            int padH = dp(14);
-            int padV = dp(10);
-            header.setPadding(padH, padV, padH, padV);
+            header.setBackgroundColor(Color.parseColor("#191C24"));
+            header.setPadding(dp(14), dp(10), dp(14), dp(10));
 
-            TextView titleView = new TextView(this);
-            titleView.setText(targetAuthUri.getHost() != null ? targetAuthUri.getHost() : "Sign In");
-            titleView.setTextColor(Color.WHITE);
-            titleView.setTextSize(15f);
-            LinearLayout.LayoutParams titleLp = new LinearLayout.LayoutParams(
-                    0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
-            header.addView(titleView, titleLp);
+            TextView brandIconView = new TextView(this);
+            brandIconView.setText(brandIconText);
+            brandIconView.setTextSize(17f);
+            brandIconView.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
+            brandIconView.setGravity(Gravity.CENTER);
+            brandIconView.setTextColor(Color.WHITE);
+            android.graphics.drawable.GradientDrawable iconBg = new android.graphics.drawable.GradientDrawable();
+            iconBg.setShape(android.graphics.drawable.GradientDrawable.OVAL);
+            iconBg.setColor(brandBgColor);
+            iconBg.setStroke(dp(1), brandColor);
+            brandIconView.setBackground(iconBg);
+            int iconPx = dp(36);
+            header.addView(brandIconView, new LinearLayout.LayoutParams(iconPx, iconPx));
 
-            final String installedDiscord = isDiscordHost(targetAuthUri)
+            LinearLayout textCol = new LinearLayout(this);
+            textCol.setOrientation(LinearLayout.VERTICAL);
+            textCol.setPadding(dp(10), 0, dp(10), 0);
+
+            TextView titleTv = new TextView(this);
+            titleTv.setText(brandTitle);
+            titleTv.setTextColor(Color.WHITE);
+            titleTv.setTextSize(14.5f);
+            titleTv.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
+            textCol.addView(titleTv);
+
+            TextView subTv = new TextView(this);
+            subTv.setText(brandSubtitle);
+            subTv.setTextColor(Color.parseColor("#8E92A4"));
+            subTv.setTextSize(11f);
+            textCol.addView(subTv);
+
+            header.addView(textCol, new LinearLayout.LayoutParams(
+                    0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
+            final String installedDiscord = isDiscord
                     ? ExternalAuthRouter.resolveInstalledDiscordPackage() : null;
             if (installedDiscord != null) {
                 TextView openAppBtn = new TextView(this);
-                openAppBtn.setText("Open Discord App");
-                openAppBtn.setTextColor(Color.parseColor("#5865F2"));
-                openAppBtn.setTextSize(13f);
-                openAppBtn.setPadding(dp(10), dp(4), dp(10), dp(4));
+                openAppBtn.setText("App");
+                openAppBtn.setTextColor(Color.WHITE);
+                openAppBtn.setTextSize(11.5f);
+                android.graphics.drawable.GradientDrawable appBtnBg = new android.graphics.drawable.GradientDrawable();
+                appBtnBg.setColor(Color.parseColor("#5865F2"));
+                appBtnBg.setCornerRadius(dp(12));
+                openAppBtn.setBackground(appBtnBg);
+                openAppBtn.setPadding(dp(9), dp(4), dp(9), dp(4));
                 openAppBtn.setOnClickListener(v -> {
                     try {
                         Intent appIntent = new Intent(Intent.ACTION_VIEW, targetAuthUri);
@@ -687,64 +751,43 @@ public final class VirtualOAuthBridgeActivity extends Activity {
                     } catch (Throwable ignored) {
                     }
                 });
-                header.addView(openAppBtn);
-            }
-
-            if (twitterFlow) {
-                TextView authNowBtn = new TextView(this);
-                authNowBtn.setText("Authorize");
-                authNowBtn.setTextColor(Color.parseColor("#30D158"));
-                authNowBtn.setTextSize(13f);
-                authNowBtn.setPadding(dp(10), dp(4), dp(10), dp(4));
-                authNowBtn.setOnClickListener(v -> {
-                    if (embeddedWebView != null && targetAuthUri != null) {
-                        WebViewCompat.syncTwitterAndXCookies();
-                        String initialUrl = targetAuthUri.toString();
-            if (WebViewCompat.consumeForceFreshWebLogin()) {
-                WebViewCompat.clearAllWebLoginSessions(this, embeddedWebView);
-                WebViewCompat.consumeForceFreshWebLogin();
-                initialUrl = WebViewCompat.appendForceLoginParam(initialUrl);
-            }
-            java.util.Map<String, String> extraHeaders = new java.util.HashMap<>();
-            extraHeaders.put("X-Requested-With", "com.android.chrome");
-            embeddedWebView.loadUrl(initialUrl, extraHeaders);
-                        android.widget.Toast.makeText(
-                                VirtualOAuthBridgeActivity.this,
-                                "Opening Twitter Authorize screen...",
-                                android.widget.Toast.LENGTH_SHORT).show();
-                    }
-                });
-                header.addView(authNowBtn);
+                LinearLayout.LayoutParams appLp = new LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+                appLp.setMargins(0, 0, dp(8), 0);
+                header.addView(openAppBtn, appLp);
             }
 
             TextView switchIdBtn = new TextView(this);
             switchIdBtn.setText("Switch ID");
-            switchIdBtn.setTextColor(Color.parseColor("#0A84FF"));
-            switchIdBtn.setTextSize(13f);
-            switchIdBtn.setPadding(dp(10), dp(4), dp(10), dp(4));
+            switchIdBtn.setTextColor(Color.parseColor("#A99BBE"));
+            switchIdBtn.setTextSize(11.5f);
+            android.graphics.drawable.GradientDrawable pillBg = new android.graphics.drawable.GradientDrawable();
+            pillBg.setColor(Color.parseColor("#262936"));
+            pillBg.setCornerRadius(dp(12));
+            switchIdBtn.setBackground(pillBg);
+            switchIdBtn.setPadding(dp(9), dp(4), dp(9), dp(4));
             switchIdBtn.setOnClickListener(v -> {
                 if (embeddedWebView != null && targetAuthUri != null) {
-                    WebViewCompat.clearAllWebLoginSessions(
-                            VirtualOAuthBridgeActivity.this, embeddedWebView);
+                    WebViewCompat.clearAllWebLoginSessions(VirtualOAuthBridgeActivity.this, embeddedWebView);
                     WebViewCompat.consumeForceFreshWebLogin();
                     String freshUrl = WebViewCompat.appendForceLoginParam(targetAuthUri.toString());
                     java.util.Map<String, String> headers = new java.util.HashMap<>();
                     headers.put("X-Requested-With", "com.android.chrome");
                     embeddedWebView.loadUrl(freshUrl, headers);
-                    android.widget.Toast.makeText(
-                            VirtualOAuthBridgeActivity.this,
-                            "Old Web Login Cleared! Enter your New ID now.",
-                            android.widget.Toast.LENGTH_SHORT).show();
+                    android.widget.Toast.makeText(VirtualOAuthBridgeActivity.this, "Session reset. Enter account credentials.", android.widget.Toast.LENGTH_SHORT).show();
                 }
             });
-            header.addView(switchIdBtn);
+            LinearLayout.LayoutParams pillLp = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            pillLp.setMargins(0, 0, dp(8), 0);
+            header.addView(switchIdBtn, pillLp);
 
             TextView closeBtn = new TextView(this);
-            closeBtn.setText("Close");
-            closeBtn.setTextSize(13f);
-            closeBtn.setTextColor(Color.WHITE);
+            closeBtn.setText("✕");
+            closeBtn.setTextColor(Color.parseColor("#8E92A4"));
             closeBtn.setTextSize(16f);
-            closeBtn.setPadding(dp(12), dp(2), dp(4), dp(2));
+            closeBtn.setGravity(Gravity.CENTER);
+            closeBtn.setPadding(dp(6), dp(4), dp(6), dp(4));
             closeBtn.setOnClickListener(v -> cancelEmbeddedWebView());
             header.addView(closeBtn);
 

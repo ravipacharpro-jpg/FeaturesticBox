@@ -1,0 +1,77 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="240dp"
+    android:height="240dp"
+    android:viewportWidth="1000"
+    android:viewportHeight="1000">
+
+    <!-- 3D Left Under-Fold Bridge -->
+    <path
+        android:pathData="M292,412 L365,365 L445,445 L380,548 Z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:startX="292"
+                android:startY="380"
+                android:endX="440"
+                android:endY="540"
+                android:type="linear">
+                <item android:offset="0.0" android:color="#FF6A1BFF" />
+                <item android:offset="0.5" android:color="#FF2D14C4" />
+                <item android:offset="1.0" android:color="#FF0A1D78" />
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <!-- Lower Diagonal Stem (Glowing Cyan to Sapphire) -->
+    <path
+        android:pathData="M370,556 L542,556 L415,745 C398,772 378,793 348,793 L292,793 L292,735 C292,705 296,682 310,660 Z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:startX="300"
+                android:startY="793"
+                android:endX="520"
+                android:endY="556"
+                android:type="linear">
+                <item android:offset="0.0" android:color="#FF02FFFF" />
+                <item android:offset="0.55" android:color="#FF00D2FF" />
+                <item android:offset="1.0" android:color="#FF1A5CFF" />
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <!-- Middle Crossbar + Upper Stem Ribbon -->
+    <path
+        android:pathData="M352,585 L418,472 C436,442 455,438 482,438 L688,438 L614,542 C598,558 578,558 552,558 L452,558 C412,558 382,568 352,585 Z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:startX="352"
+                android:startY="540"
+                android:endX="688"
+                android:endY="445"
+                android:type="linear">
+                <item android:offset="0.0" android:color="#FF3848FF" />
+                <item android:offset="0.5" android:color="#FF00A6FF" />
+                <item android:offset="1.0" android:color="#FF02FAFF" />
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <!-- Top Horizontal Ribbon with Rounded Left Fold (Magenta -> Violet -> Electric Blue -> Cyan) -->
+    <path
+        android:pathData="M292,412 L366,288 C388,252 415,245 450,245 L818,245 L742,350 C726,368 704,368 678,368 L360,368 C322,368 298,384 292,412 Z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:startX="292"
+                android:startY="355"
+                android:endX="818"
+                android:endY="255"
+                android:type="linear">
+                <item android:offset="0.0" android:color="#FFF222FF" />
+                <item android:offset="0.28" android:color="#FF831EFF" />
+                <item android:offset="0.64" android:color="#FF2468FF" />
+                <item android:offset="1.0" android:color="#FF04E8FF" />
+            </gradient>
+        </aapt:attr>
+    </path>
+</vector>
