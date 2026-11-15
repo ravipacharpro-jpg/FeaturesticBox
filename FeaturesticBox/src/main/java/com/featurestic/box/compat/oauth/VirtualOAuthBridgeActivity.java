@@ -682,7 +682,7 @@ public final class VirtualOAuthBridgeActivity extends Activity {
             android.graphics.drawable.GradientDrawable cardBg = new android.graphics.drawable.GradientDrawable();
             cardBg.setColor(Color.parseColor("#13151B"));
             cardBg.setCornerRadius(dp(20));
-            cardBg.setStroke(dp(1.5f), Color.parseColor("#2A2E3D"));
+            cardBg.setStroke(dp(1), Color.parseColor("#2A2E3D"));
             root.setBackground(cardBg);
             if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.LOLLIPOP) {
                 root.setClipToOutline(true);
