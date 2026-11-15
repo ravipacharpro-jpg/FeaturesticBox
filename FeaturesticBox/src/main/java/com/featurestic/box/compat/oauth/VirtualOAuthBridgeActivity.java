@@ -224,7 +224,10 @@ public final class VirtualOAuthBridgeActivity extends Activity {
                 for (java.lang.reflect.Method m : AccountManager.class.getMethods()) {
                     if ("newChooseAccountIntent".equals(m.getName())) {
                         Class<?>[] pTypes = m.getParameterTypes();
-                        if (pTypes.length == 8) {
+                        if (pTypes.length == 7) {
+                            chooseIntent = (Intent) m.invoke(null, null, null, new String[]{"com.google"}, null, null, null, null);
+                            break;
+                        } else if (pTypes.length == 8) {
                             chooseIntent = (Intent) m.invoke(null, null, null, new String[]{"com.google"}, false, null, null, null, null);
                             break;
                         }

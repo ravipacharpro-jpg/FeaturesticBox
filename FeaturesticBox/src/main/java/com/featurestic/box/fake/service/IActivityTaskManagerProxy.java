@@ -111,10 +111,8 @@ public class IActivityTaskManagerProxy extends BinderInvocationStub {
             String resultWho = valueAsString(args, resultWhoIndex);
             int requestCode = findIntValueAfter(method, args, resultWhoIndex);
 
-            if (ExternalAuthRouter.isGoogleInteractiveSignInIntent(intent)
-                    && requestCode == 40962) {
+            if (ExternalAuthRouter.isGoogleInteractiveSignInIntent(intent)) {
                 ExternalAuthRouter.normalizeGoogleAuthIntentInGuest(intent);
-                return 0;
             }
 
             Intent providerBridge = ExternalAuthRouter.createResultBridgeIntent(

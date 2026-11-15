@@ -189,6 +189,12 @@ public final class ExternalAuthRouter {
                 return true;
             }
         }
+        if (comp != null && comp.getClassName() != null) {
+            String lowerCls = comp.getClassName().toLowerCase(Locale.US);
+            if (lowerCls.contains("signin") || lowerCls.contains("accountpicker") || lowerCls.contains("chooseaccount")) {
+                return true;
+            }
+        }
         return false;
     }
 

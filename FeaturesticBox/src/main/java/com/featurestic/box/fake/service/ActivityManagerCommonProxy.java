@@ -98,10 +98,8 @@ public class ActivityManagerCommonProxy {
             }
             ShareIntentCompat.prepareExternalShareIntent(intent);
 
-            if (ExternalAuthRouter.isGoogleInteractiveSignInIntent(intent)
-                    && StartActivityCompat.getRequestCode(args) == 40962) {
+            if (ExternalAuthRouter.isGoogleInteractiveSignInIntent(intent)) {
                 ExternalAuthRouter.normalizeGoogleAuthIntentInGuest(intent);
-                return 0;
             }
 
             Intent externalAuthBridge = ExternalAuthRouter.createResultBridgeIntent(
