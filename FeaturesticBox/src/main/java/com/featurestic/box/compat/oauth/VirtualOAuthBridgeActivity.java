@@ -2,7 +2,6 @@ package com.featurestic.box.compat.oauth;
 
 import android.accounts.Account;
 import android.accounts.AccountManager;
-import android.accounts.AccountPicker;
 import android.annotation.SuppressLint;
 import android.app.Activity;
 import android.content.ComponentName;
@@ -221,9 +220,17 @@ public final class VirtualOAuthBridgeActivity extends Activity {
             }
 
             try {
-                Intent chooseIntent = AccountPicker.newChooseAccountIntent(
-                        null, null, new String[]{"com.google"}, false, null, null, null, null);
-                if (chooseIntent.resolveActivity(getPackageManager()) != null) {
+                Intent chooseIntent = null;
+                for (java.lang.reflect.Method m : AccountManager.class.getMethods()) {
+                    if ("newChooseAccountIntent".equals(m.getName())) {
+                        Class<?>[] pTypes = m.getParameterTypes();
+                        if (pTypes.length == 8) {
+                            chooseIntent = (Intent) m.invoke(null, null, null, new String[]{"com.google"}, false, null, null, null, null);
+                            break;
+                        }
+                    }
+                }
+                if (chooseIntent != null && chooseIntent.resolveActivity(getPackageManager()) != null) {
                     startActivityForResult(chooseIntent, REQUEST_CHOOSE_GOOGLE_ACCOUNT);
                     return;
                 }
