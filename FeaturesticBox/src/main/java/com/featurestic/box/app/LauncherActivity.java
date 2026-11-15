@@ -89,33 +89,14 @@ public class LauncherActivity extends Activity {
             }
         }
 
-        buildEnterpriseSplashView(icon, appLabel);
-
-        mHandler.postDelayed(() -> {
-            if (isFinishing() || isDestroyed()) {
-                return;
+        new Thread(() -> {
+            try {
+                FeaturesticBoxCore.getBActivityManager().startActivity(launchIntent, userId);
+            } catch (Throwable t) {
+                Slog.e(TAG, "Failed to start target activity", t);
             }
-            new Thread(() -> {
-                try {
-                    FeaturesticBoxCore.getBActivityManager().startActivity(launchIntent, userId);
-                    mLaunchDispatched = true;
-                } catch (Throwable t) {
-                    Slog.e(TAG, "Failed to start target activity", t);
-                    runOnUiThread(() -> {
-                        if (!isFinishing()) {
-                            finish();
-                        }
-                    });
-                }
-            }, "Featurestic-Splash-Launch").start();
-        }, 120L);
-
-        // Fallback safety timeout so splash never hangs indefinitely if launch fails silently
-        mHandler.postDelayed(() -> {
-            if (!isFinishing() && !isDestroyed()) {
-                finish();
-            }
-        }, 15000L);
+        }, "Featurestic-Instant-Launch").start();
+        finish();
     }
 
     private void buildEnterpriseSplashView(@Nullable Drawable appIcon, String appLabel) {
