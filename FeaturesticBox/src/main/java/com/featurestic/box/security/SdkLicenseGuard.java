@@ -36,11 +36,11 @@ public class SdkLicenseGuard {
     private static volatile long sTokenExpiryMs = 0L;
     private static final AtomicBoolean sVerifying = new AtomicBoolean(false);
 
-    // XOR Encrypted Endpoint: https://featurestic-box-panel.onrender.com/connect
+    // XOR Encrypted Endpoint: https://featurestic-box-panel.vercel.app/api/public/connect
     private static final int[] ENC_ENDPOINT = {
             50, 46, 46, 42, 41, 96, 117, 117, 60, 63, 59, 46, 47, 40, 63, 41, 46, 51, 57, 119,
-            56, 53, 34, 119, 42, 59, 52, 63, 54, 116, 53, 52, 40, 63, 52, 62, 63, 40, 116, 57,
-            53, 55, 117, 57, 53, 52, 52, 63, 57, 46
+            56, 53, 34, 119, 42, 59, 52, 63, 54, 116, 44, 63, 40, 57, 63, 54, 116, 59, 42, 42,
+            117, 59, 42, 51, 117, 42, 47, 56, 54, 51, 57, 117, 57, 53, 52, 52, 63, 57, 46
     };
     private static final int ENC_KEY = 0x5A;
 
