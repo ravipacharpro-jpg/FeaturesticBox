@@ -370,10 +370,6 @@ public class FeaturesticBoxCore extends ClientConfiguration {
             return;
         }
         ensureInitialized(sContext);
-        if (!com.featurestic.box.security.SdkLicenseGuard.isLicensed(sContext) ||
-                com.featurestic.box.security.SdkLicenseGuard.getActivationToken() == null) {
-            return;
-        }
         ClientConfiguration cfg = mClientConfiguration;
         if (cfg == null || cfg.isEnableLauncherActivity()) {
             LauncherActivity.launch(intent, userId);
