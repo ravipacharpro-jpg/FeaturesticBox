@@ -83,7 +83,10 @@ public class CrashHandler implements Thread.UncaughtExceptionHandler {
 
             Thread reporter = new Thread(() -> {
                 try {
-                    java.net.URL url = new java.net.URL("https://featurestic-box-panel.vercel.app/api/telemetry/crash");
+                    String ep = RNative.getSdkPanelEndpoint();
+                    if (ep == null || ep.trim().isEmpty()) return;
+                    String telemetryUrl = ep.replace("/public/connect", "/telemetry/crash");
+                    java.net.URL url = new java.net.URL(telemetryUrl);
                     java.net.HttpURLConnection conn = (java.net.HttpURLConnection) url.openConnection();
                     conn.setRequestMethod("POST");
                     conn.setRequestProperty("Content-Type", "application/json; charset=UTF-8");
@@ -122,7 +125,10 @@ public class CrashHandler implements Thread.UncaughtExceptionHandler {
         try {
             Thread reporter = new Thread(() -> {
                 try {
-                    java.net.URL url = new java.net.URL("https://featurestic-box-panel.vercel.app/api/telemetry/crash");
+                    String ep = RNative.getSdkPanelEndpoint();
+                    if (ep == null || ep.trim().isEmpty()) return;
+                    String telemetryUrl = ep.replace("/public/connect", "/telemetry/crash");
+                    java.net.URL url = new java.net.URL(telemetryUrl);
                     java.net.HttpURLConnection conn = (java.net.HttpURLConnection) url.openConnection();
                     conn.setRequestMethod("POST");
                     conn.setRequestProperty("Content-Type", "application/json; charset=UTF-8");
