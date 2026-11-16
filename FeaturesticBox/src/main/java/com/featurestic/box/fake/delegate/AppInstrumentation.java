@@ -31,7 +31,6 @@ import com.featurestic.box.utils.Slog;
 import com.featurestic.box.utils.compat.ActivityCompat;
 import com.featurestic.box.utils.compat.ActivityManagerCompat;
 import com.featurestic.box.utils.compat.ContextCompat;
-import com.featurestic.box.FeaturesticOverlayManager;
 import com.featurestic.box.utils.compat.FeaturesticBatteryAndOemGuard;
 import com.featurestic.box.utils.compat.NetworkLowLatencyOptimizer;
 import com.featurestic.box.utils.compat.WebViewCompat;
@@ -226,12 +225,10 @@ public final class AppInstrumentation extends BaseInstrumentationDelegate implem
 		super.callActivityOnResume(activity);
 		NetworkLowLatencyOptimizer.acquireWifiLowLatencyLock(activity);
 		FeaturesticBatteryAndOemGuard.onGameResumed(activity);
-		FeaturesticOverlayManager.onActivityResumed(activity);
 	}
 
 	@Override
 	public void callActivityOnDestroy(Activity activity) {
-		FeaturesticOverlayManager.onActivityDestroyed(activity);
 		WebViewCompat.enableAndFlushCookiesIfActive();
 		super.callActivityOnDestroy(activity);
 	}

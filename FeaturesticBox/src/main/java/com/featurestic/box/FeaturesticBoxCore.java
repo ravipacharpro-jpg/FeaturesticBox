@@ -1212,11 +1212,9 @@ public class FeaturesticBoxCore extends ClientConfiguration {
     }
 
     public void setBuiltInFpsOverlayEnabled(boolean enabled) {
-        com.featurestic.box.FeaturesticOverlayManager.setBuiltInFpsOverlayEnabled(enabled);
     }
 
-    public void setCustomOverlayFactory(com.featurestic.box.FeaturesticOverlayManager.OverlayViewFactory factory) {
-        com.featurestic.box.FeaturesticOverlayManager.setCustomOverlayFactory(factory);
+    public void setCustomOverlayFactory(Object factory) {
     }
 
     public void setDirectAppLoginEnabled(boolean enabled) {
