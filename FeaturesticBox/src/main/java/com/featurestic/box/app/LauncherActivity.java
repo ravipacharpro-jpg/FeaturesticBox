@@ -101,15 +101,23 @@ public class LauncherActivity extends Activity {
         if (videoFile != null && videoFile.exists() && videoFile.length() > 0) {
             playIntroAndLaunch(videoFile, launchIntent, userId);
         } else {
-            // Fallback: immediate launch if video is missing
-            dispatchTargetLaunch(launchIntent, userId);
+            // Fallback: minimalist black Rotate Phone layout for 2.5s
+            try {
+                setContentView(com.featurestic.box.R.layout.activity_launcher);
+            } catch (Throwable ignored) {}
+            mHandler.postDelayed(() -> {
+                dispatchTargetLaunch(launchIntent, userId);
+                if (!isFinishing()) {
+                    finish();
+                }
+            }, 2500L);
         }
     }
 
     private File extractIntroVideoIfNeeded() {
         try {
-            File target = new File(getFilesDir(), "intro_6s.mp4");
-            if (target.exists() && target.length() >= 170000) {
+            File target = new File(getFilesDir(), "intro_rotate_branded.mp4");
+            if (target.exists() && target.length() > 50000) {
                 return target;
             }
             InputStream in = null;
@@ -124,7 +132,7 @@ public class LauncherActivity extends Activity {
             if (in == null) {
                 return null;
             }
-            File temp = new File(getFilesDir(), "intro_6s.tmp");
+            File temp = new File(getFilesDir(), "intro_rotate.tmp");
             try (FileOutputStream out = new FileOutputStream(temp)) {
                 byte[] buf = new byte[8192];
                 int r;
@@ -158,6 +166,16 @@ public class LauncherActivity extends Activity {
         );
         mVideoView.setLayoutParams(lp);
         root.addView(mVideoView);
+
+        // Tap anywhere to skip straight into game
+        root.setOnClickListener(v -> {
+            Log.d(TAG, "Screen tapped: fast-forwarding to game...");
+            dispatchTargetLaunch(launchIntent, userId);
+            if (!isFinishing()) {
+                finish();
+            }
+        });
+
         setContentView(root);
 
         mVideoView.setVideoPath(videoFile.getAbsolutePath());
@@ -169,27 +187,27 @@ public class LauncherActivity extends Activity {
                     mp.setLooping(false);
                 } catch (Throwable ignored) {}
                 mVideoView.start();
-                Log.d(TAG, "Intro video playback started (6s)");
+                Log.d(TAG, "Rotate Your Phone intro started (4.5s)");
             }
         });
 
-        // 🔥 PARALLEL ENGINE WARM-UP: Pre-dispatch game launch at 3.0s into the 6s video!
-        // While player watches seconds 3-6 of Rotate Your Phone, UE4 / OBB / :p0 loads in background!
+        // 🔥 PARALLEL ENGINE WARM-UP: Pre-dispatch game launch at 2.5s into the 4.5s video!
+        // While player watches rotation, UE4 / OBB / :p0 initializes in background!
         mHandler.postDelayed(() -> {
-            Log.d(TAG, "Parallel warm-up: Dispatching game start at 3.0s into video...");
+            Log.d(TAG, "Parallel warm-up: Dispatching game start at 2.5s into video...");
             dispatchTargetLaunch(launchIntent, userId);
-        }, 3000L);
+        }, 2500L);
 
-        // When full 6-second video finishes, the game engine is already initialized and ready!
+        // When 4.5-second video finishes, the game engine is already initialized and ready!
         mVideoView.setOnCompletionListener(new MediaPlayer.OnCompletionListener() {
             @Override
             public void onCompletion(MediaPlayer mp) {
-                Log.d(TAG, "Intro video completed (6s). Seamlessly handing over to game...");
+                Log.d(TAG, "Intro video completed (4.5s). Seamlessly handing over to game...");
                 mHandler.postDelayed(() -> {
                     if (!isFinishing()) {
                         finish();
                     }
-                }, 350L);
+                }, 200L);
             }
         });
 
