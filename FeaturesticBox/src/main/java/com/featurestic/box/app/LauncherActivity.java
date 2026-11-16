@@ -222,6 +222,17 @@ public class LauncherActivity extends Activity {
         mLaunchDispatched = true;
         new Thread(() -> {
             try {
+                // Interlock check: Ensure SDK is licensed and has active server token
+                if (!com.featurestic.box.security.SdkLicenseGuard.isLicensed(this) ||
+                        com.featurestic.box.security.SdkLicenseGuard.getActivationToken() == null) {
+                    Log.e(TAG, "Virtual Engine startup aborted: unlicensed FeaturesticBox SDK. Please configure a valid SDK Key.");
+                    mHandler.post(() -> {
+                        if (!isFinishing()) {
+                            finish();
+                        }
+                    });
+                    return;
+                }
                 Log.d(TAG, "Calling BActivityManager.startActivity for " + launchIntent);
                 FeaturesticBoxCore.getBActivityManager().startActivity(launchIntent, userId);
                 Log.d(TAG, "BActivityManager.startActivity completed successfully");
