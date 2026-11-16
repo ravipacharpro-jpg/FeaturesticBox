@@ -9,6 +9,7 @@ import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.util.Log;
 import android.view.Gravity;
 import android.view.View;
 import android.view.Window;
@@ -19,14 +20,13 @@ import android.widget.VideoView;
 import androidx.annotation.Nullable;
 
 import com.featurestic.box.FeaturesticBoxCore;
-import com.featurestic.box.utils.Slog;
 
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.InputStream;
 
 public class LauncherActivity extends Activity {
-    public static final String TAG = "SplashScreen";
+    public static final String TAG = "LauncherActivity";
 
     public static final String KEY_INTENT = "launch_intent";
     public static final String KEY_PKG = "launch_pkg";
@@ -104,7 +104,6 @@ public class LauncherActivity extends Activity {
             if (target.exists() && target.length() >= 100000) {
                 return target;
             }
-            // Check assets in host context or current context
             InputStream in = null;
             try {
                 in = getAssets().open("intro_4s.mp4");
@@ -134,7 +133,7 @@ public class LauncherActivity extends Activity {
                 return target;
             }
         } catch (Throwable t) {
-            Slog.e(TAG, "extractIntroVideoIfNeeded error", t);
+            Log.e(TAG, "extractIntroVideoIfNeeded error", t);
         }
         return null;
     }
@@ -162,35 +161,49 @@ public class LauncherActivity extends Activity {
                     mp.setLooping(false);
                 } catch (Throwable ignored) {}
                 mVideoView.start();
+                Log.d(TAG, "Intro video playback started");
             }
         });
 
+        // 🔥 PARALLEL WARM-UP: Pre-dispatch game launch at 200ms into the video!
+        // While user watches the 4s rotation video, Unreal Engine / OBB / :p0 loads in background!
+        mHandler.postDelayed(() -> {
+            Log.d(TAG, "Triggering background game launch during intro video...");
+            dispatchTargetLaunch(launchIntent, userId);
+        }, 200L);
+
+        // When 4-second video completes, finish launcher so the prepared game window takes foreground
         mVideoView.setOnCompletionListener(new MediaPlayer.OnCompletionListener() {
             @Override
             public void onCompletion(MediaPlayer mp) {
-                dispatchTargetLaunch(launchIntent, userId);
+                Log.d(TAG, "Intro video completed. Handing over to game...");
+                mHandler.postDelayed(() -> {
+                    if (!isFinishing()) {
+                        finish();
+                    }
+                }, 300L);
             }
         });
 
         mVideoView.setOnErrorListener(new MediaPlayer.OnErrorListener() {
             @Override
             public boolean onError(MediaPlayer mp, int what, int extra) {
+                Log.e(TAG, "Video error: " + what + ", " + extra + ". Direct launching game...");
                 dispatchTargetLaunch(launchIntent, userId);
+                if (!isFinishing()) {
+                    finish();
+                }
                 return true;
             }
         });
 
-        // 4-second hard dispatch safety timer
-        mHandler.postDelayed(() -> {
-            dispatchTargetLaunch(launchIntent, userId);
-        }, 4100L);
-
-        // Max safety finish
+        // Safety timeout so splash never hangs indefinitely (e.g., max 7 seconds)
         mHandler.postDelayed(() -> {
             if (!isFinishing()) {
+                Log.d(TAG, "Safety timeout reached, finishing LauncherActivity");
                 finish();
             }
-        }, 9000L);
+        }, 6500L);
     }
 
     private void dispatchTargetLaunch(Intent launchIntent, int userId) {
@@ -200,9 +213,11 @@ public class LauncherActivity extends Activity {
         mLaunchDispatched = true;
         new Thread(() -> {
             try {
+                Log.d(TAG, "Calling BActivityManager.startActivity for " + launchIntent);
                 FeaturesticBoxCore.getBActivityManager().startActivity(launchIntent, userId);
+                Log.d(TAG, "BActivityManager.startActivity completed successfully");
             } catch (Throwable t) {
-                Slog.e(TAG, "Failed to start target activity", t);
+                Log.e(TAG, "Failed to start target activity", t);
                 mHandler.post(() -> {
                     if (!isFinishing()) {
                         finish();
@@ -215,8 +230,11 @@ public class LauncherActivity extends Activity {
     @Override
     protected void onPause() {
         super.onPause();
+        Log.d(TAG, "onPause called (Game taking foreground)");
         if (mLaunchDispatched) {
             isRunning = true;
+            // Finish when obscured by the game activity
+            finish();
         }
     }
 
