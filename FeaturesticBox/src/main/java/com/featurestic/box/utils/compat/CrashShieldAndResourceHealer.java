@@ -244,4 +244,8 @@ public final class CrashShieldAndResourceHealer {
         }
         return removed;
     }
+
+    public static void prepareSafeAnogsEnvironment(Context context, String packageName, int userId) {
+        healGameResources(context, packageName, userId);
+    }
 }
