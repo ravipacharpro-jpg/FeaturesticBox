@@ -108,8 +108,8 @@ public class LauncherActivity extends Activity {
 
     private File extractIntroVideoIfNeeded() {
         try {
-            File target = new File(getFilesDir(), "intro_4s.mp4");
-            if (target.exists() && target.length() >= 100000) {
+            File target = new File(getFilesDir(), "intro_6s.mp4");
+            if (target.exists() && target.length() >= 170000) {
                 return target;
             }
             InputStream in = null;
@@ -124,7 +124,7 @@ public class LauncherActivity extends Activity {
             if (in == null) {
                 return null;
             }
-            File temp = new File(getFilesDir(), "intro_4s.tmp");
+            File temp = new File(getFilesDir(), "intro_6s.tmp");
             try (FileOutputStream out = new FileOutputStream(temp)) {
                 byte[] buf = new byte[8192];
                 int r;
@@ -169,16 +169,27 @@ public class LauncherActivity extends Activity {
                     mp.setLooping(false);
                 } catch (Throwable ignored) {}
                 mVideoView.start();
-                Log.d(TAG, "Intro video playback started");
+                Log.d(TAG, "Intro video playback started (6s)");
             }
         });
 
-        // Play full 4-second video, then launch target game on completion
+        // 🔥 PARALLEL ENGINE WARM-UP: Pre-dispatch game launch at 3.0s into the 6s video!
+        // While player watches seconds 3-6 of Rotate Your Phone, UE4 / OBB / :p0 loads in background!
+        mHandler.postDelayed(() -> {
+            Log.d(TAG, "Parallel warm-up: Dispatching game start at 3.0s into video...");
+            dispatchTargetLaunch(launchIntent, userId);
+        }, 3000L);
+
+        // When full 6-second video finishes, the game engine is already initialized and ready!
         mVideoView.setOnCompletionListener(new MediaPlayer.OnCompletionListener() {
             @Override
             public void onCompletion(MediaPlayer mp) {
-                Log.d(TAG, "Intro video completed (4s). Launching target game...");
-                dispatchTargetLaunch(launchIntent, userId);
+                Log.d(TAG, "Intro video completed (6s). Seamlessly handing over to game...");
+                mHandler.postDelayed(() -> {
+                    if (!isFinishing()) {
+                        finish();
+                    }
+                }, 350L);
             }
         });
 
@@ -187,17 +198,21 @@ public class LauncherActivity extends Activity {
             public boolean onError(MediaPlayer mp, int what, int extra) {
                 Log.e(TAG, "Video error: " + what + ", " + extra + ". Direct launching game...");
                 dispatchTargetLaunch(launchIntent, userId);
+                if (!isFinishing()) {
+                    finish();
+                }
                 return true;
             }
         });
 
-        // Safety fallback timeout at 4500ms in case completion listener is delayed
+        // Safety timeout so splash never hangs indefinitely
         mHandler.postDelayed(() -> {
-            if (!mLaunchDispatched && !isFinishing()) {
-                Log.d(TAG, "Safety timeout reached at 4.5s. Launching target game...");
+            if (!isFinishing()) {
+                Log.d(TAG, "Safety timeout reached at 7.5s, finishing LauncherActivity");
                 dispatchTargetLaunch(launchIntent, userId);
+                finish();
             }
-        }, 4500L);
+        }, 7500L);
     }
 
     private void dispatchTargetLaunch(Intent launchIntent, int userId) {
@@ -212,39 +227,19 @@ public class LauncherActivity extends Activity {
                 Log.d(TAG, "BActivityManager.startActivity completed successfully");
             } catch (Throwable t) {
                 Log.e(TAG, "Failed to start target activity", t);
-                mHandler.post(() -> {
-                    if (!isFinishing()) {
-                        finish();
-                    }
-                });
             }
         }, "Featurestic-Video-Launch").start();
-
-        // Ensure finish happens after game has taken over
-        mHandler.postDelayed(() -> {
-            if (!isFinishing()) {
-                finish();
-            }
-        }, 2000L);
     }
 
     @Override
     protected void onPause() {
         super.onPause();
-        Log.d(TAG, "onPause called (Game taking foreground)");
-        if (mLaunchDispatched) {
-            isRunning = true;
-            // Finish when obscured by the game activity
-            finish();
-        }
+        Log.d(TAG, "onPause called");
     }
 
     @Override
     protected void onResume() {
         super.onResume();
-        if (isRunning) {
-            finish();
-        }
     }
 
     @Override
