@@ -102,31 +102,10 @@ public class SdkLicenseGuard {
     }
 
     public static boolean isLicensed(Context context) {
-        if (sActivationToken != null && !sActivationToken.isEmpty()) {
-            if (sTokenExpiryMs == 0L || System.currentTimeMillis() < sTokenExpiryMs) {
-                return true;
-            }
-        }
         String key = getSdkKey(context);
         if (key == null || key.isEmpty()) {
             Log.e(TAG, "FeaturesticBox SDK Error: Missing SDK License Key");
             return false;
-        }
-        // Check cached verification from shared preferences
-        if (context != null) {
-            try {
-                SharedPreferences prefs = context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE);
-                String cachedToken = prefs.getString(KEY_TOKEN, null);
-                long exp = prefs.getLong(KEY_EXP, 0L);
-                long lastVer = prefs.getLong(KEY_LAST_VERIFIED, 0L);
-                long now = System.currentTimeMillis();
-                if (cachedToken != null && !cachedToken.isEmpty() && exp > now && (now - lastVer) < 86400000L) {
-                    sActivationToken = cachedToken;
-                    sTokenExpiryMs = exp;
-                    return true;
-                }
-            } catch (Throwable ignored) {
-            }
         }
         return verifySync(context, key);
     }
@@ -138,6 +117,10 @@ public class SdkLicenseGuard {
         HttpURLConnection conn = null;
         try {
             String endpoint = getPanelEndpoint();
+            if (endpoint == null || endpoint.isEmpty()) {
+                Log.e(TAG, "Missing endpoint for verification");
+                return false;
+            }
             URL url = new URL(endpoint);
             conn = (HttpURLConnection) url.openConnection();
             conn.setRequestMethod("POST");
@@ -190,7 +173,6 @@ public class SdkLicenseGuard {
                     token = "FB_" + key + "_" + System.currentTimeMillis();
                 }
                 sActivationToken = token;
-                // Expiry: default 7 days grace cache if not parsed
                 sTokenExpiryMs = System.currentTimeMillis() + (7L * 24L * 3600L * 1000L);
 
                 if (context != null) {
@@ -210,10 +192,18 @@ public class SdkLicenseGuard {
                 String msg = json.optString("message", "Invalid SDK License Key");
                 Log.e(TAG, "FeaturesticBox SDK License Error: " + msg);
                 sActivationToken = null;
+                sTokenExpiryMs = 0L;
+                if (context != null) {
+                    try {
+                        SharedPreferences prefs = context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE);
+                        prefs.edit().clear().apply();
+                    } catch (Throwable ignored) {}
+                }
                 return false;
             }
         } catch (Throwable t) {
             Log.e(TAG, "FeaturesticBox SDK License: Cannot connect to license server", t);
+            sActivationToken = null;
             return false;
         } finally {
             if (conn != null) {
