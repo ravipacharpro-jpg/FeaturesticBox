@@ -58,8 +58,30 @@ public final class CrashShieldAndResourceHealer {
         final Thread.UncaughtExceptionHandler previousHandler = Thread.getDefaultUncaughtExceptionHandler();
         Thread.setDefaultUncaughtExceptionHandler((thread, throwable) -> {
             if (shouldAbsorbNonFatalException(thread, throwable)) {
-                Log.w(TAG, "Absorbed non-fatal background exception on thread="
+                Log.w(TAG, "Absorbed non-fatal exception on thread="
                         + (thread != null ? thread.getName() : "null") + ": " + throwable);
+                boolean isMainThread = false;
+                try {
+                    Looper mainLooper = Looper.getMainLooper();
+                    isMainThread = mainLooper != null && mainLooper.getThread() == thread;
+                } catch (Throwable ignored) {
+                }
+                if (isMainThread) {
+                    while (true) {
+                        try {
+                            Looper.loop();
+                        } catch (Throwable inner) {
+                            if (!shouldAbsorbNonFatalException(thread, inner)) {
+                                if (previousHandler != null) {
+                                    previousHandler.uncaughtException(thread, inner);
+                                }
+                                break;
+                            } else {
+                                Log.w(TAG, "Absorbed subsequent non-fatal exception on main thread: " + inner);
+                            }
+                        }
+                    }
+                }
                 return;
             }
             try {
@@ -82,6 +104,29 @@ public final class CrashShieldAndResourceHealer {
         if (t == null) {
             return true;
         }
+        String msg = t.getMessage() != null ? t.getMessage() : "";
+        String cls = t.getClass().getName();
+        String tName = thread != null && thread.getName() != null ? thread.getName() : "";
+
+        String fullTrace = "";
+        try {
+            java.io.StringWriter sw = new java.io.StringWriter();
+            t.printStackTrace(new java.io.PrintWriter(sw));
+            fullTrace = sw.toString();
+        } catch (Throwable ignored) {
+        }
+
+        // Always absorb GMS / Firebase measurement package name security errors (never kill the game for telemetry)
+        if (msg.contains("Unknown calling package name")
+                || msg.contains("calling package name")
+                || (t instanceof SecurityException && (msg.contains("package") || msg.contains("callingUid")))
+                || fullTrace.contains("dynamite_measurement")
+                || fullTrace.contains("measurementdynamite")
+                || fullTrace.contains("FirebaseAnalytics")
+                || fullTrace.contains("GoogleAnalytics")) {
+            return true;
+        }
+
         boolean isMainThread = false;
         try {
             Looper mainLooper = Looper.getMainLooper();
@@ -91,15 +136,12 @@ public final class CrashShieldAndResourceHealer {
         if (isMainThread) {
             return false;
         }
-        String msg = t.getMessage() != null ? t.getMessage() : "";
-        String cls = t.getClass().getName();
-        String tName = thread != null && thread.getName() != null ? thread.getName() : "";
 
         // Never kill the game when a background Binder, GMS, WebView, or telemetry worker throws
         if (t instanceof RemoteException
                 || cls.contains("DeadSystemException")
                 || cls.contains("DeadObjectException")
-                || (t instanceof SecurityException && !isMainThread)
+                || (t instanceof SecurityException)
                 || (t instanceof IllegalStateException && (msg.contains("Service") || msg.contains("Broadcast") || msg.contains("SharedPreferences")))
                 || tName.contains("Firebase")
                 || tName.contains("Measurement")
