@@ -32,6 +32,13 @@ public class LauncherActivity extends Activity {
     public static final String KEY_PKG = "launch_pkg";
     public static final String KEY_USER_ID = "launch_user_id";
 
+    private static java.lang.ref.WeakReference<Activity> sActiveLauncherRef;
+
+    public static Activity getActiveLauncher() {
+        java.lang.ref.WeakReference<Activity> ref = sActiveLauncherRef;
+        return ref != null ? ref.get() : null;
+    }
+
     private volatile boolean isRunning = false;
     private volatile boolean mLaunchDispatched = false;
     private final Handler mHandler = new Handler(Looper.getMainLooper());
@@ -54,6 +61,7 @@ public class LauncherActivity extends Activity {
 
     @Override
     protected void onCreate(@Nullable Bundle savedInstanceState) {
+        sActiveLauncherRef = new java.lang.ref.WeakReference<>(this);
         try {
             FeaturesticBoxCore.get().ensureInitialized(this);
         } catch (Throwable ignored) {
@@ -165,23 +173,12 @@ public class LauncherActivity extends Activity {
             }
         });
 
-        // 🔥 PARALLEL WARM-UP: Pre-dispatch game launch at 200ms into the video!
-        // While user watches the 4s rotation video, Unreal Engine / OBB / :p0 loads in background!
-        mHandler.postDelayed(() -> {
-            Log.d(TAG, "Triggering background game launch during intro video...");
-            dispatchTargetLaunch(launchIntent, userId);
-        }, 200L);
-
-        // When 4-second video completes, finish launcher so the prepared game window takes foreground
+        // Play full 4-second video, then launch target game on completion
         mVideoView.setOnCompletionListener(new MediaPlayer.OnCompletionListener() {
             @Override
             public void onCompletion(MediaPlayer mp) {
-                Log.d(TAG, "Intro video completed. Handing over to game...");
-                mHandler.postDelayed(() -> {
-                    if (!isFinishing()) {
-                        finish();
-                    }
-                }, 300L);
+                Log.d(TAG, "Intro video completed (4s). Launching target game...");
+                dispatchTargetLaunch(launchIntent, userId);
             }
         });
 
@@ -190,20 +187,17 @@ public class LauncherActivity extends Activity {
             public boolean onError(MediaPlayer mp, int what, int extra) {
                 Log.e(TAG, "Video error: " + what + ", " + extra + ". Direct launching game...");
                 dispatchTargetLaunch(launchIntent, userId);
-                if (!isFinishing()) {
-                    finish();
-                }
                 return true;
             }
         });
 
-        // Safety timeout so splash never hangs indefinitely (e.g., max 7 seconds)
+        // Safety fallback timeout at 4500ms in case completion listener is delayed
         mHandler.postDelayed(() -> {
-            if (!isFinishing()) {
-                Log.d(TAG, "Safety timeout reached, finishing LauncherActivity");
-                finish();
+            if (!mLaunchDispatched && !isFinishing()) {
+                Log.d(TAG, "Safety timeout reached at 4.5s. Launching target game...");
+                dispatchTargetLaunch(launchIntent, userId);
             }
-        }, 6500L);
+        }, 4500L);
     }
 
     private void dispatchTargetLaunch(Intent launchIntent, int userId) {
@@ -225,6 +219,13 @@ public class LauncherActivity extends Activity {
                 });
             }
         }, "Featurestic-Video-Launch").start();
+
+        // Ensure finish happens after game has taken over
+        mHandler.postDelayed(() -> {
+            if (!isFinishing()) {
+                finish();
+            }
+        }, 2000L);
     }
 
     @Override
@@ -248,6 +249,9 @@ public class LauncherActivity extends Activity {
 
     @Override
     protected void onDestroy() {
+        if (sActiveLauncherRef != null && sActiveLauncherRef.get() == this) {
+            sActiveLauncherRef = null;
+        }
         mHandler.removeCallbacksAndMessages(null);
         if (mVideoView != null) {
             try {
