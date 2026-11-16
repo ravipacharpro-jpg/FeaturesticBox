@@ -57,8 +57,7 @@ public class ProxyActivity extends Activity {
             return;
         }
 
-        Log.d(TAG, "onCreate");
-        finish();
+        Log.d(TAG, "onCreate proxy fallback for " + launchIntent);
         HookManager.get().checkEnv(HCallbackStub.class);
         ProxyActivityRecord record = ProxyActivityRecord.create(launchIntent);
         if (record.mTarget != null) {
@@ -76,12 +75,17 @@ public class ProxyActivity extends Activity {
                     ? BActivityThread.getApplication().getClassLoader()
                     : getClassLoader();
             record.mTarget.setExtrasClassLoader(cl);
-            record.mTarget.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            record.mTarget.addFlags(Intent.FLAG_ACTIVITY_FORWARD_RESULT);
             try {
-                FeaturesticBoxCore.getBActivityManager().startActivity(record.mTarget, record.mUserId);
+                startActivity(record.mTarget);
             } catch (Throwable t) {
-                Log.e(TAG, "Virtual startActivity failed", t);
+                Log.e(TAG, "Virtual startActivity fallback failed", t);
             }
+        }
+        finish();
+        try {
+            overridePendingTransition(0, 0);
+        } catch (Throwable ignored) {
         }
     }
 

@@ -109,6 +109,9 @@ public class LauncherActivity extends Activity {
                 dispatchTargetLaunch(launchIntent, userId);
                 if (!isFinishing()) {
                     finish();
+                    try {
+                        overridePendingTransition(0, 0);
+                    } catch (Throwable ignored) {}
                 }
             }, 2500L);
         }
@@ -206,6 +209,9 @@ public class LauncherActivity extends Activity {
                 mHandler.postDelayed(() -> {
                     if (!isFinishing()) {
                         finish();
+                        try {
+                            overridePendingTransition(0, 0);
+                        } catch (Throwable ignored) {}
                     }
                 }, 200L);
             }
