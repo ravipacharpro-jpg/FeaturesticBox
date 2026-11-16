@@ -78,9 +78,9 @@ public class ProxyActivity extends Activity {
             record.mTarget.setExtrasClassLoader(cl);
             record.mTarget.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
             try {
-                startActivity(record.mTarget);
+                FeaturesticBoxCore.getBActivityManager().startActivity(record.mTarget, record.mUserId);
             } catch (Throwable t) {
-                Log.e(TAG, "Fallback startActivity failed", t);
+                Log.e(TAG, "Virtual startActivity failed", t);
             }
         }
     }
