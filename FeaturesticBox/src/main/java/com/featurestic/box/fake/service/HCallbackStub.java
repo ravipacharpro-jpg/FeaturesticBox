@@ -118,13 +118,17 @@ public class HCallbackStub implements IInjectHook, Handler.Callback {
                 return null;
             }
 
-            Class<?> launchClass = BRLaunchActivityItem.getRealClass();
+            Class<?> launchClass = null;
+            try {
+                launchClass = BRLaunchActivityItem.getRealClass();
+            } catch (Throwable ignored) {
+            }
             for (Object item : callbacks) {
                 if (item == null) {
                     continue;
                 }
-                if (launchClass.isInstance(item)
-                        || launchClass.getName().equals(item.getClass().getName())) {
+                if ((launchClass != null && (launchClass.isInstance(item) || launchClass.getName().equals(item.getClass().getName())))
+                        || item.getClass().getName().endsWith(".LaunchActivityItem")) {
                     return item;
                 }
             }
@@ -149,11 +153,40 @@ public class HCallbackStub implements IInjectHook, Handler.Callback {
             launchItem = client;
         }
 
-        Intent stubIntent;
-        IBinder token;
+        Intent stubIntent = null;
+        IBinder token = null;
         if (BuildCompat.isPie()) {
-            stubIntent = BRLaunchActivityItem.get(launchItem).mIntent();
-            token = BRClientTransaction.get(client).mActivityToken();
+            try {
+                stubIntent = BRLaunchActivityItem.get(launchItem).mIntent();
+            } catch (Throwable ignored) {
+            }
+            if (stubIntent == null && launchItem != null) {
+                try {
+                    java.lang.reflect.Field f = launchItem.getClass().getDeclaredField("mIntent");
+                    f.setAccessible(true);
+                    stubIntent = (Intent) f.get(launchItem);
+                } catch (Throwable ignored) {
+                }
+            }
+            try {
+                token = BRClientTransaction.get(client).mActivityToken();
+            } catch (Throwable ignored) {
+            }
+            if (token == null && launchItem != null) {
+                try {
+                    java.lang.reflect.Field f = launchItem.getClass().getDeclaredField("mActivityToken");
+                    f.setAccessible(true);
+                    token = (IBinder) f.get(launchItem);
+                } catch (Throwable ignored) {
+                }
+                if (token == null) {
+                    try {
+                        java.lang.reflect.Method m = launchItem.getClass().getMethod("getActivityToken");
+                        token = (IBinder) m.invoke(launchItem);
+                    } catch (Throwable ignored) {
+                    }
+                }
+            }
         } else {
             ActivityThreadActivityClientRecordContext recordContext =
                     BRActivityThreadActivityClientRecord.get(launchItem);
@@ -261,9 +294,28 @@ public class HCallbackStub implements IInjectHook, Handler.Callback {
         }
 
         if (BuildCompat.isPie()) {
-            LaunchActivityItemContext launchContext = BRLaunchActivityItem.get(launchItem);
-            launchContext._set_mIntent(targetIntent);
-            launchContext._set_mInfo(activityInfo);
+            boolean written = false;
+            try {
+                LaunchActivityItemContext launchContext = BRLaunchActivityItem.get(launchItem);
+                launchContext._set_mIntent(targetIntent);
+                launchContext._set_mInfo(activityInfo);
+                written = true;
+            } catch (Throwable ignored) {
+            }
+            if (!written && launchItem != null) {
+                try {
+                    java.lang.reflect.Field fIntent = launchItem.getClass().getDeclaredField("mIntent");
+                    fIntent.setAccessible(true);
+                    fIntent.set(launchItem, targetIntent);
+                } catch (Throwable ignored) {
+                }
+                try {
+                    java.lang.reflect.Field fInfo = launchItem.getClass().getDeclaredField("mInfo");
+                    fInfo.setAccessible(true);
+                    fInfo.set(launchItem, activityInfo);
+                } catch (Throwable ignored) {
+                }
+            }
         } else {
             ActivityThreadActivityClientRecordContext recordContext =
                     BRActivityThreadActivityClientRecord.get(launchItem);
@@ -272,12 +324,30 @@ public class HCallbackStub implements IInjectHook, Handler.Callback {
         }
 
         if (launchingRecord != null) {
-            ActivityThreadActivityClientRecordContext recordContext =
-                    BRActivityThreadActivityClientRecord.get(launchingRecord);
-            recordContext._set_intent(targetIntent);
-            recordContext._set_activityInfo(activityInfo);
-            recordContext._set_packageInfo(
-                    BActivityThread.currentActivityThread().getPackageInfo());
+            try {
+                ActivityThreadActivityClientRecordContext recordContext =
+                        BRActivityThreadActivityClientRecord.get(launchingRecord);
+                recordContext._set_intent(targetIntent);
+                recordContext._set_activityInfo(activityInfo);
+                recordContext._set_packageInfo(
+                        BActivityThread.currentActivityThread().getPackageInfo());
+            } catch (Throwable t) {
+                try {
+                    java.lang.reflect.Field fIntent = launchingRecord.getClass().getDeclaredField("intent");
+                    fIntent.setAccessible(true);
+                    fIntent.set(launchingRecord, targetIntent);
+                } catch (Throwable ignored) {}
+                try {
+                    java.lang.reflect.Field fInfo = launchingRecord.getClass().getDeclaredField("activityInfo");
+                    fInfo.setAccessible(true);
+                    fInfo.set(launchingRecord, activityInfo);
+                } catch (Throwable ignored) {}
+                try {
+                    java.lang.reflect.Field fPkg = launchingRecord.getClass().getDeclaredField("packageInfo");
+                    fPkg.setAccessible(true);
+                    fPkg.set(launchingRecord, BActivityThread.currentActivityThread().getPackageInfo());
+                } catch (Throwable ignored) {}
+            }
         }
     }
 

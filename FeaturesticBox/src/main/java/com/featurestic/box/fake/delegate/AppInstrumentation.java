@@ -31,10 +31,10 @@ import com.featurestic.box.utils.Slog;
 import com.featurestic.box.utils.compat.ActivityCompat;
 import com.featurestic.box.utils.compat.ActivityManagerCompat;
 import com.featurestic.box.utils.compat.ContextCompat;
-import com.featurestic.box.FeaturesticOverlayManager;
 import com.featurestic.box.utils.compat.FeaturesticBatteryAndOemGuard;
 import com.featurestic.box.utils.compat.NetworkLowLatencyOptimizer;
 import com.featurestic.box.utils.compat.WebViewCompat;
+import com.featurestic.box.proxy.record.ProxyActivityRecord;
 
 public final class AppInstrumentation extends BaseInstrumentationDelegate implements IInjectHook {
     
@@ -225,18 +225,40 @@ public final class AppInstrumentation extends BaseInstrumentationDelegate implem
 		super.callActivityOnResume(activity);
 		NetworkLowLatencyOptimizer.acquireWifiLowLatencyLock(activity);
 		FeaturesticBatteryAndOemGuard.onGameResumed(activity);
-		FeaturesticOverlayManager.onActivityResumed(activity);
 	}
 
 	@Override
 	public void callActivityOnDestroy(Activity activity) {
-		FeaturesticOverlayManager.onActivityDestroyed(activity);
 		WebViewCompat.enableAndFlushCookiesIfActive();
 		super.callActivityOnDestroy(activity);
 	}
     
     @Override
     public Activity newActivity(ClassLoader cl, String className, Intent intent) throws InstantiationException, IllegalAccessException, ClassNotFoundException {
+        if (className != null && className.contains("ProxyActivity")) {
+            if (intent != null) {
+                try {
+                    intent.setExtrasClassLoader(AppInstrumentation.class.getClassLoader());
+                    ProxyActivityRecord record = ProxyActivityRecord.create(intent);
+                    if (record.mTarget != null && record.mTarget.getComponent() != null) {
+                        String realClass = record.mTarget.getComponent().getClassName();
+                        ClassLoader targetCl = BActivityThread.getApplication() != null
+                                ? BActivityThread.getApplication().getClassLoader()
+                                : (delegateAppClassLoader != null ? delegateAppClassLoader : cl);
+                        if (targetCl != null) {
+                            try {
+                                return super.newActivity(targetCl, realClass, record.mTarget);
+                            } catch (Throwable t) {
+                                Class<?> actCls = targetCl.loadClass(realClass);
+                                return (Activity) actCls.newInstance();
+                            }
+                        }
+                    }
+                } catch (Throwable t) {
+                    Slog.e(TAG, "Virtual newActivity mapping error: " + t.getMessage());
+                }
+            }
+        }
         try {
             return super.newActivity(cl, className, intent);
         } catch (ClassNotFoundException e) {
