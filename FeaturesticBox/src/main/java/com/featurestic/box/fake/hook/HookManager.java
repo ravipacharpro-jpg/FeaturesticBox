@@ -63,6 +63,7 @@ public class HookManager {
             addInjector(new IDevicePolicyManagerProxy());
             addInjector(new ITwitterAwareAccountManagerProxy());
             addInjector(new IConnectivityManagerProxy());
+            addInjector(new NetworkPermissionCompat());
             addInjector(new IClipboardManagerProxy());
             addInjector(new IPhoneSubInfoProxy());
             addInjector(new IMediaRouterServiceProxy());

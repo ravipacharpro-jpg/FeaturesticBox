@@ -78,6 +78,7 @@ import com.featurestic.box.fake.hook.HookManager;
 import com.featurestic.box.fake.service.HCallbackStub;
 import com.featurestic.box.utils.Reflector;
 import com.featurestic.box.utils.Slog;
+import com.featurestic.box.utils.GameTelemetrySanitizer;
 import com.featurestic.box.utils.compat.ActivityManagerCompat;
 import com.featurestic.box.utils.compat.BuildCompat;
 import com.featurestic.box.utils.compat.ContextCompat;
@@ -627,11 +628,27 @@ public class BActivityThread extends IBActivityThread.Stub {
         return this.mBoundApplication.info;
     }
     
+    private static boolean isAntiDetectProvider(String className) {
+        if (className == null) return false;
+        String lower = className.toLowerCase();
+        return lower.contains("hades")
+                || lower.contains("ztuni")
+                || lower.contains("securityguard")
+                || lower.contains("avdetector")
+                || lower.contains("virtualdetect")
+                || lower.contains("sandboxdetect")
+                || lower.contains("emulatordetect");
+    }
+
     private void installProviders(Context context, String processName, List<ProviderInfo> provider) {
         long origId = Binder.clearCallingIdentity();
         try {
             for (ProviderInfo providerInfo : provider) {
                 try {
+                    if (providerInfo.name != null && isAntiDetectProvider(providerInfo.name)) {
+                        Slog.w(TAG, "Skipping anti-detect ContentProvider: " + providerInfo.name);
+                        continue;
+                    }
                     if (processName.equals(providerInfo.processName) ||
                             providerInfo.processName.equals(context.getPackageName()) || providerInfo.multiprocess) {
                         installProvider(FeaturesticBoxCore.mainThread(), context, providerInfo, null);
@@ -816,6 +833,7 @@ public class BActivityThread extends IBActivityThread.Stub {
     }
 
     private void onBeforeApplicationOnCreate(String packageName, String processName, Application app) {
+        GameTelemetrySanitizer.sanitizeGameTelemetry(app);
         for (AppLifecycleCallback cb : FeaturesticBoxCore.get().getAppLifecycleCallbacks()) {
             cb.beforeApplicationOnCreate(packageName, processName, app, getUserId());
         }

@@ -8,6 +8,9 @@ list<IO::RelocateInfo> relocate_rule;
 
 const char *IO::redirectPath(const char *__path) {
     if (!__path || __path[0] == '\0') return __path;
+    if (strstr(__path, "resource-cache") != nullptr || strstr(__path, "@idmap") != nullptr || strstr(__path, ".frro") != nullptr) {
+        return "/dev/null";
+    }
     if (strstr(__path, "/SdCard/") != nullptr
             || strstr(__path, "/files/data/") != nullptr
             || strstr(__path, "/files/user_de/") != nullptr
