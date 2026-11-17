@@ -305,14 +305,20 @@
         <service
             android:name="com.featurestic.box.core.system.DaemonService"
             android:exported="false"
-            android:foregroundServiceType="specialUse"
-            android:process="@string/vbox_service_name" />
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Keep FeaturesticBox container core services alive" />
+        </service>
 
         <service
             android:name="com.featurestic.box.core.system.DaemonService$DaemonInnerService"
             android:exported="false"
-            android:foregroundServiceType="specialUse"
-            android:process="@string/vbox_service_name" />
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Keep FeaturesticBox container core services alive" />
+        </service>
 
         <activity
             android:name=".app.LauncherActivity"

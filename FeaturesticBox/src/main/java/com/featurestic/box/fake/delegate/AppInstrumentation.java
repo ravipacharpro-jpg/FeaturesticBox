@@ -186,50 +186,61 @@ public final class AppInstrumentation extends BaseInstrumentationDelegate implem
 		}
 	}
 
+	private static void fixBundleClassLoader(Activity activity, Bundle bundle) {
+		if (activity == null || bundle == null) return;
+		ClassLoader cl = null;
+		if (activity.getClass() != null) {
+			cl = activity.getClass().getClassLoader();
+		}
+		if (cl == null) {
+			cl = activity.getClassLoader();
+		}
+		if (cl == null) return;
+		try {
+			bundle.setClassLoader(cl);
+			for (String key : bundle.keySet()) {
+				try {
+					Object val = bundle.get(key);
+					if (val instanceof Bundle) {
+						((Bundle) val).setClassLoader(cl);
+					}
+				} catch (Throwable ignored) {
+				}
+			}
+		} catch (Throwable ignored) {
+		}
+	}
+
 	@Override
 	public void callActivityOnCreate(Activity activity, Bundle icicle, PersistableBundle persistentState) {
 		checkActivity(activity);
-		if (icicle != null && activity != null) {
-			try {
-				ClassLoader cl = null;
-				if (activity.getClass() != null) {
-					cl = activity.getClass().getClassLoader();
-				}
-				if (cl == null) {
-					cl = activity.getClassLoader();
-				}
-				if (cl != null) {
-					icicle.setClassLoader(cl);
-				}
-			} catch (Throwable ignored) {
-			}
+		fixBundleClassLoader(activity, icicle);
+		if (activity != null && activity.getIntent() != null) {
+			fixBundleClassLoader(activity, activity.getIntent().getExtras());
 		}
 		TwitterLegacyTlsCompat.armBeforeCreate(activity);
 		super.callActivityOnCreate(activity, icicle, persistentState);
 		TwitterLegacyTlsCompat.patchAfterCreate(activity);
+		com.featurestic.box.utils.FacebookWebViewViewportFix.applyIfNeeded(activity);
 	}
 
 	@Override
 	public void callActivityOnCreate(Activity activity, Bundle icicle) {
 		checkActivity(activity);
-		if (icicle != null && activity != null) {
-			try {
-				ClassLoader cl = null;
-				if (activity.getClass() != null) {
-					cl = activity.getClass().getClassLoader();
-				}
-				if (cl == null) {
-					cl = activity.getClassLoader();
-				}
-				if (cl != null) {
-					icicle.setClassLoader(cl);
-				}
-			} catch (Throwable ignored) {
-			}
+		fixBundleClassLoader(activity, icicle);
+		if (activity != null && activity.getIntent() != null) {
+			fixBundleClassLoader(activity, activity.getIntent().getExtras());
 		}
 		TwitterLegacyTlsCompat.armBeforeCreate(activity);
 		super.callActivityOnCreate(activity, icicle);
 		TwitterLegacyTlsCompat.patchAfterCreate(activity);
+		com.featurestic.box.utils.FacebookWebViewViewportFix.applyIfNeeded(activity);
+	}
+
+	@Override
+	public void callActivityOnRestoreInstanceState(Activity activity, Bundle savedInstanceState) {
+		fixBundleClassLoader(activity, savedInstanceState);
+		super.callActivityOnRestoreInstanceState(activity, savedInstanceState);
 	}
 
 	@Override
