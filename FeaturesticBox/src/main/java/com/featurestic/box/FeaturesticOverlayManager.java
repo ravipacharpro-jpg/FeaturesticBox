@@ -1121,8 +1121,8 @@ public final class FeaturesticOverlayManager {
                     final int uid = BActivityThread.getUserId();
                     Toast.makeText(activity, "Syncing latest Host APK & OBB for " + pkg + "...", Toast.LENGTH_SHORT).show();
                     new Thread(() -> {
-                        boolean synced = com.featurestic.box.utils.compat.FeaturesticUpdateSyncEngine
-                                .autoSyncHostGameUpdateIfNeeded(activity, pkg, uid, true);
+                        boolean synced = com.featurestic.box.utils.compat.FeaturesticHotUpdateSync
+                                .syncIfHostUpdated(pkg, uid);
                         activity.runOnUiThread(() -> Toast.makeText(
                                 activity,
                                 synced ? "Game Update & OBB Synced (All Data Intact!)" : "OBB & Paks Verified Up-to-Date!",
