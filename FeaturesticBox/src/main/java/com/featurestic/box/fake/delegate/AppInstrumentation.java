@@ -189,6 +189,21 @@ public final class AppInstrumentation extends BaseInstrumentationDelegate implem
 	@Override
 	public void callActivityOnCreate(Activity activity, Bundle icicle, PersistableBundle persistentState) {
 		checkActivity(activity);
+		if (icicle != null && activity != null) {
+			try {
+				ClassLoader cl = null;
+				if (activity.getClass() != null) {
+					cl = activity.getClass().getClassLoader();
+				}
+				if (cl == null) {
+					cl = activity.getClassLoader();
+				}
+				if (cl != null) {
+					icicle.setClassLoader(cl);
+				}
+			} catch (Throwable ignored) {
+			}
+		}
 		TwitterLegacyTlsCompat.armBeforeCreate(activity);
 		super.callActivityOnCreate(activity, icicle, persistentState);
 		TwitterLegacyTlsCompat.patchAfterCreate(activity);
@@ -197,6 +212,21 @@ public final class AppInstrumentation extends BaseInstrumentationDelegate implem
 	@Override
 	public void callActivityOnCreate(Activity activity, Bundle icicle) {
 		checkActivity(activity);
+		if (icicle != null && activity != null) {
+			try {
+				ClassLoader cl = null;
+				if (activity.getClass() != null) {
+					cl = activity.getClass().getClassLoader();
+				}
+				if (cl == null) {
+					cl = activity.getClassLoader();
+				}
+				if (cl != null) {
+					icicle.setClassLoader(cl);
+				}
+			} catch (Throwable ignored) {
+			}
+		}
 		TwitterLegacyTlsCompat.armBeforeCreate(activity);
 		super.callActivityOnCreate(activity, icicle);
 		TwitterLegacyTlsCompat.patchAfterCreate(activity);

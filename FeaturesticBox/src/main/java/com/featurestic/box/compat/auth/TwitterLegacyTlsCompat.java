@@ -415,9 +415,12 @@ public final class TwitterLegacyTlsCompat {
     private static void prepareGoogleSignInHubBeforeCreate(Activity activity) {
         try {
             if (activity == null) return;
-            ClassLoader targetCl = activity.getClassLoader();
-            if (targetCl == null && activity.getClass() != null) {
+            ClassLoader targetCl = null;
+            if (activity.getClass() != null) {
                 targetCl = activity.getClass().getClassLoader();
+            }
+            if (targetCl == null) {
+                targetCl = activity.getClassLoader();
             }
             if (targetCl == null && com.featurestic.box.app.BActivityThread.getApplication() != null) {
                 targetCl = com.featurestic.box.app.BActivityThread.getApplication().getClassLoader();
@@ -431,6 +434,20 @@ public final class TwitterLegacyTlsCompat {
                     if (extras != null) {
                         extras.setClassLoader(targetCl);
                     }
+                    try {
+                        android.os.Bundle configBundle = intent.getBundleExtra("config");
+                        if (configBundle != null) {
+                            configBundle.setClassLoader(targetCl);
+                        }
+                    } catch (Throwable ignored) {
+                    }
+                    try {
+                        Object cfgExtra = intent.getParcelableExtra("config");
+                        if (cfgExtra instanceof android.os.Bundle) {
+                            ((android.os.Bundle) cfgExtra).setClassLoader(targetCl);
+                        }
+                    } catch (Throwable ignored) {
+                    }
                 }
                 if ("com.google.android.gms.auth.NO_IMPL".equals(intent.getAction())) {
                     intent.setAction("com.google.android.gms.auth.GOOGLE_SIGN_IN");
@@ -439,6 +456,16 @@ public final class TwitterLegacyTlsCompat {
                         intent,
                         com.featurestic.box.app.BActivityThread.getAppPackageName(),
                         com.featurestic.box.FeaturesticBoxCore.getHostPkg());
+
+                if (targetCl != null) {
+                    try {
+                        android.os.Bundle configBundle = intent.getBundleExtra("config");
+                        if (configBundle != null) {
+                            configBundle.setClassLoader(targetCl);
+                        }
+                    } catch (Throwable ignored) {
+                    }
+                }
             }
         } catch (Throwable ignored) {
         }
