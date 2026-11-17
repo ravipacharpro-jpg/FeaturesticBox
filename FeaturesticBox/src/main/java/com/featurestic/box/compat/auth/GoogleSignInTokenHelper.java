@@ -744,12 +744,6 @@ public final class GoogleSignInTokenHelper {
             String authCode = curAuthCode;
             if (authCode == null || authCode.isEmpty()) {
                 authCode = tryFetchRealGoogleAuthCode(email);
-                if (authCode == null || authCode.isEmpty()) {
-                    authCode = "4/0A" + Base64.encodeToString(
-                            ((email != null ? email : "user") + ":" + System.currentTimeMillis())
-                                    .getBytes(StandardCharsets.UTF_8),
-                            Base64.URL_SAFE | Base64.NO_WRAP | Base64.NO_PADDING);
-                }
             }
 
             Class<?> cls = account.getClass();
@@ -772,7 +766,11 @@ public final class GoogleSignInTokenHelper {
                             continue;
                         }
                         if (probe.equals(invokeStringGetter(account, "getServerAuthCode"))) {
-                            f.set(account, authCode);
+                            if (authCode != null && !authCode.isEmpty()) {
+                                f.set(account, authCode);
+                            } else {
+                                f.set(account, null);
+                            }
                             continue;
                         }
                         f.set(account, null);
