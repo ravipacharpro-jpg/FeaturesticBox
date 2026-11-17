@@ -399,16 +399,28 @@ public final class ExternalAuthRouter {
         }
 
         // Route Google Sign-In (GOOGLE_SIGN_IN / CHOOSE_ACCOUNT / Games Sign-In)
-        // When real Google Play Services is installed, return null so the system dispatches
-        // directly to official GMS SignInActivity, displaying the authentic Google Account Chooser
-        // bottom sheet just like the official game.
+        // Route through VirtualOAuthBridgeActivity as an external auth provider so the calling
+        // activity identity matches the host loader process (com.featurestic.loader, UID 10560).
+        // This eliminates the GMS masquerade check failure while opening the official Google
+        // Account Picker bottom sheet.
         if (isGoogleInteractiveSignInIntent(source)) {
             normalizeGoogleAuthIntentInGuest(source);
-            if (isGooglePlayServicesAvailable()) {
-                return null;
-            }
             int bpid = BActivityThread.getAppPid();
             if (bpid >= 0 && bpid <= 24) {
+                if (isGooglePlayServicesAvailable()) {
+                    Intent providerIntent = new Intent(source);
+                    providerIntent.putExtra(EXTRA_DIRECT_PROVIDER_DISPATCH, true);
+                    Intent bridge = createBaseBridge(
+                            resultTo, resultWho, requestCode, virtualPackage, bpid);
+                    bridge.putExtra(EXTRA_EXTERNAL_AUTH, true);
+                    bridge.putExtra(EXTRA_PROVIDER_INTENT, providerIntent);
+                    bridge.putExtra(EXTRA_PROVIDER_PACKAGE, "com.google.android.gms");
+                    bridge.addFlags(source.getFlags() & (
+                            Intent.FLAG_ACTIVITY_NO_ANIMATION
+                                    | Intent.FLAG_ACTIVITY_CLEAR_TOP
+                                    | Intent.FLAG_ACTIVITY_SINGLE_TOP));
+                    return prepareBridgeForLaunch(bridge);
+                }
                 Intent googleWebBridge = createBaseBridge(
                         resultTo, resultWho, requestCode, virtualPackage, bpid);
                 googleWebBridge.putExtra(EXTRA_EXTERNAL_AUTH, false);
@@ -430,7 +442,6 @@ public final class ExternalAuthRouter {
                 source.setPackage(providerPackage);
             }
             normalizeGoogleAuthIntentInGuest(source);
-            return null;
         }
 
         int bpid = BActivityThread.getAppPid();

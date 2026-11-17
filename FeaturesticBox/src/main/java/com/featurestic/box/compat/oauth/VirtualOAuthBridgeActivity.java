@@ -1166,6 +1166,13 @@ public final class VirtualOAuthBridgeActivity extends Activity {
                     resultCode = RESULT_OK;
                 }
             }
+            if (data != null && (ExternalAuthRouter.isGoogleDirectAuthPackage(providerPkg)
+                    || "com.google.android.gms".equals(providerPkg))) {
+                boolean enriched = GoogleSignInTokenHelper.enrichSignInResultIntent(data, true);
+                if (enriched) {
+                    resultCode = RESULT_OK;
+                }
+            }
             boolean delivered = completeBridgeResult(resultCode, data);
             authDiagnostic("provider_result", providerPkg, delivered);
             return;

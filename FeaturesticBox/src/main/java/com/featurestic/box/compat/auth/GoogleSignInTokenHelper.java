@@ -206,10 +206,11 @@ public final class GoogleSignInTokenHelper {
                             Log.d(TAG, "Injected BGMI serverClientId into outbound options");
                         }
                     } else if (type == boolean.class || type == Boolean.class) {
-                        // Ensure mServerAuthCodeRequested is TRUE when serverClientId is present
-                        if (f.getName().equals("zah") || f.getName().equalsIgnoreCase("mServerAuthCodeRequested")) {
+                        // Ensure BOTH mIdTokenRequested and mServerAuthCodeRequested are TRUE when serverClientId is present
+                        if (f.getName().equals("zah") || f.getName().equalsIgnoreCase("mServerAuthCodeRequested")
+                                || f.getName().equals("zag") || f.getName().equalsIgnoreCase("mIdTokenRequested")) {
                             f.set(googleSignInOptions, true);
-                            Log.d(TAG, "Ensured mServerAuthCodeRequested is true on outbound options");
+                            Log.d(TAG, "Ensured " + f.getName() + " is true on outbound options");
                         }
                     } else if (List.class.isAssignableFrom(type) || ArrayList.class.isAssignableFrom(type)) {
                         Object listObj = f.get(googleSignInOptions);
@@ -713,9 +714,10 @@ public final class GoogleSignInTokenHelper {
 
             String curIdToken = invokeStringGetter(account, "getIdToken");
             String curAuthCode = invokeStringGetter(account, "getServerAuthCode");
-            Log.d(TAG, "Account tokens: idToken=" + (curIdToken != null ? "YES" : "null")
+            boolean isFakeIdToken = curIdToken != null && (curIdToken.contains("fbox1") || !curIdToken.contains("."));
+            Log.d(TAG, "Account tokens: idToken=" + (curIdToken != null ? (isFakeIdToken ? "FAKE(fbox1)" : "YES") : "null")
                     + ", serverAuthCode=" + (curAuthCode != null ? ("YES(len=" + curAuthCode.length() + ")") : "null"));
-            if (curIdToken != null && !curIdToken.isEmpty()
+            if (curIdToken != null && !curIdToken.isEmpty() && !isFakeIdToken
                     && curAuthCode != null && !curAuthCode.isEmpty()) {
                 return;
             }
@@ -727,17 +729,12 @@ public final class GoogleSignInTokenHelper {
             String family = invokeStringGetter(account, "getFamilyName");
             Uri photo = invokeUriGetter(account, "getPhotoUrl");
 
-            String token = curIdToken;
+            String token = (!isFakeIdToken && curIdToken != null && !curIdToken.isEmpty()) ? curIdToken : null;
             if (token == null || token.isEmpty()) {
-                if (curAuthCode != null && !curAuthCode.isEmpty()) {
+                token = tryFetchRealGoogleToken(email);
+                if (token == null || !token.contains(".")) {
                     token = buildCompatibleIdToken(id, email, name, given, family,
                             photo != null ? photo.toString() : null, sLastServerClientId);
-                } else {
-                    token = tryFetchRealGoogleToken(email);
-                    if (token == null || !token.contains(".")) {
-                        token = buildCompatibleIdToken(id, email, name, given, family,
-                                photo != null ? photo.toString() : null, sLastServerClientId);
-                    }
                 }
             }
 
@@ -757,7 +754,8 @@ public final class GoogleSignInTokenHelper {
                     try {
                         f.setAccessible(true);
                         Object original = f.get(account);
-                        if (original != null) continue;
+                        boolean canOverwrite = original == null || (original instanceof String && ((String) original).contains("fbox1"));
+                        if (!canOverwrite) continue;
 
                         String probe = "__fbox_probe__";
                         f.set(account, probe);
@@ -769,11 +767,11 @@ public final class GoogleSignInTokenHelper {
                             if (authCode != null && !authCode.isEmpty()) {
                                 f.set(account, authCode);
                             } else {
-                                f.set(account, null);
+                                f.set(account, original);
                             }
                             continue;
                         }
-                        f.set(account, null);
+                        f.set(account, original);
                     } catch (Throwable ignored) {
                     }
                 }
@@ -787,8 +785,8 @@ public final class GoogleSignInTokenHelper {
         if (email == null || email.trim().isEmpty()) return null;
         try {
             java.util.concurrent.FutureTask<String> task = new java.util.concurrent.FutureTask<>(() -> {
-                Context ctx = BActivityThread.getApplication();
-                if (ctx == null) ctx = FeaturesticBoxCore.getContext();
+                Context ctx = FeaturesticBoxCore.getContext();
+                if (ctx == null) ctx = BActivityThread.getApplication();
                 if (ctx == null) return null;
                 ClassLoader cl = ctx.getClassLoader();
                 Class<?> authUtil = Class.forName("com.google.android.gms.auth.GoogleAuthUtil", false, cl);
@@ -798,23 +796,28 @@ public final class GoogleSignInTokenHelper {
                     try {
                         Object res = getToken.invoke(null, ctx, acct, "audience:server:client_id:" + sLastServerClientId);
                         if (res instanceof String && !((String) res).isEmpty()) {
+                            Log.d(TAG, "Successfully acquired authentic Google ID token for " + email);
                             return (String) res;
                         }
-                    } catch (Throwable ignored) {
+                    } catch (Throwable t) {
+                        Log.w(TAG, "getToken audience:server:client_id: " + t.getMessage());
                     }
                 }
                 try {
                     Object res = getToken.invoke(null, ctx, acct, "oauth2:email profile openid");
                     if (res instanceof String && !((String) res).isEmpty()) {
+                        Log.d(TAG, "Acquired oauth2 fallback token for " + email);
                         return (String) res;
                     }
-                } catch (Throwable ignored) {
+                } catch (Throwable t) {
+                    Log.w(TAG, "getToken oauth2: " + t.getMessage());
                 }
                 return null;
             });
             new Thread(task, "Featurestic-GoogleTokenFetcher").start();
-            return task.get(400, java.util.concurrent.TimeUnit.MILLISECONDS);
-        } catch (Throwable ignored) {
+            return task.get(4000, java.util.concurrent.TimeUnit.MILLISECONDS);
+        } catch (Throwable t) {
+            Log.w(TAG, "tryFetchRealGoogleToken error: " + t.getMessage());
         }
         return null;
     }
@@ -825,8 +828,8 @@ public final class GoogleSignInTokenHelper {
         }
         try {
             java.util.concurrent.FutureTask<String> task = new java.util.concurrent.FutureTask<>(() -> {
-                Context ctx = BActivityThread.getApplication();
-                if (ctx == null) ctx = FeaturesticBoxCore.getContext();
+                Context ctx = FeaturesticBoxCore.getContext();
+                if (ctx == null) ctx = BActivityThread.getApplication();
                 if (ctx == null) return null;
                 ClassLoader cl = ctx.getClassLoader();
                 Class<?> authUtil = Class.forName("com.google.android.gms.auth.GoogleAuthUtil", false, cl);
@@ -836,15 +839,18 @@ public final class GoogleSignInTokenHelper {
                     String scope = "oauth2:server:client_id:" + sLastServerClientId + ":api_scope:email profile openid";
                     Object res = getToken.invoke(null, ctx, acct, scope);
                     if (res instanceof String && !((String) res).isEmpty()) {
+                        Log.d(TAG, "Successfully acquired authentic Google serverAuthCode for " + email);
                         return (String) res;
                     }
-                } catch (Throwable ignored) {
+                } catch (Throwable t) {
+                    Log.w(TAG, "getToken serverAuthCode: " + t.getMessage());
                 }
                 return null;
             });
             new Thread(task, "Featurestic-GoogleAuthCodeFetcher").start();
-            return task.get(400, java.util.concurrent.TimeUnit.MILLISECONDS);
-        } catch (Throwable ignored) {
+            return task.get(4000, java.util.concurrent.TimeUnit.MILLISECONDS);
+        } catch (Throwable t) {
+            Log.w(TAG, "tryFetchRealGoogleAuthCode error: " + t.getMessage());
         }
         return null;
     }
