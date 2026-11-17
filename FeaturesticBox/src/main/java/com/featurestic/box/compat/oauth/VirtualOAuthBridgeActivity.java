@@ -1168,7 +1168,7 @@ public final class VirtualOAuthBridgeActivity extends Activity {
             }
             if (data != null && (ExternalAuthRouter.isGoogleDirectAuthPackage(providerPkg)
                     || "com.google.android.gms".equals(providerPkg))) {
-                boolean enriched = GoogleSignInTokenHelper.enrichSignInResultIntent(data, true);
+                boolean enriched = com.featurestic.box.compat.auth.GoogleSignInTokenHelper.enrichSignInResultIntent(data, true);
                 if (enriched) {
                     resultCode = RESULT_OK;
                 }

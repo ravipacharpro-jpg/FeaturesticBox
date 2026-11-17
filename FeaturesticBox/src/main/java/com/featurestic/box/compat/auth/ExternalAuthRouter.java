@@ -414,7 +414,6 @@ public final class ExternalAuthRouter {
                             resultTo, resultWho, requestCode, virtualPackage, bpid);
                     bridge.putExtra(EXTRA_EXTERNAL_AUTH, true);
                     bridge.putExtra(EXTRA_PROVIDER_INTENT, providerIntent);
-                    bridge.putExtra(EXTRA_PROVIDER_PACKAGE, "com.google.android.gms");
                     bridge.addFlags(source.getFlags() & (
                             Intent.FLAG_ACTIVITY_NO_ANIMATION
                                     | Intent.FLAG_ACTIVITY_CLEAR_TOP
