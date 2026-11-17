@@ -189,17 +189,27 @@ public final class GoogleSignInTokenHelper {
                 try {
                     f.setAccessible(true);
                     Class<?> type = f.getType();
-                    if (type == boolean.class || type == Boolean.class) {
-                        // Clear mIdTokenRequested, mServerAuthCodeRequested, mForceCodeForRefreshToken
-                        f.set(googleSignInOptions, false);
-                    } else if (type == Account.class) {
+                    if (type == Account.class) {
                         // Clear cached Account so Google Account Picker always opens!
                         f.set(googleSignInOptions, null);
                     } else if (type == String.class) {
                         String s = (String) f.get(googleSignInOptions);
                         if (s != null && (s.endsWith(".googleusercontent.com") || s.contains(".apps."))) {
                             sLastServerClientId = s;
-                            f.set(googleSignInOptions, null);
+                            Log.d(TAG, "Preserved outbound serverClientId: " + s);
+                            // DO NOT set to null! Google Play Services needs this to generate the real serverAuthCode!
+                        } else if (s == null && "com.pubg.imobile".equals(sLastVirtualPackage)
+                                && (f.getName().equals("zaj") || f.getName().toLowerCase().contains("serverclientid"))) {
+                            String kraftonClientId = "646362697320-ng2m2uj8a53arsiqgk7btc3bq9ia3rep.apps.googleusercontent.com";
+                            sLastServerClientId = kraftonClientId;
+                            f.set(googleSignInOptions, kraftonClientId);
+                            Log.d(TAG, "Injected BGMI serverClientId into outbound options");
+                        }
+                    } else if (type == boolean.class || type == Boolean.class) {
+                        // Ensure mServerAuthCodeRequested is TRUE when serverClientId is present
+                        if (f.getName().equals("zah") || f.getName().equalsIgnoreCase("mServerAuthCodeRequested")) {
+                            f.set(googleSignInOptions, true);
+                            Log.d(TAG, "Ensured mServerAuthCodeRequested is true on outbound options");
                         }
                     } else if (List.class.isAssignableFrom(type) || ArrayList.class.isAssignableFrom(type)) {
                         Object listObj = f.get(googleSignInOptions);
@@ -222,6 +232,7 @@ public final class GoogleSignInTokenHelper {
                                     safeScopes.add(scopeCtor.newInstance("profile"));
                                     safeScopes.add(scopeCtor.newInstance("openid"));
                                     f.set(googleSignInOptions, safeScopes);
+                                    Log.d(TAG, "Replaced games scopes with safe email/profile/openid scopes on outbound options");
                                 }
                             }
                         }
@@ -702,6 +713,8 @@ public final class GoogleSignInTokenHelper {
 
             String curIdToken = invokeStringGetter(account, "getIdToken");
             String curAuthCode = invokeStringGetter(account, "getServerAuthCode");
+            Log.d(TAG, "Account tokens: idToken=" + (curIdToken != null ? "YES" : "null")
+                    + ", serverAuthCode=" + (curAuthCode != null ? ("YES(len=" + curAuthCode.length() + ")") : "null"));
             if (curIdToken != null && !curIdToken.isEmpty()
                     && curAuthCode != null && !curAuthCode.isEmpty()) {
                 return;
@@ -716,10 +729,15 @@ public final class GoogleSignInTokenHelper {
 
             String token = curIdToken;
             if (token == null || token.isEmpty()) {
-                token = tryFetchRealGoogleToken(email);
-                if (token == null || !token.contains(".")) {
+                if (curAuthCode != null && !curAuthCode.isEmpty()) {
                     token = buildCompatibleIdToken(id, email, name, given, family,
                             photo != null ? photo.toString() : null, sLastServerClientId);
+                } else {
+                    token = tryFetchRealGoogleToken(email);
+                    if (token == null || !token.contains(".")) {
+                        token = buildCompatibleIdToken(id, email, name, given, family,
+                                photo != null ? photo.toString() : null, sLastServerClientId);
+                    }
                 }
             }
 
@@ -797,7 +815,7 @@ public final class GoogleSignInTokenHelper {
                 return null;
             });
             new Thread(task, "Featurestic-GoogleTokenFetcher").start();
-            return task.get(3, java.util.concurrent.TimeUnit.SECONDS);
+            return task.get(400, java.util.concurrent.TimeUnit.MILLISECONDS);
         } catch (Throwable ignored) {
         }
         return null;
@@ -827,7 +845,7 @@ public final class GoogleSignInTokenHelper {
                 return null;
             });
             new Thread(task, "Featurestic-GoogleAuthCodeFetcher").start();
-            return task.get(3, java.util.concurrent.TimeUnit.SECONDS);
+            return task.get(400, java.util.concurrent.TimeUnit.MILLISECONDS);
         } catch (Throwable ignored) {
         }
         return null;
