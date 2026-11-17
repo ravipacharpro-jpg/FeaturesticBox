@@ -202,6 +202,21 @@ public final class ExternalAuthRouter {
         return pkg != null && GOOGLE_DIRECT_AUTH_PACKAGES.contains(pkg);
     }
 
+    public static boolean isGooglePlayServicesAvailable() {
+        try {
+            android.content.Context ctx = FeaturesticBoxCore.getContext();
+            if (ctx == null) {
+                ctx = BActivityThread.getApplication();
+            }
+            if (ctx == null) return false;
+            PackageManager pm = ctx.getPackageManager();
+            pm.getPackageInfo("com.google.android.gms", 0);
+            return true;
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
     /**
      * Normalizes Google Sign-In / Play Games / AccountPicker intents inside the
      * guest :pN process where the guest APK ClassLoader (including SignInConfiguration)
@@ -383,11 +398,15 @@ public final class ExternalAuthRouter {
             }
         }
 
-        // Route Google Sign-In (GOOGLE_SIGN_IN / CHOOSE_ACCOUNT / Games Sign-In) directly to
-        // our Built-In Google Web Login inside VirtualOAuthBridgeActivity so it works 100%
-        // through Web without any GMS SHA-1 DEVELOPER_ERROR (10) and supports 1-tap New ID!
+        // Route Google Sign-In (GOOGLE_SIGN_IN / CHOOSE_ACCOUNT / Games Sign-In)
+        // When real Google Play Services is installed, return null so the system dispatches
+        // directly to official GMS SignInActivity, displaying the authentic Google Account Chooser
+        // bottom sheet just like the official game.
         if (isGoogleInteractiveSignInIntent(source)) {
             normalizeGoogleAuthIntentInGuest(source);
+            if (isGooglePlayServicesAvailable()) {
+                return null;
+            }
             int bpid = BActivityThread.getAppPid();
             if (bpid >= 0 && bpid <= 24) {
                 Intent googleWebBridge = createBaseBridge(

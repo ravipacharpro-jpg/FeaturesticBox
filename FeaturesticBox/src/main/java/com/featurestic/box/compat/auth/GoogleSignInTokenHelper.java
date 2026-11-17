@@ -133,14 +133,17 @@ public final class GoogleSignInTokenHelper {
                 return;
             }
 
-            Class<?> cfgClass = targetConfig.getClass();
+            Parcelable clonedConfig = cloneParcelable(targetConfig);
+            Object configToMutate = clonedConfig != null ? clonedConfig : targetConfig;
+
+            Class<?> cfgClass = configToMutate.getClass();
             while (cfgClass != null && cfgClass != Object.class) {
                 for (Field f : cfgClass.getDeclaredFields()) {
                     if (Modifier.isStatic(f.getModifiers())) continue;
                     f.setAccessible(true);
-                    Object val = f.get(targetConfig);
+                    Object val = f.get(configToMutate);
                     if (val instanceof String && virtualPkg != null && virtualPkg.equals(val)) {
-                        f.set(targetConfig, hostPkg);
+                        f.set(configToMutate, hostPkg);
                     } else if (val instanceof Parcelable
                             && val.getClass().getName().contains("GoogleSignInOptions")) {
                         stripServerClientIdAndGamesScopeRequirement(val);
@@ -150,13 +153,13 @@ public final class GoogleSignInTokenHelper {
             }
 
             if (configBundle != null) {
-                configBundle.putParcelable("config", targetConfig);
+                configBundle.putParcelable("config", (Parcelable) configToMutate);
                 if (guestCl != null) {
                     configBundle.setClassLoader(guestCl);
                 }
                 intent.putExtra("config", configBundle);
             } else {
-                intent.putExtra("config", targetConfig);
+                intent.putExtra("config", (Parcelable) configToMutate);
             }
             if (guestCl != null) {
                 intent.setExtrasClassLoader(guestCl);
@@ -339,6 +342,20 @@ public final class GoogleSignInTokenHelper {
             } catch (Throwable ignored) {
             }
 
+            Field codeField = null;
+            int resultCode = Activity.RESULT_CANCELED;
+            try {
+                codeField = resultInfo.getClass().getDeclaredField("mResultCode");
+                codeField.setAccessible(true);
+                resultCode = codeField.getInt(resultInfo);
+            } catch (Throwable ignored) {
+            }
+
+            // If user explicitly pressed Cancel / Back on the official Google prompt, don't force OK
+            if (resultCode == Activity.RESULT_CANCELED && (data == null || (!data.hasExtra("signInAccount") && !data.hasExtra("googleSignInAccount") && !data.hasExtra(EXTRA_WEB_EMAIL)))) {
+                return;
+            }
+
             // 40962 (0xA002) is SignInHubActivity's request code for GOOGLE_SIGN_IN
             if (data == null && requestCode == 40962) {
                 data = new Intent();
@@ -346,9 +363,7 @@ public final class GoogleSignInTokenHelper {
             }
             if (data != null) {
                 boolean modified = enrichSignInResultIntent(data, requestCode == 40962);
-                if (modified) {
-                    Field codeField = resultInfo.getClass().getDeclaredField("mResultCode");
-                    codeField.setAccessible(true);
+                if (modified && codeField != null) {
                     codeField.setInt(resultInfo, Activity.RESULT_OK);
                 }
             }
@@ -423,6 +438,18 @@ public final class GoogleSignInTokenHelper {
                 }
                 data.removeExtra("errorCode");
                 data.removeExtra("googleSignInStatus");
+                if (guestCl != null) {
+                    try {
+                        Class<?> statusClass = Class.forName("com.google.android.gms.common.api.Status", false, guestCl);
+                        Constructor<?> sc = statusClass.getConstructor(int.class);
+                        sc.setAccessible(true);
+                        Object successStatus = sc.newInstance(0);
+                        if (successStatus instanceof Parcelable) {
+                            data.putExtra("googleSignInStatus", (Parcelable) successStatus);
+                        }
+                    } catch (Throwable ignored) {
+                    }
+                }
                 return true;
             }
         } catch (Throwable t) {
@@ -620,21 +647,32 @@ public final class GoogleSignInTokenHelper {
             String family = invokeStringGetter(account, "getFamilyName");
             Uri photo = invokeUriGetter(account, "getPhotoUrl");
 
-            String token = tryFetchRealGoogleToken(email);
-            if (token == null || !token.contains(".")) {
-                token = buildCompatibleIdToken(id, email, name, given, family,
-                        photo != null ? photo.toString() : null, sLastServerClientId);
+            String token = curIdToken;
+            if (token == null || token.isEmpty()) {
+                token = tryFetchRealGoogleToken(email);
+                if (token == null || !token.contains(".")) {
+                    token = buildCompatibleIdToken(id, email, name, given, family,
+                            photo != null ? photo.toString() : null, sLastServerClientId);
+                }
             }
-            String authCode = curAuthCode != null && !curAuthCode.isEmpty()
-                    ? curAuthCode : ("4/0A" + Base64.encodeToString(
-                    ((email != null ? email : "user") + ":" + System.currentTimeMillis())
-                            .getBytes(StandardCharsets.UTF_8),
-                    Base64.URL_SAFE | Base64.NO_WRAP | Base64.NO_PADDING));
+
+            String authCode = curAuthCode;
+            if (authCode == null || authCode.isEmpty()) {
+                authCode = tryFetchRealGoogleAuthCode(email);
+                if (authCode == null || authCode.isEmpty()) {
+                    authCode = "4/0A" + Base64.encodeToString(
+                            ((email != null ? email : "user") + ":" + System.currentTimeMillis())
+                                    .getBytes(StandardCharsets.UTF_8),
+                            Base64.URL_SAFE | Base64.NO_WRAP | Base64.NO_PADDING);
+                }
+            }
 
             Class<?> cls = account.getClass();
             while (cls != null && cls != Object.class) {
                 for (Field f : cls.getDeclaredFields()) {
-                    if (Modifier.isStatic(f.getModifiers()) || f.getType() != String.class) {
+                    if (Modifier.isStatic(f.getModifiers())) continue;
+                    Class<?> fType = f.getType();
+                    if (fType != String.class) {
                         continue;
                     }
                     try {
@@ -662,32 +700,67 @@ public final class GoogleSignInTokenHelper {
         }
     }
 
-    private static String tryFetchRealGoogleToken(String email) {
+    private static String tryFetchRealGoogleToken(final String email) {
         if (email == null || email.trim().isEmpty()) return null;
         try {
-            Context ctx = BActivityThread.getApplication();
-            if (ctx == null) ctx = FeaturesticBoxCore.getContext();
-            if (ctx == null) return null;
-            ClassLoader cl = ctx.getClassLoader();
-            Class<?> authUtil = Class.forName("com.google.android.gms.auth.GoogleAuthUtil", false, cl);
-            Method getToken = authUtil.getMethod("getToken", Context.class, Account.class, String.class);
-            Account acct = new Account(email, "com.google");
-            if (sLastServerClientId != null && !sLastServerClientId.isEmpty()) {
+            java.util.concurrent.FutureTask<String> task = new java.util.concurrent.FutureTask<>(() -> {
+                Context ctx = BActivityThread.getApplication();
+                if (ctx == null) ctx = FeaturesticBoxCore.getContext();
+                if (ctx == null) return null;
+                ClassLoader cl = ctx.getClassLoader();
+                Class<?> authUtil = Class.forName("com.google.android.gms.auth.GoogleAuthUtil", false, cl);
+                Method getToken = authUtil.getMethod("getToken", Context.class, Account.class, String.class);
+                Account acct = new Account(email, "com.google");
+                if (sLastServerClientId != null && !sLastServerClientId.isEmpty()) {
+                    try {
+                        Object res = getToken.invoke(null, ctx, acct, "audience:server:client_id:" + sLastServerClientId);
+                        if (res instanceof String && !((String) res).isEmpty()) {
+                            return (String) res;
+                        }
+                    } catch (Throwable ignored) {
+                    }
+                }
                 try {
-                    Object res = getToken.invoke(null, ctx, acct, "audience:server:client_id:" + sLastServerClientId);
+                    Object res = getToken.invoke(null, ctx, acct, "oauth2:email profile openid");
                     if (res instanceof String && !((String) res).isEmpty()) {
                         return (String) res;
                     }
                 } catch (Throwable ignored) {
                 }
-            }
-            try {
-                Object res = getToken.invoke(null, ctx, acct, "oauth2:email profile openid");
-                if (res instanceof String && !((String) res).isEmpty()) {
-                    return (String) res;
+                return null;
+            });
+            new Thread(task, "Featurestic-GoogleTokenFetcher").start();
+            return task.get(3, java.util.concurrent.TimeUnit.SECONDS);
+        } catch (Throwable ignored) {
+        }
+        return null;
+    }
+
+    private static String tryFetchRealGoogleAuthCode(final String email) {
+        if (email == null || email.trim().isEmpty() || sLastServerClientId == null || sLastServerClientId.isEmpty()) {
+            return null;
+        }
+        try {
+            java.util.concurrent.FutureTask<String> task = new java.util.concurrent.FutureTask<>(() -> {
+                Context ctx = BActivityThread.getApplication();
+                if (ctx == null) ctx = FeaturesticBoxCore.getContext();
+                if (ctx == null) return null;
+                ClassLoader cl = ctx.getClassLoader();
+                Class<?> authUtil = Class.forName("com.google.android.gms.auth.GoogleAuthUtil", false, cl);
+                Method getToken = authUtil.getMethod("getToken", Context.class, Account.class, String.class);
+                Account acct = new Account(email, "com.google");
+                try {
+                    String scope = "oauth2:server:client_id:" + sLastServerClientId + ":api_scope:email profile openid";
+                    Object res = getToken.invoke(null, ctx, acct, scope);
+                    if (res instanceof String && !((String) res).isEmpty()) {
+                        return (String) res;
+                    }
+                } catch (Throwable ignored) {
                 }
-            } catch (Throwable ignored) {
-            }
+                return null;
+            });
+            new Thread(task, "Featurestic-GoogleAuthCodeFetcher").start();
+            return task.get(3, java.util.concurrent.TimeUnit.SECONDS);
         } catch (Throwable ignored) {
         }
         return null;

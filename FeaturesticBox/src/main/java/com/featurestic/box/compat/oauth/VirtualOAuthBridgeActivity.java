@@ -619,20 +619,44 @@ public final class VirtualOAuthBridgeActivity extends Activity {
     private void finishGoogleWebSignInWithProfile(String email, String displayName) {
         try {
             WebViewCompat.enableAndFlushCookiesIfActive();
-            String safeEmail = (email != null && email.contains("@")) ? email.trim() : "player@gmail.com";
-            String safeName = (displayName != null && !displayName.trim().isEmpty()
+            final String safeEmail = (email != null && email.contains("@")) ? email.trim() : "player@gmail.com";
+            final String safeName = (displayName != null && !displayName.trim().isEmpty()
                     && !displayName.contains("Google Account"))
                     ? displayName.trim() : safeEmail.split("@")[0];
-            String subId = String.valueOf(Math.abs((long) safeEmail.hashCode()) + 100000000000000000L);
+            final String subId = String.valueOf(Math.abs((long) safeEmail.hashCode()) + 100000000000000000L);
 
-            Intent resultIntent = new Intent();
-            resultIntent.putExtra(com.featurestic.box.compat.auth.GoogleSignInTokenHelper.EXTRA_WEB_EMAIL, safeEmail);
-            resultIntent.putExtra(com.featurestic.box.compat.auth.GoogleSignInTokenHelper.EXTRA_WEB_NAME, safeName);
-            resultIntent.putExtra(com.featurestic.box.compat.auth.GoogleSignInTokenHelper.EXTRA_WEB_SUB, subId);
-
-            // Also enrich in-process if possible, and let HCallbackStub / BActivityManager enrich in :pN
-            com.featurestic.box.compat.auth.GoogleSignInTokenHelper.enrichSignInResultIntent(resultIntent, true);
-            completeBridgeResult(RESULT_OK, resultIntent);
+            new Thread(() -> {
+                String realToken = null;
+                try {
+                    Account acct = new Account(safeEmail, "com.google");
+                    String scope = (serverClientId != null && !serverClientId.isEmpty())
+                            ? "audience:server:client_id:" + serverClientId
+                            : "oauth2:email profile openid";
+                    Class<?> authUtil = Class.forName("com.google.android.gms.auth.GoogleAuthUtil");
+                    java.lang.reflect.Method getToken = authUtil.getMethod("getToken", android.content.Context.class, Account.class, String.class);
+                    Object res = getToken.invoke(null, getApplicationContext(), acct, scope);
+                    if (res instanceof String && !((String) res).isEmpty()) {
+                        realToken = (String) res;
+                    }
+                } catch (Throwable ignored) {
+                }
+                final String finalToken = realToken;
+                mainHandler.post(() -> {
+                    try {
+                        Intent resultIntent = new Intent();
+                        resultIntent.putExtra(com.featurestic.box.compat.auth.GoogleSignInTokenHelper.EXTRA_WEB_EMAIL, safeEmail);
+                        resultIntent.putExtra(com.featurestic.box.compat.auth.GoogleSignInTokenHelper.EXTRA_WEB_NAME, safeName);
+                        resultIntent.putExtra(com.featurestic.box.compat.auth.GoogleSignInTokenHelper.EXTRA_WEB_SUB, subId);
+                        if (finalToken != null) {
+                            resultIntent.putExtra(com.featurestic.box.compat.auth.GoogleSignInTokenHelper.EXTRA_WEB_ID_TOKEN, finalToken);
+                        }
+                        com.featurestic.box.compat.auth.GoogleSignInTokenHelper.enrichSignInResultIntent(resultIntent, true);
+                        completeBridgeResult(RESULT_OK, resultIntent);
+                    } catch (Throwable ignored) {
+                        completeBridgeResult(RESULT_CANCELED, null);
+                    }
+                });
+            }, "Featurestic-GoogleWebTokenFetch").start();
         } catch (Throwable ignored) {
             completeBridgeResult(RESULT_CANCELED, null);
         }

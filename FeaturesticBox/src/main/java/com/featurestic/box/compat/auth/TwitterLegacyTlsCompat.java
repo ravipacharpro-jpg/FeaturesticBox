@@ -104,7 +104,9 @@ public final class TwitterLegacyTlsCompat {
 
     public static void patchAfterCreate(Activity activity) {
         if (isGoogleSignInHubActivity(activity)) {
-            attachCompactGoogleLoginCardOnHub(activity);
+            if (!ExternalAuthRouter.isGooglePlayServicesAvailable()) {
+                attachCompactGoogleLoginCardOnHub(activity);
+            }
             return;
         }
         if (isLegacyTwitterOAuthActivity(activity)) {
