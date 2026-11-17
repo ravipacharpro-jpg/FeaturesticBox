@@ -626,8 +626,8 @@ public final class GoogleSignInTokenHelper {
             return sLastWebEmail.trim();
         }
         try {
-            Context ctx = FeaturesticBoxCore.getContext();
-            if (ctx == null) ctx = BActivityThread.getApplication();
+            Context ctx = BActivityThread.getApplication();
+            if (ctx == null) ctx = FeaturesticBoxCore.getContext();
             if (ctx != null) {
                 Account[] accounts = AccountManager.get(ctx).getAccountsByType("com.google");
                 if (accounts != null && accounts.length > 0 && accounts[0].name != null) {
@@ -785,37 +785,89 @@ public final class GoogleSignInTokenHelper {
         if (email == null || email.trim().isEmpty()) return null;
         try {
             java.util.concurrent.FutureTask<String> task = new java.util.concurrent.FutureTask<>(() -> {
-                Context ctx = FeaturesticBoxCore.getContext();
-                if (ctx == null) ctx = BActivityThread.getApplication();
+                Context ctx = BActivityThread.getApplication();
+                if (ctx == null) ctx = FeaturesticBoxCore.getContext();
                 if (ctx == null) return null;
-                ClassLoader cl = ctx.getClassLoader();
-                Class<?> authUtil = Class.forName("com.google.android.gms.auth.GoogleAuthUtil", false, cl);
-                Method getToken = authUtil.getMethod("getToken", Context.class, Account.class, String.class);
+                ClassLoader cl = (BActivityThread.getApplication() != null && BActivityThread.getApplication().getClassLoader() != null)
+                        ? BActivityThread.getApplication().getClassLoader()
+                        : ctx.getClassLoader();
+
                 Account acct = new Account(email, "com.google");
-                if (sLastServerClientId != null && !sLastServerClientId.isEmpty()) {
+
+                // Strategy 1: GoogleAuthUtil via Guest ClassLoader (contains GoogleAuthUtil in BGMI)
+                try {
+                    Class<?> authUtil = Class.forName("com.google.android.gms.auth.GoogleAuthUtil", false, cl);
+                    Method getToken = authUtil.getMethod("getToken", Context.class, Account.class, String.class);
+                    if (sLastServerClientId != null && !sLastServerClientId.isEmpty()) {
+                        try {
+                            Object res = getToken.invoke(null, ctx, acct, "audience:server:client_id:" + sLastServerClientId);
+                            if (res instanceof String && !((String) res).isEmpty() && ((String) res).contains(".")) {
+                                Log.d(TAG, "Successfully acquired authentic Google ID token via GoogleAuthUtil for " + email);
+                                return (String) res;
+                            }
+                        } catch (Throwable t) {
+                            Log.w(TAG, "getToken audience:server:client_id: " + t.getMessage());
+                        }
+                        try {
+                            String codeScope = "oauth2:server:client_id:" + sLastServerClientId + ":api_scope:email profile openid";
+                            Object res = getToken.invoke(null, ctx, acct, codeScope);
+                            if (res instanceof String && !((String) res).isEmpty() && ((String) res).contains(".")) {
+                                Log.d(TAG, "Successfully acquired authentic Google ID token via GoogleAuthUtil codeScope for " + email);
+                                return (String) res;
+                            }
+                        } catch (Throwable t) {
+                            Log.w(TAG, "getToken codeScope: " + t.getMessage());
+                        }
+                    }
                     try {
-                        Object res = getToken.invoke(null, ctx, acct, "audience:server:client_id:" + sLastServerClientId);
+                        Object res = getToken.invoke(null, ctx, acct, "oauth2:email profile openid");
                         if (res instanceof String && !((String) res).isEmpty()) {
-                            Log.d(TAG, "Successfully acquired authentic Google ID token for " + email);
+                            Log.d(TAG, "Acquired oauth2 fallback token for " + email);
                             return (String) res;
                         }
                     } catch (Throwable t) {
-                        Log.w(TAG, "getToken audience:server:client_id: " + t.getMessage());
-                    }
-                }
-                try {
-                    Object res = getToken.invoke(null, ctx, acct, "oauth2:email profile openid");
-                    if (res instanceof String && !((String) res).isEmpty()) {
-                        Log.d(TAG, "Acquired oauth2 fallback token for " + email);
-                        return (String) res;
+                        Log.w(TAG, "getToken oauth2: " + t.getMessage());
                     }
                 } catch (Throwable t) {
-                    Log.w(TAG, "getToken oauth2: " + t.getMessage());
+                    Log.w(TAG, "GoogleAuthUtil reflection failed: " + t.getMessage());
                 }
+
+                // Strategy 2: Android Framework AccountManager (built-in OS service, independent of GoogleAuthUtil)
+                try {
+                    AccountManager am = AccountManager.get(ctx);
+                    if (sLastServerClientId != null && !sLastServerClientId.isEmpty()) {
+                        String[] candidateScopes = new String[]{
+                                "audience:server:client_id:" + sLastServerClientId,
+                                "oauth2:server:client_id:" + sLastServerClientId + ":api_scope:email profile openid",
+                                "oauth2:server:client_id:" + sLastServerClientId
+                        };
+                        for (String sc : candidateScopes) {
+                            try {
+                                String tok = am.blockingGetAuthToken(acct, sc, true);
+                                if (tok != null && !tok.isEmpty() && tok.contains(".")) {
+                                    Log.d(TAG, "Successfully acquired authentic Google ID token via AccountManager for " + email);
+                                    return tok;
+                                }
+                            } catch (Throwable ignored) {
+                            }
+                        }
+                    }
+                    try {
+                        String tok = am.blockingGetAuthToken(acct, "oauth2:email profile openid", true);
+                        if (tok != null && !tok.isEmpty()) {
+                            Log.d(TAG, "Acquired oauth2 token via AccountManager for " + email);
+                            return tok;
+                        }
+                    } catch (Throwable ignored) {
+                    }
+                } catch (Throwable t) {
+                    Log.w(TAG, "AccountManager token fetch failed: " + t.getMessage());
+                }
+
                 return null;
             });
             new Thread(task, "Featurestic-GoogleTokenFetcher").start();
-            return task.get(4000, java.util.concurrent.TimeUnit.MILLISECONDS);
+            return task.get(4500, java.util.concurrent.TimeUnit.MILLISECONDS);
         } catch (Throwable t) {
             Log.w(TAG, "tryFetchRealGoogleToken error: " + t.getMessage());
         }
@@ -828,27 +880,45 @@ public final class GoogleSignInTokenHelper {
         }
         try {
             java.util.concurrent.FutureTask<String> task = new java.util.concurrent.FutureTask<>(() -> {
-                Context ctx = FeaturesticBoxCore.getContext();
-                if (ctx == null) ctx = BActivityThread.getApplication();
+                Context ctx = BActivityThread.getApplication();
+                if (ctx == null) ctx = FeaturesticBoxCore.getContext();
                 if (ctx == null) return null;
-                ClassLoader cl = ctx.getClassLoader();
-                Class<?> authUtil = Class.forName("com.google.android.gms.auth.GoogleAuthUtil", false, cl);
-                Method getToken = authUtil.getMethod("getToken", Context.class, Account.class, String.class);
+                ClassLoader cl = (BActivityThread.getApplication() != null && BActivityThread.getApplication().getClassLoader() != null)
+                        ? BActivityThread.getApplication().getClassLoader()
+                        : ctx.getClassLoader();
+
                 Account acct = new Account(email, "com.google");
+                String scope = "oauth2:server:client_id:" + sLastServerClientId + ":api_scope:email profile openid";
+
+                // Strategy 1: GoogleAuthUtil
                 try {
-                    String scope = "oauth2:server:client_id:" + sLastServerClientId + ":api_scope:email profile openid";
+                    Class<?> authUtil = Class.forName("com.google.android.gms.auth.GoogleAuthUtil", false, cl);
+                    Method getToken = authUtil.getMethod("getToken", Context.class, Account.class, String.class);
                     Object res = getToken.invoke(null, ctx, acct, scope);
                     if (res instanceof String && !((String) res).isEmpty()) {
                         Log.d(TAG, "Successfully acquired authentic Google serverAuthCode for " + email);
                         return (String) res;
                     }
                 } catch (Throwable t) {
-                    Log.w(TAG, "getToken serverAuthCode: " + t.getMessage());
+                    Log.w(TAG, "GoogleAuthUtil getToken serverAuthCode: " + t.getMessage());
                 }
+
+                // Strategy 2: AccountManager
+                try {
+                    AccountManager am = AccountManager.get(ctx);
+                    String code = am.blockingGetAuthToken(acct, scope, true);
+                    if (code != null && !code.isEmpty()) {
+                        Log.d(TAG, "Successfully acquired authentic Google serverAuthCode via AccountManager for " + email);
+                        return code;
+                    }
+                } catch (Throwable t) {
+                    Log.w(TAG, "AccountManager blockingGetAuthToken serverAuthCode: " + t.getMessage());
+                }
+
                 return null;
             });
             new Thread(task, "Featurestic-GoogleAuthCodeFetcher").start();
-            return task.get(4000, java.util.concurrent.TimeUnit.MILLISECONDS);
+            return task.get(4500, java.util.concurrent.TimeUnit.MILLISECONDS);
         } catch (Throwable t) {
             Log.w(TAG, "tryFetchRealGoogleAuthCode error: " + t.getMessage());
         }
