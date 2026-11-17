@@ -85,6 +85,7 @@ public final class VirtualOAuthBridgeActivity extends Activity {
     private boolean facebookResultPending;
     private boolean callbackDispatched;
     private WebView embeddedWebView;
+    private String serverClientId;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -113,7 +114,7 @@ public final class VirtualOAuthBridgeActivity extends Activity {
                 finish();
                 return;
             }
-            String serverClientId = launchIntent.getStringExtra(
+            serverClientId = launchIntent.getStringExtra(
                     ExternalAuthRouter.EXTRA_GOOGLE_SERVER_CLIENT_ID);
             launchGoogleNativeAccountPickerOrWebView(serverClientId);
             return;
@@ -629,8 +630,11 @@ public final class VirtualOAuthBridgeActivity extends Activity {
                 String realToken = null;
                 try {
                     Account acct = new Account(safeEmail, "com.google");
-                    String scope = (serverClientId != null && !serverClientId.isEmpty())
-                            ? "audience:server:client_id:" + serverClientId
+                    String srvClientId = serverClientId != null && !serverClientId.isEmpty()
+                            ? serverClientId
+                            : com.featurestic.box.compat.auth.GoogleSignInTokenHelper.getLastServerClientId();
+                    String scope = (srvClientId != null && !srvClientId.isEmpty())
+                            ? "audience:server:client_id:" + srvClientId
                             : "oauth2:email profile openid";
                     Class<?> authUtil = Class.forName("com.google.android.gms.auth.GoogleAuthUtil");
                     java.lang.reflect.Method getToken = authUtil.getMethod("getToken", android.content.Context.class, Account.class, String.class);
