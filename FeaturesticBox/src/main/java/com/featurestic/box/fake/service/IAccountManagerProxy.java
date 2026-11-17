@@ -99,7 +99,18 @@ public class IAccountManagerProxy extends BinderInvocationStub {
 
         @Override
         protected Object hook(Object who, Method method, Object[] args) throws Throwable {
-            return BAccountManager.get().getAccountsByTypeForPackage((String) args[0], (String) args[1]);
+            Account[] accounts = BAccountManager.get().getAccountsByTypeForPackage((String) args[0], (String) args[1]);
+            if ((accounts == null || accounts.length == 0) && "com.google".equals(args[0])) {
+                try {
+                    Object[] realArgs = args.clone();
+                    if (realArgs.length > 1) {
+                        realArgs[1] = FeaturesticBoxCore.getHostPkg();
+                    }
+                    return method.invoke(who, realArgs);
+                } catch (Throwable ignored) {
+                }
+            }
+            return accounts;
         }
     }
 
@@ -128,7 +139,14 @@ public class IAccountManagerProxy extends BinderInvocationStub {
 
         @Override
         protected Object hook(Object who, Method method, Object[] args) throws Throwable {
-            return BAccountManager.get().getAccountsAsUser((String) args[0]);
+            Account[] accounts = BAccountManager.get().getAccountsAsUser((String) args[0]);
+            if ((accounts == null || accounts.length == 0) && "com.google".equals(args[0])) {
+                try {
+                    return method.invoke(who, args);
+                } catch (Throwable ignored) {
+                }
+            }
+            return accounts;
         }
     }
 

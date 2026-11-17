@@ -97,32 +97,23 @@ public final class GoogleSignInTokenHelper {
             Bundle configBundle = null;
             Parcelable targetConfig = null;
 
+            Parcelable p = null;
             try {
-                Bundle b = intent.getBundleExtra("config");
-                if (b != null) {
-                    configBundle = b;
-                    if (guestCl != null) {
-                        configBundle.setClassLoader(guestCl);
-                    }
-                    targetConfig = configBundle.getParcelable("config");
-                }
+                p = intent.getParcelableExtra("config");
             } catch (Throwable ignored) {
             }
 
-            if (targetConfig == null) {
+            if (p instanceof Bundle) {
+                configBundle = (Bundle) p;
+                if (guestCl != null) {
+                    configBundle.setClassLoader(guestCl);
+                }
                 try {
-                    Parcelable p = intent.getParcelableExtra("config");
-                    if (p instanceof Bundle) {
-                        configBundle = (Bundle) p;
-                        if (guestCl != null) {
-                            configBundle.setClassLoader(guestCl);
-                        }
-                        targetConfig = configBundle.getParcelable("config");
-                    } else if (p != null) {
-                        targetConfig = p;
-                    }
+                    targetConfig = configBundle.getParcelable("config");
                 } catch (Throwable ignored) {
                 }
+            } else if (p != null) {
+                targetConfig = p;
             }
 
             if (targetConfig == null) {
@@ -351,12 +342,30 @@ public final class GoogleSignInTokenHelper {
             } catch (Throwable ignored) {
             }
 
-            // If user explicitly pressed Cancel / Back on the official Google prompt, don't force OK
-            if (resultCode == Activity.RESULT_CANCELED && (data == null || (!data.hasExtra("signInAccount") && !data.hasExtra("googleSignInAccount") && !data.hasExtra(EXTRA_WEB_EMAIL)))) {
+            // 40962 (0xA002) is SignInHubActivity's request code for GOOGLE_SIGN_IN
+            boolean isExplicitCancel = false;
+            if (resultCode == Activity.RESULT_CANCELED) {
+                if (data == null) {
+                    isExplicitCancel = true;
+                } else {
+                    int err = data.getIntExtra("errorCode", 0);
+                    // 16 = CommonStatusCodes.CANCELED, 12501 = GoogleSignInStatusCodes.SIGN_IN_CANCELLED
+                    if (err == 16 || err == 12501) {
+                        isExplicitCancel = true;
+                    } else if (err == 0 && !data.hasExtra("googleSignInStatus")
+                            && !data.hasExtra("signInAccount")
+                            && !data.hasExtra("googleSignInAccount")
+                            && !data.hasExtra(EXTRA_WEB_EMAIL)) {
+                        isExplicitCancel = true;
+                    }
+                }
+            }
+
+            if (isExplicitCancel) {
+                Log.d(TAG, "User explicitly cancelled Google sign in");
                 return;
             }
 
-            // 40962 (0xA002) is SignInHubActivity's request code for GOOGLE_SIGN_IN
             if (data == null && requestCode == 40962) {
                 data = new Intent();
                 dataField.set(resultInfo, data);
@@ -365,6 +374,7 @@ public final class GoogleSignInTokenHelper {
                 boolean modified = enrichSignInResultIntent(data, requestCode == 40962);
                 if (modified && codeField != null) {
                     codeField.setInt(resultInfo, Activity.RESULT_OK);
+                    Log.d(TAG, "Enriched Google Sign-In result to RESULT_OK for req=" + requestCode);
                 }
             }
         } catch (Throwable ignored) {
@@ -386,6 +396,13 @@ public final class GoogleSignInTokenHelper {
             ClassLoader guestCl = (BActivityThread.getApplication() != null
                     && BActivityThread.getApplication().getClassLoader() != null)
                     ? BActivityThread.getApplication().getClassLoader() : null;
+            if (guestCl == null) {
+                if (data.getExtras() != null && data.getExtras().getClassLoader() != null) {
+                    guestCl = data.getExtras().getClassLoader();
+                } else if (FeaturesticBoxCore.getContext() != null) {
+                    guestCl = FeaturesticBoxCore.getContext().getClassLoader();
+                }
+            }
             if (guestCl != null) {
                 data.setExtrasClassLoader(guestCl);
             }
@@ -395,6 +412,16 @@ public final class GoogleSignInTokenHelper {
                 sLastWebName = data.getStringExtra(EXTRA_WEB_NAME);
                 sLastWebSub = data.getStringExtra(EXTRA_WEB_SUB);
                 sLastWebIdToken = data.getStringExtra(EXTRA_WEB_ID_TOKEN);
+            }
+            if (data.hasExtra("authAccount")) {
+                String em = data.getStringExtra("authAccount");
+                if (em != null && !em.isEmpty()) sLastWebEmail = em;
+            } else if (data.hasExtra("accountName")) {
+                String em = data.getStringExtra("accountName");
+                if (em != null && !em.isEmpty()) sLastWebEmail = em;
+            } else if (data.hasExtra(AccountManager.KEY_ACCOUNT_NAME)) {
+                String em = data.getStringExtra(AccountManager.KEY_ACCOUNT_NAME);
+                if (em != null && !em.isEmpty()) sLastWebEmail = em;
             }
 
             boolean hasSignInExtra = data.hasExtra("signInAccount")
@@ -418,7 +445,7 @@ public final class GoogleSignInTokenHelper {
             // without a GoogleSignInAccount, synthesize a fallback GoogleSignInAccount + SignInAccount
             // using the device's real Google account!
             if (googleSignInAccount == null && guestCl != null
-                    && (data.hasExtra(EXTRA_WEB_EMAIL) || data.hasExtra("errorCode") || isSignInHubRequest)) {
+                    && (data.hasExtra(EXTRA_WEB_EMAIL) || data.hasExtra("errorCode") || data.hasExtra("googleSignInStatus") || isSignInHubRequest)) {
                 googleSignInAccount = buildFallbackGoogleSignInAccount(guestCl);
                 if (googleSignInAccount != null && signInAccountWrapper == null) {
                     signInAccountWrapper = wrapInSignInAccount(guestCl, googleSignInAccount);
@@ -441,9 +468,23 @@ public final class GoogleSignInTokenHelper {
                 if (guestCl != null) {
                     try {
                         Class<?> statusClass = Class.forName("com.google.android.gms.common.api.Status", false, guestCl);
-                        Constructor<?> sc = statusClass.getConstructor(int.class);
-                        sc.setAccessible(true);
-                        Object successStatus = sc.newInstance(0);
+                        Object successStatus = null;
+                        try {
+                            Field f = statusClass.getField("RESULT_SUCCESS");
+                            successStatus = f.get(null);
+                        } catch (Throwable ignored) {
+                        }
+                        if (successStatus == null) {
+                            try {
+                                Constructor<?> sc = statusClass.getConstructor(int.class);
+                                sc.setAccessible(true);
+                                successStatus = sc.newInstance(0);
+                            } catch (Throwable ignored) {
+                                Constructor<?> sc = statusClass.getConstructor(int.class, String.class);
+                                sc.setAccessible(true);
+                                successStatus = sc.newInstance(0, null);
+                            }
+                        }
                         if (successStatus instanceof Parcelable) {
                             data.putExtra("googleSignInStatus", (Parcelable) successStatus);
                         }
@@ -569,13 +610,29 @@ public final class GoogleSignInTokenHelper {
     }
 
     private static String resolveDeviceGoogleEmail() {
+        if (sLastWebEmail != null && !sLastWebEmail.trim().isEmpty()) {
+            return sLastWebEmail.trim();
+        }
         try {
-            Context ctx = BActivityThread.getApplication();
-            if (ctx == null) ctx = FeaturesticBoxCore.getContext();
+            Context ctx = FeaturesticBoxCore.getContext();
+            if (ctx == null) ctx = BActivityThread.getApplication();
             if (ctx != null) {
                 Account[] accounts = AccountManager.get(ctx).getAccountsByType("com.google");
                 if (accounts != null && accounts.length > 0 && accounts[0].name != null) {
                     return accounts[0].name;
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        try {
+            android.os.IBinder binder = black.android.os.BRServiceManager.get().getService(Context.ACCOUNT_SERVICE);
+            if (binder != null) {
+                android.accounts.IAccountManager iam = android.accounts.IAccountManager.Stub.asInterface(binder);
+                if (iam != null) {
+                    Account[] accounts = iam.getAccountsAsUser("com.google", 0, FeaturesticBoxCore.getHostPkg());
+                    if (accounts != null && accounts.length > 0 && accounts[0].name != null) {
+                        return accounts[0].name;
+                    }
                 }
             }
         } catch (Throwable ignored) {
