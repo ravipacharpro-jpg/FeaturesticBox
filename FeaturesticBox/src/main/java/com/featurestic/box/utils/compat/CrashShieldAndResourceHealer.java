@@ -123,7 +123,11 @@ public final class CrashShieldAndResourceHealer {
                 || fullTrace.contains("dynamite_measurement")
                 || fullTrace.contains("measurementdynamite")
                 || fullTrace.contains("FirebaseAnalytics")
-                || fullTrace.contains("GoogleAnalytics")) {
+                || fullTrace.contains("GoogleAnalytics")
+                || msg.contains("SignInConfiguration")
+                || fullTrace.contains("SignInHubActivity")
+                || fullTrace.contains("SignInConfiguration")
+                || (t instanceof android.os.BadParcelableException && msg.contains("ClassNotFoundException"))) {
             return true;
         }
 

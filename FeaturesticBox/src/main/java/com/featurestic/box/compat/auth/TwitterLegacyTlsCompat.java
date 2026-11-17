@@ -414,11 +414,23 @@ public final class TwitterLegacyTlsCompat {
 
     private static void prepareGoogleSignInHubBeforeCreate(Activity activity) {
         try {
+            if (activity == null) return;
+            ClassLoader targetCl = activity.getClassLoader();
+            if (targetCl == null && activity.getClass() != null) {
+                targetCl = activity.getClass().getClassLoader();
+            }
+            if (targetCl == null && com.featurestic.box.app.BActivityThread.getApplication() != null) {
+                targetCl = com.featurestic.box.app.BActivityThread.getApplication().getClassLoader();
+            }
+
             android.content.Intent intent = activity.getIntent();
             if (intent != null) {
-                if (com.featurestic.box.app.BActivityThread.getApplication() != null) {
-                    intent.setExtrasClassLoader(
-                            com.featurestic.box.app.BActivityThread.getApplication().getClassLoader());
+                if (targetCl != null) {
+                    intent.setExtrasClassLoader(targetCl);
+                    android.os.Bundle extras = intent.getExtras();
+                    if (extras != null) {
+                        extras.setClassLoader(targetCl);
+                    }
                 }
                 if ("com.google.android.gms.auth.NO_IMPL".equals(intent.getAction())) {
                     intent.setAction("com.google.android.gms.auth.GOOGLE_SIGN_IN");
