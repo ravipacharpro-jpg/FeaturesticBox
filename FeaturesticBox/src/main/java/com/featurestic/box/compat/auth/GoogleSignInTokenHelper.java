@@ -627,11 +627,21 @@ public final class GoogleSignInTokenHelper {
         try {
             android.os.IBinder binder = black.android.os.BRServiceManager.get().getService(Context.ACCOUNT_SERVICE);
             if (binder != null) {
-                android.accounts.IAccountManager iam = android.accounts.IAccountManager.Stub.asInterface(binder);
+                Object iam = black.android.accounts.BRIAccountManagerStub.get().asInterface(binder);
                 if (iam != null) {
-                    Account[] accounts = iam.getAccountsAsUser("com.google", 0, FeaturesticBoxCore.getHostPkg());
-                    if (accounts != null && accounts.length > 0 && accounts[0].name != null) {
-                        return accounts[0].name;
+                    for (Method m : iam.getClass().getMethods()) {
+                        if ("getAccountsAsUser".equals(m.getName())) {
+                            Class<?>[] pt = m.getParameterTypes();
+                            if (pt.length == 3 && pt[0] == String.class && pt[1] == int.class && pt[2] == String.class) {
+                                Object res = m.invoke(iam, "com.google", 0, FeaturesticBoxCore.getHostPkg());
+                                if (res instanceof Account[]) {
+                                    Account[] accounts = (Account[]) res;
+                                    if (accounts.length > 0 && accounts[0].name != null) {
+                                        return accounts[0].name;
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
