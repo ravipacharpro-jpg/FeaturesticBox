@@ -574,6 +574,7 @@ public class BActivityThread extends IBActivityThread.Stub {
                 AppInstrumentation.get().callApplicationOnCreate(application);
                 WebViewCompat.ensureAfterApplicationCreate(application, getUserId(), packageName, processName);
                 onAfterApplicationOnCreate(packageName, processName, application);
+            }
             HookManager.get().checkEnv(HCallbackStub.class);
         } catch (Exception e) {
             e.printStackTrace();
