@@ -143,14 +143,22 @@ public abstract class ClassInvocationStub implements InvocationHandler, IInjectH
                 return method.invoke(mBase, args);
             } catch (InvocationTargetException e) {
                 Throwable cause = e.getTargetException() != null ? e.getTargetException() : e;
-                // Swallow exceptions from base method calls so they never become
-                // pending JNI exceptions that crash cloned games with SIGABRT.
+                // Re-throw ErrnoException so Os.open() callers can handle missing
+                // files properly (e.g. IoUtils.canOpenReadOnly returns false).
+                if (cause instanceof android.system.ErrnoException) {
+                    throw cause;
+                }
+                // Swallow all other exceptions so they never become pending
+                // JNI exceptions that crash cloned games with SIGABRT.
                 // Return a type-appropriate default so callers expecting a
                 // primitive (e.g. boolean from File.exists()) don't get NPE.
                 sanitizeStackTrace(cause).printStackTrace();
                 return defaultValueForReturnType(method != null ? method.getReturnType() : null);
             } catch (Throwable e) {
                 Throwable cause = e.getCause() != null ? e.getCause() : e;
+                if (cause instanceof android.system.ErrnoException) {
+                    throw cause;
+                }
                 sanitizeStackTrace(cause).printStackTrace();
                 return defaultValueForReturnType(method != null ? method.getReturnType() : null);
             }
@@ -166,6 +174,9 @@ public abstract class ClassInvocationStub implements InvocationHandler, IInjectH
             return result;
         } catch (InvocationTargetException e) {
             Throwable cause = e.getTargetException() != null ? e.getTargetException() : e;
+            if (cause instanceof android.system.ErrnoException) {
+                throw cause;
+            }
             // Swallow exceptions from hook methods so they never become pending
             // JNI exceptions that crash cloned games with SIGABRT. Hooks are an
             // interception layer; a failing hook must not abort the target app.
@@ -175,6 +186,9 @@ public abstract class ClassInvocationStub implements InvocationHandler, IInjectH
             return defaultValueForReturnType(method != null ? method.getReturnType() : null);
         } catch (Throwable e) {
             Throwable cause = e.getCause() != null ? e.getCause() : e;
+            if (cause instanceof android.system.ErrnoException) {
+                throw cause;
+            }
             sanitizeStackTrace(cause).printStackTrace();
             return defaultValueForReturnType(method != null ? method.getReturnType() : null);
         }

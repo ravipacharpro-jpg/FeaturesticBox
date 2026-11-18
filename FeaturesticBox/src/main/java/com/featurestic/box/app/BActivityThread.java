@@ -30,6 +30,8 @@ import android.util.Log;
 import android.MetaCore.RemoteManager;
 import android.webkit.WebView;
 import java.io.File;
+import java.io.FileOutputStream;
+import java.io.InputStream;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.security.Security;
@@ -38,6 +40,8 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipFile;
 
 import black.android.app.ActivityThreadAppBindDataContext;
 import black.android.app.BRActivity;
@@ -504,6 +508,12 @@ public class BActivityThread extends IBActivityThread.Stub {
         RNative.setNativeProp("debug.featurestic.app_mode", String.valueOf(appMode));
         assert packageContext != null;
         RCore.get().enableRedirect(packageContext);
+
+        // Extract cloned game's native .so files from APK to no_backup/native/
+        // BEFORE GameActivity.onCreate() tries to load them (e.g. libUE4.so).
+        // Without this, UnsatisfiedLinkError crashes the game at launch.
+        extractNativeLibs(packageContext, applicationInfo);
+
         DeviceProfileCompat.applyActiveProfile();
         NetworkLowLatencyOptimizer.initForProcess(packageContext);
         ThermalAndFrameGuard.initForProcess();
@@ -856,6 +866,67 @@ public class BActivityThread extends IBActivityThread.Stub {
     private void onAfterApplicationOnCreate(String packageName, String processName, Application app) {
         for (AppLifecycleCallback cb : FeaturesticBoxCore.get().getAppLifecycleCallbacks()) {
             cb.afterApplicationOnCreate(packageName, processName, app, getUserId());
+        }
+    }
+
+    /**
+     * Extract the cloned game's native .so files from its APK into the app's
+     * no_backup/native/<abi>/ directory BEFORE GameActivity.onCreate() tries to
+     * load them (e.g. libUE4.so). Without this, UnsatisfiedLinkError crashes
+     * the cloned game at launch.
+     */
+    private void extractNativeLibs(Context ctx, ApplicationInfo appInfo) {
+        if (ctx == null || appInfo == null) return;
+        try {
+            String apkPath = appInfo.sourceDir;
+            if (apkPath == null || apkPath.isEmpty()) return;
+
+            String abiSubDir = FeaturesticBoxCore.is64Bit() ? "arm64-v8a" : "armeabi-v7a";
+            File destDir = new File(new File(ctx.getNoBackupFilesDir(), "native"), abiSubDir);
+            if (!destDir.exists()) destDir.mkdirs();
+
+            // If native libs already extracted, skip
+            File[] existing = destDir.listFiles();
+            if (existing != null && existing.length > 0) return;
+
+            ZipFile zipFile = new ZipFile(apkPath);
+            try {
+                java.util.Enumeration<? extends ZipEntry> entries = zipFile.entries();
+                while (entries.hasMoreElements()) {
+                    ZipEntry entry = entries.nextElement();
+                    String name = entry.getName();
+                    if (name == null || entry.isDirectory()) continue;
+
+                    // Match lib/<abi>/lib*.so files only
+                    if (!name.startsWith("lib/")) continue;
+                    if (!name.endsWith(".so")) continue;
+
+                    // Check if it's for our target ABI
+                    String[] parts = name.split("/");
+                    if (parts.length < 3) continue;
+                    String entryAbi = parts[1];
+                    if (!entryAbi.equals(abiSubDir)) continue;
+
+                    File outFile = new File(destDir, parts[2]);
+                    if (outFile.exists()) continue;
+
+                    try (InputStream in = zipFile.getInputStream(entry);
+                         FileOutputStream out = new FileOutputStream(outFile)) {
+                        byte[] buf = new byte[16384];
+                        int read;
+                        while ((read = in.read(buf)) != -1) {
+                            out.write(buf, 0, read);
+                        }
+                        out.flush();
+                        outFile.setReadable(true, false);
+                        outFile.setExecutable(true, false);
+                    }
+                }
+            } finally {
+                zipFile.close();
+            }
+        } catch (Throwable ignored) {
+            // Native extraction is best-effort; never crash the game because of it.
         }
     }
 }

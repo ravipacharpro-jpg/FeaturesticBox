@@ -64,10 +64,14 @@ public class OsStub extends ClassInvocationStub {
         Object result;
         try {
             result = super.invoke(proxy, method, args);
+        } catch (android.system.ErrnoException e) {
+            // Re-throw ErrnoException so callers like IoUtils.canOpenReadOnly()
+            // can catch it and return false for missing files. Swallowing it
+            // and returning null breaks those callers and causes NPEs.
+            throw e;
         } catch (Throwable e) {
-            // Prevent exceptions from Os methods (e.g. ErrnoException when a
-            // native library file is not found) from becoming pending JNI
-            // exceptions that cause SIGABRT in cloned games.
+            // Prevent other exceptions from Os methods from becoming pending
+            // JNI exceptions that cause SIGABRT in cloned games.
             e.printStackTrace();
             return null;
         }
