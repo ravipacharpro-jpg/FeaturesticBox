@@ -145,12 +145,14 @@ public abstract class ClassInvocationStub implements InvocationHandler, IInjectH
                 Throwable cause = e.getTargetException() != null ? e.getTargetException() : e;
                 // Swallow exceptions from base method calls so they never become
                 // pending JNI exceptions that crash cloned games with SIGABRT.
+                // Return a type-appropriate default so callers expecting a
+                // primitive (e.g. boolean from File.exists()) don't get NPE.
                 sanitizeStackTrace(cause).printStackTrace();
-                return null;
+                return defaultValueForReturnType(method != null ? method.getReturnType() : null);
             } catch (Throwable e) {
                 Throwable cause = e.getCause() != null ? e.getCause() : e;
                 sanitizeStackTrace(cause).printStackTrace();
-                return null;
+                return defaultValueForReturnType(method != null ? method.getReturnType() : null);
             }
         }
 
@@ -167,12 +169,55 @@ public abstract class ClassInvocationStub implements InvocationHandler, IInjectH
             // Swallow exceptions from hook methods so they never become pending
             // JNI exceptions that crash cloned games with SIGABRT. Hooks are an
             // interception layer; a failing hook must not abort the target app.
+            // Return a type-appropriate default so callers expecting a primitive
+            // don't get NPE when unboxing.
             sanitizeStackTrace(cause).printStackTrace();
-            return null;
+            return defaultValueForReturnType(method != null ? method.getReturnType() : null);
         } catch (Throwable e) {
             Throwable cause = e.getCause() != null ? e.getCause() : e;
             sanitizeStackTrace(cause).printStackTrace();
+            return defaultValueForReturnType(method != null ? method.getReturnType() : null);
+        }
+    }
+
+    /**
+     * Returns a type-appropriate default value for the given return type so that
+     * callers expecting a primitive (e.g. boolean from {@code File.exists()})
+     * never receive {@code null} and trigger a NullPointerException during
+     * unboxing. Hooks are an interception layer; a failing hook must degrade
+     * gracefully instead of aborting the target app.
+     */
+    private static Object defaultValueForReturnType(Class<?> returnType) {
+        if (returnType == null || returnType == Void.TYPE) {
             return null;
         }
+        if (!returnType.isPrimitive()) {
+            return null;
+        }
+        if (returnType == Boolean.TYPE) {
+            return false;
+        }
+        if (returnType == Byte.TYPE) {
+            return (byte) 0;
+        }
+        if (returnType == Character.TYPE) {
+            return (char) 0;
+        }
+        if (returnType == Short.TYPE) {
+            return (short) 0;
+        }
+        if (returnType == Integer.TYPE) {
+            return 0;
+        }
+        if (returnType == Long.TYPE) {
+            return 0L;
+        }
+        if (returnType == Float.TYPE) {
+            return 0f;
+        }
+        if (returnType == Double.TYPE) {
+            return 0.0;
+        }
+        return null;
     }
 }
