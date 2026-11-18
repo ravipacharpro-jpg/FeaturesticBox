@@ -15,11 +15,30 @@ public class CopyExecutor implements Executor {
     @Override
     public int exec(BPackageSettings ps, InstallOption option, int userId) {
         try {
+            boolean useHostNativeLibDir = false;
+            if (option.isFlag(InstallOption.FLAG_SYSTEM)) {
+                try {
+                    android.content.pm.ApplicationInfo hostAi = com.featurestic.box.FeaturesticBoxCore
+                            .getPackageManager().getApplicationInfo(ps.pkg.packageName, 0);
+                    if (hostAi != null && hostAi.nativeLibraryDir != null) {
+                        File hostLibDir = new File(hostAi.nativeLibraryDir);
+                        File[] hostLibs = hostLibDir.isDirectory()
+                                ? hostLibDir.listFiles((dir, name) -> name != null && name.endsWith(".so"))
+                                : null;
+                        if (hostLibs != null && hostLibs.length > 0 && hostLibDir.canRead()) {
+                            useHostNativeLibDir = true;
+                        }
+                    }
+                } catch (Throwable ignored) {
+                }
+            }
             File baseApk = new File(ps.pkg.baseCodePath);
             File appLibDir = BEnvironment.getAppLibDir(ps.pkg.packageName);
-            NativeUtils.copyNativeLib(baseApk, appLibDir);
+            if (!useHostNativeLibDir) {
+                NativeUtils.copyNativeLib(baseApk, appLibDir);
+            }
             File parentDir = baseApk.getParentFile();
-            if (parentDir != null && parentDir.isDirectory() && !parentDir.equals(BEnvironment.getAppDir(ps.pkg.packageName))) {
+            if (!useHostNativeLibDir && parentDir != null && parentDir.isDirectory() && !parentDir.equals(BEnvironment.getAppDir(ps.pkg.packageName))) {
                 File[] splitApks = parentDir.listFiles((dir, name) ->
                         name != null && name.endsWith(".apk") && !name.equals(baseApk.getName()));
                 if (splitApks != null) {

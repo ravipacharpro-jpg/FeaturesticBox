@@ -471,9 +471,11 @@ public class BActivityThread extends IBActivityThread.Stub {
         }
         try {
             ClassLoader guestClassLoader = BRLoadedApk.get(loadedApk).getClassLoader();
-            File appLibDir = BEnvironment.getAppLibDir(packageName);
+            File resolvedLibDir = (applicationInfo.nativeLibraryDir != null && new File(applicationInfo.nativeLibraryDir).isDirectory())
+                    ? new File(applicationInfo.nativeLibraryDir)
+                    : BEnvironment.getAppLibDir(packageName);
             File pluginDir = new File(FeaturesticBoxCore.getContext().getNoBackupFilesDir(), "native");
-            DexFileCompat.addNativeLibraryDirectories(guestClassLoader, appLibDir, pluginDir);
+            DexFileCompat.addNativeLibraryDirectories(guestClassLoader, resolvedLibDir, pluginDir);
         } catch (Throwable ignored) {
         }
         int targetSdkVersion = applicationInfo.targetSdkVersion;

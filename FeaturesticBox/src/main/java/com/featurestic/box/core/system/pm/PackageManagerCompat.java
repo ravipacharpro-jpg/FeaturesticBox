@@ -317,10 +317,31 @@ public class PackageManagerCompat {
         GmsCore.applyGeneratedVirtualAppGmsSafety(ai);
 
         ai.dataDir = BEnvironment.getDataDir(ai.packageName, userId).getAbsolutePath();
-        java.io.File appLibDir = BEnvironment.getAppLibDir(ai.packageName);
-        java.io.File[] extractedLibs = appLibDir.listFiles();
-        if (!p.installOption.isFlag(InstallOption.FLAG_SYSTEM) || (extractedLibs != null && extractedLibs.length > 0)) {
-            ai.nativeLibraryDir = appLibDir.getAbsolutePath();
+        ApplicationInfo hostInstalled = null;
+        try {
+            hostInstalled = FeaturesticBoxCore.getPackageManager().getApplicationInfo(p.packageName, 0);
+        } catch (Throwable ignored) {
+        }
+        String canonicalHostLibDir = null;
+        if (p.installOption.isFlag(InstallOption.FLAG_SYSTEM)
+                && hostInstalled != null
+                && hostInstalled.nativeLibraryDir != null) {
+            java.io.File hostLibDir = new java.io.File(hostInstalled.nativeLibraryDir);
+            java.io.File[] hostLibs = hostLibDir.isDirectory()
+                    ? hostLibDir.listFiles((dir, name) -> name != null && name.endsWith(".so"))
+                    : null;
+            if (hostLibs != null && hostLibs.length > 0 && hostLibDir.canRead()) {
+                canonicalHostLibDir = hostLibDir.getAbsolutePath();
+            }
+        }
+        if (canonicalHostLibDir != null) {
+            ai.nativeLibraryDir = canonicalHostLibDir;
+        } else {
+            java.io.File appLibDir = BEnvironment.getAppLibDir(ai.packageName);
+            java.io.File[] extractedLibs = appLibDir.listFiles();
+            if (!p.installOption.isFlag(InstallOption.FLAG_SYSTEM) || (extractedLibs != null && extractedLibs.length > 0)) {
+                ai.nativeLibraryDir = appLibDir.getAbsolutePath();
+            }
         }
         ai.processName = BPackageManagerService.fixProcessName(p.packageName, ai.packageName);
         ai.publicSourceDir = sourceDir;
@@ -342,14 +363,10 @@ public class PackageManagerCompat {
                 BRApplicationInfoL.get(ai)._set_scanPublicSourceDir(gameCodeDir);
                 BRApplicationInfoL.get(ai)._set_scanSourceDir(gameCodeDir);
             }
-            try {
-                ApplicationInfo hostInstalled = FeaturesticBoxCore.getPackageManager().getApplicationInfo(p.packageName, 0);
-                if (hostInstalled != null && hostInstalled.splitSourceDirs != null && hostInstalled.splitSourceDirs.length > 0) {
-                    ai.splitSourceDirs = hostInstalled.splitSourceDirs;
-                    ai.splitPublicSourceDirs = hostInstalled.splitPublicSourceDirs != null
-                            ? hostInstalled.splitPublicSourceDirs : hostInstalled.splitSourceDirs;
-                }
-            } catch (Throwable ignored) {
+            if (hostInstalled != null && hostInstalled.splitSourceDirs != null && hostInstalled.splitSourceDirs.length > 0) {
+                ai.splitSourceDirs = hostInstalled.splitSourceDirs;
+                ai.splitPublicSourceDirs = hostInstalled.splitPublicSourceDirs != null
+                        ? hostInstalled.splitPublicSourceDirs : hostInstalled.splitSourceDirs;
             }
             if (ai.splitSourceDirs == null || ai.splitSourceDirs.length == 0) {
                 try {
