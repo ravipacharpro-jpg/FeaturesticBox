@@ -1,6 +1,7 @@
 #include "BinderHook.h"
 #include <BoxCore.h>
 #include "JniHook/JniHook.h"
+#include <unistd.h>
 
 // android.os.Binder.getCallingUid() is annotated @CriticalNative in Android 8.0-16 (API 26-36).
 // AOT-compiled framework callers invoke it with 0 arguments (no JNIEnv*, no jclass) and without
