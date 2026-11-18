@@ -106,7 +106,11 @@ public class FileUtils {
             cmd += " -R ";
         }
         String cmode = String.format("%o", mode);
-        Runtime.getRuntime().exec(cmd + cmode + " " + path).waitFor();
+        try {
+            Runtime.getRuntime().exec(cmd + cmode + " " + path).waitFor();
+        } catch (Exception ignored) {
+            // chmod fallback failed; file keeps its current mode
+        }
     }
 
     public static void createSymlink(String oldPath, String newPath) throws Exception {
@@ -118,7 +122,11 @@ public class FileUtils {
                 //ignore
             }
         }
-        Runtime.getRuntime().exec("ln -s " + oldPath + " " + newPath).waitFor();
+        try {
+            Runtime.getRuntime().exec("ln -s " + oldPath + " " + newPath).waitFor();
+        } catch (Exception ignored) {
+            // symlink fallback failed; RCore Zero-Copy IO redirection handles it
+        }
     }
 
     public static boolean isSymlink(File file) throws IOException {

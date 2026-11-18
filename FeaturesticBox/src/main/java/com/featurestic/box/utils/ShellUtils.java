@@ -2,6 +2,7 @@ package com.featurestic.box.utils;
 
 import java.io.BufferedReader;
 import java.io.DataOutputStream;
+import java.io.File;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.util.List;
@@ -12,11 +13,35 @@ public class ShellUtils {
     public static final String COMMAND_EXIT = "exit\n";
     public static final String COMMAND_LINE_END = "\n";
 
+    /** Common locations where a root su binary may live. */
+    private static final String[] SU_PATHS = {
+            "/system/bin/su",
+            "/system/xbin/su",
+            "/sbin/su",
+            "/system/bin/.ext/.su",
+            "/system/xbin/daemonsu",
+            "/data/local/xbin/su",
+            "/data/local/bin/su",
+            "/data/local/su",
+    };
 
     private ShellUtils() {
         throw new AssertionError();
     }
 
+    /**
+     * Returns true if a root {@code su} binary exists on the device. On non-rooted
+     * phones this avoids throwing/spamming stack traces every time a root shell is
+     * requested.
+     */
+    public static boolean isSuAvailable() {
+        for (String path : SU_PATHS) {
+            if (new File(path).exists()) {
+                return true;
+            }
+        }
+        return false;
+    }
 
     /**
      * check whether has root permission
@@ -24,6 +49,9 @@ public class ShellUtils {
      * @return
      */
     public static boolean checkRootPermission() {
+        if (!isSuAvailable()) {
+            return false;
+        }
         return execCommand("echo root", true, false).result == 0;
     }
 
@@ -107,6 +135,11 @@ public class ShellUtils {
     public static CommandResult execCommand(String[] commands, boolean isRoot, boolean isNeedResultMsg) {
         int result = -1;
         if (commands == null || commands.length == 0) {
+            return new CommandResult(result, null);
+        }
+        // On non-rooted devices there is no su binary, so skip the root shell
+        // entirely instead of letting Runtime.exec throw a noisy IOException.
+        if (isRoot && !isSuAvailable()) {
             return new CommandResult(result, null);
         }
         Process process = null;
