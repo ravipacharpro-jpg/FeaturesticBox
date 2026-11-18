@@ -850,6 +850,12 @@ public final class VirtualOAuthBridgeActivity extends Activity {
 
                 @android.webkit.JavascriptInterface
                 public void getDroidGuardResult(String s) {
+                    mainHandler.post(() -> {
+                        try {
+                            wv.evaluateJavascript("try{if(window.setDgResult){window.setDgResult('');}}catch(e){}", null);
+                        } catch (Throwable ignored) {
+                        }
+                    });
                 }
 
                 @android.webkit.JavascriptInterface

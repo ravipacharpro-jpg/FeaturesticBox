@@ -266,6 +266,10 @@ public final class AppInstrumentation extends BaseInstrumentationDelegate implem
 		super.callActivityOnResume(activity);
 		NetworkLowLatencyOptimizer.acquireWifiLowLatencyLock(activity);
 		FeaturesticBatteryAndOemGuard.onGameResumed(activity);
+		try {
+			com.featurestic.box.core.RNative.onGameActivityResumed(activity);
+		} catch (Throwable ignored) {
+		}
 	}
 
 	@Override

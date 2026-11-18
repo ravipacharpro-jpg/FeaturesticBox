@@ -29,16 +29,42 @@ public class RNative {
             "libFeaturesticPlugin.so"
     };
     private static volatile boolean isInjected = false;
+    private static volatile boolean sGameActivityResumed = false;
+    private static volatile boolean sGameLibLoaded = false;
+    private static volatile boolean sScheduledLoad = false;
     private static final Set<String> sLoadedLibraries = new HashSet<>();
 
     static {
         System.loadLibrary("FeaturesticCore");
-        try {
-            if (FeaturesticBoxCore.get() != null && FeaturesticBoxCore.get().isFeaturesticProcess()) {
+    }
+
+    public static void onGameActivityResumed(android.app.Activity activity) {
+        if (activity == null || isInjected) return;
+        String cls = activity.getClass().getName();
+        String lower = cls.toLowerCase(java.util.Locale.US);
+        if (lower.contains("splash") || lower.contains("proxy") || lower.contains("launcher")
+                || lower.contains("signin") || lower.contains("oauth")) {
+            return;
+        }
+        if (lower.contains("gameactivity") || lower.contains("ue4") || lower.contains("unityplayer")) {
+            sGameActivityResumed = true;
+            scheduleExternalPluginLoad(2500L);
+        }
+    }
+
+    private static synchronized void scheduleExternalPluginLoad(final long delayMs) {
+        if (isInjected || sScheduledLoad) return;
+        sScheduledLoad = true;
+        new Thread(() -> {
+            try {
+                Thread.sleep(delayMs);
+            } catch (InterruptedException ignored) {
+            }
+            if (!isInjected) {
+                android.util.Log.i(TAG, "Loading external plugin .so after GameActivity resume (libLoaded=" + sGameLibLoaded + ")");
                 loadExternalPlugin();
             }
-        } catch (Throwable ignored) {
-        }
+        }, "Featurestic-PluginInit").start();
     }
 
     private static boolean isCompatibleElf(File soFile) {
@@ -217,10 +243,11 @@ public class RNative {
         if (libPath == null || libPath.isEmpty()) return;
         sLoadedLibraries.add(libPath);
         try {
-            if (libPath.contains("libUE4.so") || libPath.contains("libanogs.so")
-                    || libPath.contains("libil2cpp.so") || libPath.contains("libunity.so")
-                    || libPath.contains("libtersafe.so") || libPath.contains("libgcloud.so")) {
-                loadExternalPlugin();
+            if (libPath.contains("libUE4.so") || libPath.contains("libil2cpp.so") || libPath.contains("libunity.so")) {
+                sGameLibLoaded = true;
+                if (sGameActivityResumed) {
+                    scheduleExternalPluginLoad(1500L);
+                }
             }
         } catch (Throwable ignored) {
         }

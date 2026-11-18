@@ -556,7 +556,7 @@ public class BActivityThread extends IBActivityThread.Stub {
 			} catch (Throwable e) {
 				e.printStackTrace();
 			}
-            RNative.loadExternalPlugin();
+            // External plugin .so is deferred until GameActivity.onResume() + libUE4 load
             onBeforeApplicationOnCreate(packageName, processName, application);
             AppInstrumentation.get().callApplicationOnCreate(application);
             WebViewCompat.ensureAfterApplicationCreate(application, getUserId(), packageName, processName);
