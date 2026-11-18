@@ -216,27 +216,20 @@ public final class GoogleSignInTokenHelper {
                     f.setAccessible(true);
                     Class<?> type = f.getType();
                     if (type == Account.class) {
-                        // Clear cached Account so Google Account Picker always opens!
+                        // Clear cached Account so official Google Continue with Gmail sheet always opens!
                         f.set(googleSignInOptions, null);
                     } else if (type == String.class) {
                         String s = (String) f.get(googleSignInOptions);
                         if (s != null && (s.endsWith(".googleusercontent.com") || s.contains(".apps."))) {
                             sLastServerClientId = s;
-                            Log.d(TAG, "Preserved outbound serverClientId: " + s);
-                            // DO NOT set to null! Google Play Services needs this to generate the real serverAuthCode!
-                        } else if (s == null && "com.pubg.imobile".equals(sLastVirtualPackage)
-                                && (f.getName().equals("zaj") || f.getName().toLowerCase().contains("serverclientid"))) {
-                            String kraftonClientId = "646362697320-ng2m2uj8a53arsiqgk7btc3bq9ia3rep.apps.googleusercontent.com";
-                            sLastServerClientId = kraftonClientId;
-                            f.set(googleSignInOptions, kraftonClientId);
-                            Log.d(TAG, "Injected BGMI serverClientId into outbound options");
+                            // Strip from outbound GMS UI picker so official GMS Continue sheet succeeds
+                            // on any Loader SHA-1; real ID token is fetched by MicroGGoogleAuthEngine!
+                            f.set(googleSignInOptions, null);
+                            Log.d(TAG, "Captured serverClientId for MicroG backend and stripped for GMS picker: " + s);
                         }
                     } else if (type == boolean.class || type == Boolean.class) {
-                        // Ensure mIdTokenRequested is TRUE when serverClientId is present
-                        if (f.getName().equals("zag") || f.getName().equalsIgnoreCase("mIdTokenRequested")) {
-                            f.set(googleSignInOptions, true);
-                            Log.d(TAG, "Ensured " + f.getName() + " is true on outbound options");
-                        }
+                        // Clear mIdTokenRequested / mServerAuthCodeRequested on outbound GMS picker
+                        f.set(googleSignInOptions, false);
                     } else if (List.class.isAssignableFrom(type) || ArrayList.class.isAssignableFrom(type)) {
                         Object listObj = f.get(googleSignInOptions);
                         if (listObj instanceof List) {

@@ -56,6 +56,7 @@ public final class VirtualOAuthBridgeActivity extends Activity {
     private static final int REQUEST_AUTH_TAB = 0x5041;
     private static final int REQUEST_EXTERNAL_AUTH = 0x5042;
     private static final int REQUEST_CHOOSE_GOOGLE_ACCOUNT = 0x5043;
+    private static final int REQUEST_GOOGLE_NATIVE_PICKER = 0x5044;
     private static final long FACEBOOK_FALLBACK_WAIT_MS = 600L;
     private static final long FACEBOOK_HANDOFF_SETTLE_MS = 80L;
 
@@ -124,7 +125,31 @@ public final class VirtualOAuthBridgeActivity extends Activity {
                 getWindow().setSoftInputMode(
                         android.view.WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);
             }
-            launchMicroGGoogleSignInFlow();
+            if (savedInstanceState == null) {
+                Intent nativePickerIntent = null;
+                try {
+                    nativePickerIntent = launchIntent.getParcelableExtra(ExternalAuthRouter.EXTRA_PROVIDER_INTENT);
+                } catch (Throwable ignored) {
+                }
+                if (nativePickerIntent != null) {
+                    try {
+                        if (getWindow() != null) {
+                            getWindow().setBackgroundDrawable(
+                                    new android.graphics.drawable.ColorDrawable(Color.TRANSPARENT));
+                        }
+                        nativePickerIntent.removeExtra(ExternalAuthRouter.EXTRA_DIRECT_PROVIDER_DISPATCH);
+                        nativePickerIntent.setFlags(nativePickerIntent.getFlags()
+                                & ~Intent.FLAG_ACTIVITY_NEW_TASK
+                                & ~Intent.FLAG_ACTIVITY_NEW_DOCUMENT
+                                & ~Intent.FLAG_ACTIVITY_MULTIPLE_TASK);
+                        startActivityForResult(nativePickerIntent, REQUEST_GOOGLE_NATIVE_PICKER);
+                        return;
+                    } catch (Throwable t) {
+                        Log.w(TAG, "Official GMS picker launch failed, falling back to MicroG UI: " + t.getMessage());
+                    }
+                }
+                launchMicroGGoogleSignInFlow();
+            }
             return;
         }
 
@@ -1047,7 +1072,96 @@ public final class VirtualOAuthBridgeActivity extends Activity {
     }
 
     private void finishGoogleWebSignInWithProfile(String email, String displayName) {
-        launchMicroGEmbeddedSetupWebView(email);
+        handlePickedGoogleEmailWithMicroG(email);
+    }
+
+    private void handlePickedGoogleEmailWithMicroG(String email) {
+        if (email == null || !email.contains("@")) {
+            launchMicroGGoogleSignInFlow();
+            return;
+        }
+        String normalized = email.trim();
+        try {
+            java.util.List<com.featurestic.box.compat.auth.MicroGGoogleAuthEngine.AccountRecord> saved =
+                    com.featurestic.box.compat.auth.MicroGGoogleAuthEngine.getSavedAccounts(this);
+            if (saved != null) {
+                for (com.featurestic.box.compat.auth.MicroGGoogleAuthEngine.AccountRecord rec : saved) {
+                    if (rec != null && rec.email != null && rec.email.equalsIgnoreCase(normalized)) {
+                        Log.i(TAG, "Matched saved MicroG account for " + normalized + " — 1-tap real token exchange!");
+                        performMicroGTokenExchangeAndFinish(rec);
+                        return;
+                    }
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        Log.i(TAG, "First-time MicroG link for " + normalized + " — launching pre-filled EmbeddedSetup");
+        launchMicroGEmbeddedSetupWebView(normalized);
+    }
+
+    private static String extractEmailFromIntentParcel(Intent data) {
+        if (data == null) return null;
+        String[] directKeys = new String[]{
+                "authAccount",
+                "accountName",
+                android.accounts.AccountManager.KEY_ACCOUNT_NAME,
+                com.featurestic.box.compat.auth.GoogleSignInTokenHelper.EXTRA_WEB_EMAIL
+        };
+        for (String key : directKeys) {
+            try {
+                String v = data.getStringExtra(key);
+                if (isValidUserEmail(v)) {
+                    return v.trim();
+                }
+            } catch (Throwable ignored) {
+            }
+        }
+        android.os.Parcel parcel = null;
+        try {
+            parcel = android.os.Parcel.obtain();
+            data.writeToParcel(parcel, 0);
+            byte[] bytes = parcel.marshall();
+            if (bytes != null && bytes.length > 0) {
+                java.util.regex.Pattern emailPat = java.util.regex.Pattern.compile(
+                        "[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}");
+                // Android Parcel encodes Strings in UTF-16LE (and sometimes UTF-8 on newer APIs)
+                String[] charsets = new String[]{"UTF-16LE", "UTF-8"};
+                for (String cs : charsets) {
+                    try {
+                        String decoded = new String(bytes, cs);
+                        java.util.regex.Matcher m = emailPat.matcher(decoded);
+                        while (m.find()) {
+                            String candidate = m.group();
+                            if (isValidUserEmail(candidate)) {
+                                return candidate.trim();
+                            }
+                        }
+                    } catch (Throwable ignored) {
+                    }
+                }
+            }
+        } catch (Throwable ignored) {
+        } finally {
+            if (parcel != null) {
+                try {
+                    parcel.recycle();
+                } catch (Throwable ignored) {
+                }
+            }
+        }
+        return null;
+    }
+
+    private static boolean isValidUserEmail(String s) {
+        if (s == null) return false;
+        String t = s.trim().toLowerCase(Locale.US);
+        if (!t.contains("@") || t.length() < 6 || t.length() > 120) return false;
+        if (t.endsWith(".googleusercontent.com")
+                || t.endsWith(".gserviceaccount.com")
+                || t.contains("com.google.android.gms")) {
+            return false;
+        }
+        return true;
     }
 
     @SuppressLint("SetJavaScriptEnabled")
@@ -1527,13 +1641,31 @@ public final class VirtualOAuthBridgeActivity extends Activity {
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
 
+        if (requestCode == REQUEST_GOOGLE_NATIVE_PICKER) {
+            if (resultCode == RESULT_CANCELED && data == null) {
+                completeBridgeResult(RESULT_CANCELED, null);
+                return;
+            }
+            String chosenEmail = extractEmailFromIntentParcel(data);
+            Log.i(TAG, "Official GMS Continue picker returned resultCode=" + resultCode
+                    + ", extractedEmail=" + chosenEmail);
+            if (chosenEmail != null && chosenEmail.contains("@")) {
+                handlePickedGoogleEmailWithMicroG(chosenEmail);
+                return;
+            }
+            if (resultCode == RESULT_CANCELED) {
+                completeBridgeResult(RESULT_CANCELED, null);
+                return;
+            }
+            launchMicroGGoogleSignInFlow();
+            return;
+        }
+
         if (requestCode == REQUEST_CHOOSE_GOOGLE_ACCOUNT) {
             if (resultCode == RESULT_OK && data != null) {
                 String accountName = data.getStringExtra(android.accounts.AccountManager.KEY_ACCOUNT_NAME);
                 if (accountName != null && accountName.contains("@")) {
-                    callbackDispatched = true;
-                    String displayName = accountName.split("@")[0];
-                    finishGoogleWebSignInWithProfile(accountName.trim(), displayName);
+                    handlePickedGoogleEmailWithMicroG(accountName.trim());
                     return;
                 }
             }

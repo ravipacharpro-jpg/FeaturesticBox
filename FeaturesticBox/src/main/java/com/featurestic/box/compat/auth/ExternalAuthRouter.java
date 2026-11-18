@@ -400,11 +400,10 @@ public final class ExternalAuthRouter {
             }
         }
 
-        // Route Google Sign-In (GOOGLE_SIGN_IN / CHOOSE_ACCOUNT / Games Sign-In)
-        // directly to our MicroG-compatible Google Auth Engine inside VirtualOAuthBridgeActivity.
-        // Calling system GMS from the host loader fails SHA-1 verification against Krafton's OAuth
-        // client ID, whereas MicroG's direct `android.googleapis.com/auth` protocol uses the real
-        // target package + real SHA-1 digest to obtain genuine Google RSA-signed ID tokens.
+        // Hybrid Official Google Bottom Sheet + MicroG Real Token Backend:
+        // Launch the real GMS SignInActivity ("Continue with Gmail" bottom sheet) as the UI picker,
+        // then feed the selected Gmail into MicroGGoogleAuthEngine to acquire a genuine Google
+        // RSA-signed ID token & serverAuthCode for the real target game package + real SHA-1.
         if (isGoogleInteractiveSignInIntent(source)) {
             normalizeGoogleAuthIntentInGuest(source);
             int bpid = BActivityThread.getAppPid();
@@ -413,6 +412,11 @@ public final class ExternalAuthRouter {
                         resultTo, resultWho, requestCode, virtualPackage, bpid);
                 googleWebBridge.putExtra(EXTRA_EXTERNAL_AUTH, false);
                 googleWebBridge.putExtra(EXTRA_GOOGLE_WEB_AUTH, true);
+                if (isGooglePlayServicesAvailable()) {
+                    Intent providerIntent = new Intent(source);
+                    providerIntent.putExtra(EXTRA_DIRECT_PROVIDER_DISPATCH, true);
+                    googleWebBridge.putExtra(EXTRA_PROVIDER_INTENT, providerIntent);
+                }
                 String serverClientId = GoogleSignInTokenHelper.getLastServerClientId();
                 if (serverClientId != null && !serverClientId.isEmpty()) {
                     googleWebBridge.putExtra(EXTRA_GOOGLE_SERVER_CLIENT_ID, serverClientId);

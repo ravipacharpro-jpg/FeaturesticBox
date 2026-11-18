@@ -137,9 +137,8 @@ public final class MicroGGoogleAuthEngine {
         String country = locale.getCountry();
         if (country == null || country.isEmpty()) country = "IN";
 
-        boolean isReAuth = reAuthEmail != null && reAuthEmail.contains("@");
-        String baseUrl = isReAuth ? EMBEDDED_RE_AUTH_URL : EMBEDDED_SETUP_URL;
-        Uri.Builder builder = Uri.parse(baseUrl).buildUpon()
+        boolean hasEmail = reAuthEmail != null && reAuthEmail.contains("@");
+        Uri.Builder builder = Uri.parse(EMBEDDED_SETUP_URL).buildUpon()
                 .appendQueryParameter("source", "android")
                 .appendQueryParameter("xoauth_display_name", "Android Device")
                 .appendQueryParameter("lang", lang)
@@ -147,7 +146,7 @@ public final class MicroGGoogleAuthEngine {
                 .appendQueryParameter("langCountry", (lang + "_" + country).toLowerCase(Locale.US))
                 .appendQueryParameter("hl", lang + "-" + country)
                 .appendQueryParameter("tmpl", "new_account");
-        if (isReAuth) {
+        if (hasEmail) {
             builder.appendQueryParameter("Email", reAuthEmail.trim());
         }
         return builder.build().toString();
