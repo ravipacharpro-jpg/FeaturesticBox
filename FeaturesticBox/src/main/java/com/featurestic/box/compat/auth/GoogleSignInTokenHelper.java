@@ -780,7 +780,7 @@ public final class GoogleSignInTokenHelper {
 
             String curIdToken = invokeStringGetter(account, "getIdToken");
             String curAuthCode = invokeStringGetter(account, "getServerAuthCode");
-            boolean isFakeIdToken = curIdToken != null && (curIdToken.contains("fbox1") || !curIdToken.contains("."));
+            boolean isFakeIdToken = curIdToken != null && (curIdToken.contains("fbox1") || curIdToken.contains("ImZib3gx") || !curIdToken.contains("."));
             Log.d(TAG, "Account tokens: idToken=" + (curIdToken != null ? (isFakeIdToken ? "FAKE(fbox1)" : "YES(len=" + curIdToken.length() + ")") : "null")
                     + ", serverAuthCode=" + (curAuthCode != null ? ("YES(len=" + curAuthCode.length() + ")") : "null"));
             if (curIdToken != null && !curIdToken.isEmpty() && !isFakeIdToken) {

@@ -126,35 +126,6 @@ public final class VirtualOAuthBridgeActivity extends Activity {
                         android.view.WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);
             }
             if (savedInstanceState == null) {
-                try {
-                    if (getWindow() != null) {
-                        getWindow().setBackgroundDrawable(
-                                new android.graphics.drawable.ColorDrawable(Color.TRANSPARENT));
-                    }
-                    Intent chooseIntent;
-                    if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.M) {
-                        chooseIntent = AccountManager.newChooseAccountIntent(
-                                null,
-                                null,
-                                new String[]{"com.google"},
-                                "Choose a Google account to continue to BGMI",
-                                null,
-                                null,
-                                null);
-                    } else {
-                        @SuppressWarnings("deprecation")
-                        Intent legacy = AccountManager.newChooseAccountIntent(
-                                null, null, new String[]{"com.google"}, true, null, null, null, null);
-                        chooseIntent = legacy;
-                    }
-                    if (chooseIntent != null && chooseIntent.resolveActivity(getPackageManager()) != null) {
-                        chooseIntent.putExtra("alwaysPromptForAccount", true);
-                        startActivityForResult(chooseIntent, REQUEST_CHOOSE_GOOGLE_ACCOUNT);
-                        return;
-                    }
-                } catch (Throwable t) {
-                    Log.w(TAG, "Official GMS AccountPicker launch failed, falling back to MicroG UI: " + t.getMessage());
-                }
                 launchMicroGGoogleSignInFlow();
             }
             return;
@@ -693,7 +664,8 @@ public final class VirtualOAuthBridgeActivity extends Activity {
             ws.setSupportMultipleWindows(false);
             ws.setSaveFormData(false);
             ws.setAllowFileAccess(false);
-            ws.setUseWideViewPort(false);
+            ws.setUseWideViewPort(true);
+            ws.setLoadWithOverviewMode(true);
             ws.setSupportZoom(false);
             ws.setJavaScriptCanOpenWindowsAutomatically(false);
             String baseUa = ws.getUserAgentString();
