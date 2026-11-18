@@ -3,108 +3,96 @@
 #include "BoxCore.h"
 #import "JniHook/JniHook.h"
 #include "Log.h"
-
-// 🛡️ Add this include to get PROP_VALUE_MAX
 #include <sys/system_properties.h>
+#include <mutex>
+#include <string>
+#include <map>
+#include <cstring>
 
 static std::map<std::string, std::string> prop_map;
+static std::mutex prop_mutex;
 
 HOOK_JNI(jstring, native_get, JNIEnv *env, jobject obj, jstring key, jstring def) {
-
-    // Handle null environment (should never happen)
     if (env == nullptr) {
         return nullptr;
     }
-
-    // If key is null, return default immediately (do NOT call original)
     if (key == nullptr) {
-        return def;  // def may be null, which is valid for SystemProperties.get
-    }
-
-    // Convert key to C string safely
-    const char *key_str = env->GetStringUTFChars(key, nullptr);
-    if (key_str == nullptr) {
-        // Out of memory or other error → fallback to default
         return def;
     }
 
-    // Convert default value if provided
-    const char *def_str = nullptr;
-    if (def != nullptr) {
-        def_str = env->GetStringUTFChars(def, nullptr);
-        // If def_str is null, we still continue but cannot release later
+    const char *key_str = env->GetStringUTFChars(key, nullptr);
+    if (key_str == nullptr) {
+        return def;
     }
 
-    // Look up in property map
-    auto ret = prop_map.find(key_str);
-
-    if (ret != prop_map.end()) {
-        const char *value = ret->second.c_str();
-
-        // Release strings before returning
-        env->ReleaseStringUTFChars(key, key_str);
-        if (def_str != nullptr) {
-            env->ReleaseStringUTFChars(def, def_str);
+    std::string found_value;
+    bool has_override = false;
+    {
+        std::lock_guard<std::mutex> lock(prop_mutex);
+        auto ret = prop_map.find(key_str);
+        if (ret != prop_map.end()) {
+            found_value = ret->second;
+            has_override = true;
         }
-
-        // Create new Java string from the mapped value
-        return env->NewStringUTF(value);
     }
 
-    // Not found: release and call original
     env->ReleaseStringUTFChars(key, key_str);
-    if (def_str != nullptr) {
-        env->ReleaseStringUTFChars(def, def_str);
+
+    if (has_override) {
+        return env->NewStringUTF(found_value.c_str());
     }
 
     return orig_native_get(env, obj, key, def);
 }
-
 
 HOOK_JNI(int, __system_property_get, const char *name, char *value) {
     if (!name || !value) {
         return orig___system_property_get(name, value);
     }
 
-    auto ret = prop_map.find(name);
+    std::string found_value;
+    bool has_override = false;
+    {
+        std::lock_guard<std::mutex> lock(prop_mutex);
+        auto ret = prop_map.find(name);
+        if (ret != prop_map.end()) {
+            found_value = ret->second;
+            has_override = true;
+        }
+    }
 
-    if (ret != prop_map.end()) {
-        const char *ret_value = ret->second.c_str();
-        strncpy(value, ret_value, PROP_VALUE_MAX - 1);
+    if (has_override) {
+        strncpy(value, found_value.c_str(), PROP_VALUE_MAX - 1);
         value[PROP_VALUE_MAX - 1] = '\0';
-        return strlen(value);
+        return static_cast<int>(strlen(value));
     }
 
     return orig___system_property_get(name, value);
 }
 
-
 void SystemPropertiesHook::setProp(const char *key, const char *value) {
     if (key != nullptr && value != nullptr) {
+        std::lock_guard<std::mutex> lock(prop_mutex);
         prop_map[std::string(key)] = std::string(value);
     }
 }
 
 void SystemPropertiesHook::init(JNIEnv *env) {
-    prop_map.insert({"ro.product.board", "umi"});
-    prop_map.insert({"ro.product.brand", "Xiaomi"});
-    prop_map.insert({"ro.product.device", "umi"});
-    prop_map.insert({"ro.build.display.id","QKQ1.191117.002 release-keys"});
-    prop_map.insert({"ro.debuggable", "0"});
-    prop_map.insert({"ro.secure", "1"});
-    prop_map.insert({"ro.boot.verifiedbootstate", "green"});
-    prop_map.insert({"ro.boot.flash.locked", "1"});
-    prop_map.insert({"ro.boot.vbmeta.device_state", "locked"});
-    prop_map.insert({"ro.boot.warranty_bit", "0"});
-    prop_map.insert({"sys.oem_unlock_allowed", "0"});
-    prop_map.insert({"ro.build.host", "c5-miui-ota-bd074.bj"});
-    prop_map.insert({"ro.build.id", "QKQ1.191117.002"});
-    prop_map.insert({"ro.product.manufacturer", "Xiaomi"});
-    prop_map.insert({"ro.product.model", "Mi 10"});
-    prop_map.insert({"ro.product.name", "umi"});
-    prop_map.insert({"ro.build.tags", "release-keys"});
-    prop_map.insert({"ro.build.type", "user"});
-    prop_map.insert({"ro.build.user", "builder"});
+    {
+        std::lock_guard<std::mutex> lock(prop_mutex);
+        // Only keep safe bootloader/debuggable security flags; never hardcode fake Xiaomi Mi 10
+        // ("umi" / "QKQ1.191117.002") properties that conflict with real native libc properties
+        // on OnePlus/OPPO/Samsung devices and trigger libanogs.so environment mismatch detection.
+        prop_map["ro.debuggable"] = "0";
+        prop_map["ro.secure"] = "1";
+        prop_map["ro.boot.verifiedbootstate"] = "green";
+        prop_map["ro.boot.flash.locked"] = "1";
+        prop_map["ro.boot.vbmeta.device_state"] = "locked";
+        prop_map["ro.boot.warranty_bit"] = "0";
+        prop_map["sys.oem_unlock_allowed"] = "0";
+        prop_map["ro.build.tags"] = "release-keys";
+        prop_map["ro.build.type"] = "user";
+    }
 
     JniHook::HookJniFun(
         env,
@@ -115,8 +103,4 @@ void SystemPropertiesHook::init(JNIEnv *env) {
         (void **) (&orig_native_get),
         true
     );
-
-    // Optional native hook (commented out)
-    // shadowhook_hook_sym_name("libc.so","__system_property_get",
-    // (void*)new___system_property_get,(void**)&orig___system_property_get);
 }

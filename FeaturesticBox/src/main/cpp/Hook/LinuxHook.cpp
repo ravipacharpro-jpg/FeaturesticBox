@@ -14,8 +14,6 @@ static inline void releaseRedirectRef(JNIEnv *env, jstring orig, jstring redirec
     }
 }
 
-
-
 HOOK_JNI(jboolean, access, JNIEnv *env, jobject obj, jstring path, jint mode) {
     jstring redirect = path ? IO::redirectPath(env, path) : nullptr;
     jboolean res = orig_access(env, obj, redirect, mode);
@@ -25,43 +23,54 @@ HOOK_JNI(jboolean, access, JNIEnv *env, jobject obj, jstring path, jint mode) {
 
 HOOK_JNI(void, chmod, JNIEnv *env, jobject obj, jstring path, jint mode) {
     jstring redirect = path ? IO::redirectPath(env, path) : nullptr;
-    return orig_chmod(env, obj, redirect, mode);
+    orig_chmod(env, obj, redirect, mode);
+    releaseRedirectRef(env, path, redirect);
 }
 
 HOOK_JNI(void, chown, JNIEnv *env, jobject obj, jstring path, jint mode, jint gid) {
     jstring redirect = path ? IO::redirectPath(env, path) : nullptr;
-    return orig_chown(env, obj, redirect, mode, gid);
+    orig_chown(env, obj, redirect, mode, gid);
+    releaseRedirectRef(env, path, redirect);
 }
 
 HOOK_JNI(void, execv, JNIEnv *env, jobject obj, jstring filename, jobjectArray argv) {
     jstring redirect = filename ? IO::redirectPath(env, filename) : nullptr;
-    return orig_execv(env, obj, redirect, argv);
+    orig_execv(env, obj, redirect, argv);
+    releaseRedirectRef(env, filename, redirect);
 }
 
 HOOK_JNI(void, execve, JNIEnv *env, jobject obj, jstring filename, jobjectArray argv, jobjectArray envp) {
     jstring redirect = filename ? IO::redirectPath(env, filename) : nullptr;
-    return orig_execve(env, obj, redirect, argv, envp);
+    orig_execve(env, obj, redirect, argv, envp);
+    releaseRedirectRef(env, filename, redirect);
 }
 
 HOOK_JNI(jbyteArray, getxattr, JNIEnv *env, jobject obj, jstring path, jstring name) {
     jstring redirect = path ? IO::redirectPath(env, path) : nullptr;
-    return orig_getxattr(env, obj, redirect, name);
+    jbyteArray res = orig_getxattr(env, obj, redirect, name);
+    releaseRedirectRef(env, path, redirect);
+    return res;
 }
 
 HOOK_JNI(void, lchown, JNIEnv *env, jobject obj, jstring path, jint uid, jint gid) {
     jstring redirect = path ? IO::redirectPath(env, path) : nullptr;
-    return orig_lchown(env, obj, redirect, uid, gid);
+    orig_lchown(env, obj, redirect, uid, gid);
+    releaseRedirectRef(env, path, redirect);
 }
 
 HOOK_JNI(void, link, JNIEnv *env, jobject obj, jstring oldPath, jstring newPath) {
     jstring redirectOldPath = oldPath ? IO::redirectPath(env, oldPath) : nullptr;
     jstring redirectNewPath = newPath ? IO::redirectPath(env, newPath) : nullptr;
-    return orig_link(env, obj, redirectOldPath, redirectNewPath);
+    orig_link(env, obj, redirectOldPath, redirectNewPath);
+    releaseRedirectRef(env, oldPath, redirectOldPath);
+    releaseRedirectRef(env, newPath, redirectNewPath);
 }
 
 HOOK_JNI(jobjectArray, listxattr, JNIEnv *env, jobject obj, jstring path) {
     jstring redirect = path ? IO::redirectPath(env, path) : nullptr;
-    return orig_listxattr(env, obj, redirect);
+    jobjectArray res = orig_listxattr(env, obj, redirect);
+    releaseRedirectRef(env, path, redirect);
+    return res;
 }
 
 HOOK_JNI(jobject, lstat, JNIEnv *env, jobject obj, jstring path) {
@@ -73,12 +82,14 @@ HOOK_JNI(jobject, lstat, JNIEnv *env, jobject obj, jstring path) {
 
 HOOK_JNI(void, mkdir, JNIEnv *env, jobject obj, jstring path, jint mode) {
     jstring redirect = path ? IO::redirectPath(env, path) : nullptr;
-    return orig_mkdir(env, obj, redirect, mode);
+    orig_mkdir(env, obj, redirect, mode);
+    releaseRedirectRef(env, path, redirect);
 }
 
 HOOK_JNI(void, mkfifo, JNIEnv *env, jobject obj, jstring path, jint mode) {
     jstring redirect = path ? IO::redirectPath(env, path) : nullptr;
-    return orig_mkfifo(env, obj, redirect, mode);
+    orig_mkfifo(env, obj, redirect, mode);
+    releaseRedirectRef(env, path, redirect);
 }
 
 HOOK_JNI(jobject, open, JNIEnv *env, jobject obj, jstring path, jint flags, jint mode) {
@@ -90,33 +101,42 @@ HOOK_JNI(jobject, open, JNIEnv *env, jobject obj, jstring path, jint flags, jint
 
 HOOK_JNI(jstring, readlink, JNIEnv *env, jobject obj, jstring path) {
     jstring redirect = path ? IO::redirectPath(env, path) : nullptr;
-    return orig_readlink(env, obj, redirect);
+    jstring res = orig_readlink(env, obj, redirect);
+    releaseRedirectRef(env, path, redirect);
+    return res;
 }
 
 HOOK_JNI(jstring, realpath, JNIEnv *env, jobject obj, jstring path) {
     jstring redirect = path ? IO::redirectPath(env, path) : nullptr;
-    return orig_realpath(env, obj, redirect);
+    jstring res = orig_realpath(env, obj, redirect);
+    releaseRedirectRef(env, path, redirect);
+    return res;
 }
 
 HOOK_JNI(void, remove, JNIEnv *env, jobject obj, jstring path) {
     jstring redirect = path ? IO::redirectPath(env, path) : nullptr;
-    return orig_remove(env, obj, redirect);
+    orig_remove(env, obj, redirect);
+    releaseRedirectRef(env, path, redirect);
 }
 
 HOOK_JNI(void, removexattr, JNIEnv *env, jobject obj, jstring path, jstring name) {
     jstring redirect = path ? IO::redirectPath(env, path) : nullptr;
-    return orig_removexattr(env, obj, redirect, name);
+    orig_removexattr(env, obj, redirect, name);
+    releaseRedirectRef(env, path, redirect);
 }
 
 HOOK_JNI(void, rename, JNIEnv *env, jobject obj, jstring oldPath, jstring newPath) {
     jstring redirectOldPath = oldPath ? IO::redirectPath(env, oldPath) : nullptr;
     jstring redirectNewPath = newPath ? IO::redirectPath(env, newPath) : nullptr;
-    return orig_rename(env, obj, redirectOldPath, redirectNewPath);
+    orig_rename(env, obj, redirectOldPath, redirectNewPath);
+    releaseRedirectRef(env, oldPath, redirectOldPath);
+    releaseRedirectRef(env, newPath, redirectNewPath);
 }
 
 HOOK_JNI(void, setxattr, JNIEnv *env, jobject obj, jstring path, jstring name, jbyteArray value, jint flags) {
     jstring redirect = path ? IO::redirectPath(env, path) : nullptr;
-    return orig_setxattr(env, obj, redirect, name, value, flags);
+    orig_setxattr(env, obj, redirect, name, value, flags);
+    releaseRedirectRef(env, path, redirect);
 }
 
 HOOK_JNI(jobject, stat, JNIEnv *env, jobject obj, jstring path) {
@@ -128,18 +148,23 @@ HOOK_JNI(jobject, stat, JNIEnv *env, jobject obj, jstring path) {
 
 HOOK_JNI(jobject, statvfs, JNIEnv *env, jobject obj, jstring path) {
     jstring redirect = path ? IO::redirectPath(env, path) : nullptr;
-    return orig_statvfs(env, obj, redirect);
+    jobject res = orig_statvfs(env, obj, redirect);
+    releaseRedirectRef(env, path, redirect);
+    return res;
 }
 
 HOOK_JNI(void, symlink, JNIEnv *env, jobject obj, jstring oldPath, jstring newPath) {
     jstring redirectOldPath = oldPath ? IO::redirectPath(env, oldPath) : nullptr;
     jstring redirectNewPath = newPath ? IO::redirectPath(env, newPath) : nullptr;
-    return orig_symlink(env, obj, redirectOldPath, redirectNewPath);
+    orig_symlink(env, obj, redirectOldPath, redirectNewPath);
+    releaseRedirectRef(env, oldPath, redirectOldPath);
+    releaseRedirectRef(env, newPath, redirectNewPath);
 }
 
 HOOK_JNI(void, unlink, JNIEnv *env, jobject obj, jstring pathname) {
     jstring redirect = pathname ? IO::redirectPath(env, pathname) : nullptr;
-    return orig_unlink(env, obj, redirect);
+    orig_unlink(env, obj, redirect);
+    releaseRedirectRef(env, pathname, redirect);
 }
 
 void LinuxHook::init(JNIEnv *env) {
@@ -165,5 +190,4 @@ void LinuxHook::init(JNIEnv *env) {
     JniHook::HookJniFun(env, "libcore/io/Linux", "statvfs", "(Ljava/lang/String;)Landroid/system/StructStatVfs;",(void *) new_statvfs, (void **) (&orig_statvfs), false);
     JniHook::HookJniFun(env, "libcore/io/Linux", "symlink", "(Ljava/lang/String;Ljava/lang/String;)V",(void *) new_symlink, (void **) (&orig_symlink), false);
     JniHook::HookJniFun(env, "libcore/io/Linux", "unlink", "(Ljava/lang/String;)V",(void *) new_unlink, (void **) (&orig_unlink), false);
-    
 }

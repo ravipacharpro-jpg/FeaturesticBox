@@ -23,7 +23,6 @@ import java.util.List;
 
 import org.lsposed.lsparanoid.Obfuscate;
 
-import com.featurestic.box.app.BActivityThread;
 import com.featurestic.box.core.RNative;
 import com.featurestic.box.core.env.BEnvironment;
 import com.featurestic.box.utils.FileUtils;
@@ -31,13 +30,8 @@ import com.featurestic.box.utils.FileUtils;
 /**
  * Hardware 90/120Hz Display Unlocker, Surface.setFrameRate Enforcer & Thermal Guard.
  *
- * Ensures devices that unlock 120 FPS in-game also switch their physical display
- * panel to 90Hz/120Hz on Xiaomi/MIUI/HyperOS, Realme/ColorOS, OnePlus, Vivo, and Samsung:
- * 1. Selects the highest refresh-rate Display.Mode matching the active physical resolution.
- * 2. Sets preferredRefreshRate, preferredMinDisplayRefreshRate, and preferredMaxDisplayRefreshRate.
- * 3. Calls Surface.setFrameRate(targetFps, FIXED_SOURCE, ALWAYS) and SurfaceControl.Transaction
- *    directly on the game's rendering SurfaceView!
- * 4. Syncs UE4 EnjoyCJZC.ini / UserCustom.ini 120 FPS CVars.
+ * Uses official Android Window/Surface refresh-rate APIs without mutating Build.MODEL
+ * or writing unencrypted EnjoyCJZC.ini files into BGMI's Saved/Config/Android folder.
  */
 @Obfuscate
 public final class ThermalAndFrameGuard {
@@ -69,23 +63,6 @@ public final class ThermalAndFrameGuard {
             FileUtils.mkdirs(f.getParentFile());
             try (FileOutputStream fos = new FileOutputStream(f)) {
                 fos.write(String.valueOf(clamped).getBytes(StandardCharsets.UTF_8));
-            }
-        } catch (Throwable ignored) {
-        }
-        try {
-            if (clamped >= 120) {
-                DeviceProfileCompat.setPreset(DeviceProfileCompat.PRESET_ROG_PHONE_8);
-            } else if (clamped >= 90) {
-                DeviceProfileCompat.setPreset(DeviceProfileCompat.PRESET_ONEPLUS_12);
-            }
-        } catch (Throwable ignored) {
-        }
-        try {
-            String pkg = BActivityThread.isThreadInit() ? BActivityThread.getAppPackageName() : null;
-            int uid = BActivityThread.isThreadInit() ? BActivityThread.getUserId() : 0;
-            if (pkg != null) {
-                FeaturesticGraphicsOptimizer.applyGraphicsPresetAsync(
-                        pkg, uid, FeaturesticGraphicsOptimizer.getCurrentPreset());
             }
         } catch (Throwable ignored) {
         }
@@ -194,7 +171,6 @@ public final class ThermalAndFrameGuard {
                 window.setAttributes(lp);
             }
 
-            // Apply Surface.setFrameRate & SurfaceControl.Transaction to all game SurfaceViews
             View decor = window.getDecorView();
             if (decor != null) {
                 decor.post(() -> applySurfaceFrameRateRecursive(decor, (float) targetFps));
@@ -234,7 +210,6 @@ public final class ThermalAndFrameGuard {
             for (final SurfaceView sv : surfaces) {
                 if (sv == null || sv.getHolder() == null) continue;
                 if (sHookedSurfaces.add(sv)) {
-                    final float finalFps = targetFps;
                     sv.getHolder().addCallback(new android.view.SurfaceHolder.Callback() {
                         @Override
                         public void surfaceCreated(android.view.SurfaceHolder holder) {
@@ -252,7 +227,6 @@ public final class ThermalAndFrameGuard {
                 Surface surface = sv.getHolder().getSurface();
                 if (surface != null && surface.isValid()) {
                     try {
-                        // setFrameRate(frameRate, FRAME_RATE_COMPATIBILITY_FIXED_SOURCE=1, CHANGE_FRAME_RATE_ALWAYS=1)
                         Method m3 = Surface.class.getMethod("setFrameRate", float.class, int.class, int.class);
                         m3.invoke(surface, targetFps, 1, 1);
                     } catch (Throwable fallback) {
@@ -302,14 +276,6 @@ public final class ThermalAndFrameGuard {
 
     private static volatile long sLastThermalStabilizeMs = 0L;
 
-    /**
-     * Smart Overheat Frame Stabilizer (#6 — 43°C+ Anti-Lag Guard):
-     * When battery temperature rises to 43°C or higher during intense matches, Android's
-     * thermal daemon tries to throttle CPU cores and drop SurfaceFlinger back to 60Hz.
-     * This stabilizer throttles non-essential background worker threads (logging, analytics,
-     * crash reporters) down to Thread.MIN_PRIORITY while locking RenderThread/GameThread/RHIThread
-     * at MAX_PRIORITY and re-asserting the 120Hz Surface frame rate.
-     */
     public static void onThermalTelemetryTick(Activity activity, float batteryTempCelsius, int currentFps) {
         if (!sThermalGuardEnabled || activity == null) return;
         long now = android.os.SystemClock.uptimeMillis();
@@ -355,20 +321,6 @@ public final class ThermalAndFrameGuard {
                     try {
                         t.setPriority(Thread.MAX_PRIORITY);
                     } catch (Throwable ignored) {
-                    }
-                } else {
-                    String lower = name.toLowerCase();
-                    if (lower.contains("bugly")
-                            || lower.contains("analytics")
-                            || lower.contains("report")
-                            || lower.contains("telemetry")
-                            || lower.contains("log")
-                            || lower.contains("workmanager")
-                            || lower.contains("firebase")) {
-                        try {
-                            t.setPriority(Thread.MIN_PRIORITY);
-                        } catch (Throwable ignored) {
-                        }
                     }
                 }
             }

@@ -15,9 +15,11 @@ import com.featurestic.box.utils.FileUtils;
 
 /**
  * 90 / 120 FPS Flagship Gaming Device Profile Unlocker.
- * Synchronizes both Java android.os.Build fields and C++ SystemProperties
- * (ro.product.model, ro.product.manufacturer, ro.product.brand, etc.) across
- * virtual game processes.
+ *
+ * IMPORTANT FOR BGMI v4.7.0 (libanogs.so):
+ * By default, keep the real physical device identity (Build.MODEL / SystemProperties)
+ * intact so Java Build.* and native libc __system_property_get match 100%.
+ * Only apply a spoofed device profile when explicitly enabled via manual opt-in.
  */
 public final class DeviceProfileCompat {
     public static final String PRESET_ROG_PHONE_8 = "ROG_PHONE_8";
@@ -31,9 +33,17 @@ public final class DeviceProfileCompat {
     private DeviceProfileCompat() {
     }
 
+    private static File getManualSpoofFlagFile() {
+        return new File(BEnvironment.getSystemDir(), "featurestic_manual_device_spoof.on");
+    }
+
     public static boolean setPreset(String presetName) {
         if (presetName == null) return false;
         String key = presetName.trim().toUpperCase(Locale.US);
+        if ("DEFAULT".equals(key) || "REAL".equals(key) || "OFF".equals(key)) {
+            clearCustomProfile();
+            return true;
+        }
         switch (key) {
             case PRESET_ROG_PHONE_8:
             case "ASUS_ROG_8":
@@ -57,6 +67,16 @@ public final class DeviceProfileCompat {
         }
     }
 
+    public static void clearCustomProfile() {
+        try {
+            File flag = getManualSpoofFlagFile();
+            if (flag != null && flag.exists()) flag.delete();
+            File conf = BEnvironment.getFakeDeviceConf();
+            if (conf != null && conf.exists()) conf.delete();
+        } catch (Throwable ignored) {
+        }
+    }
+
     public static boolean setCustomProfile(
             String manufacturer, String brand, String model, String device, String product, String board) {
         if (model == null || model.trim().isEmpty()) return false;
@@ -68,10 +88,16 @@ public final class DeviceProfileCompat {
             props.setProperty("device", device != null ? device : "AI2401");
             props.setProperty("product", product != null ? product : "WW_AI2401");
             props.setProperty("board", board != null ? board : "pineapple");
+            props.setProperty("manual_opt_in", "true");
             File conf = BEnvironment.getFakeDeviceConf();
             FileUtils.mkdirs(conf.getParentFile());
             try (FileOutputStream fos = new FileOutputStream(conf)) {
                 props.store(fos, "FeaturesticBox Device Profile");
+            }
+            File flag = getManualSpoofFlagFile();
+            if (flag != null) {
+                FileUtils.mkdirs(flag.getParentFile());
+                flag.createNewFile();
             }
             applyProps(props);
             return true;
@@ -82,29 +108,25 @@ public final class DeviceProfileCompat {
 
     public static void applyActiveProfile() {
         try {
+            File flag = getManualSpoofFlagFile();
             File conf = BEnvironment.getFakeDeviceConf();
-            if (conf != null && conf.isFile() && conf.length() > 0) {
+            if (flag != null && flag.isFile() && conf != null && conf.isFile() && conf.length() > 0) {
                 Properties props = new Properties();
                 try (FileInputStream fis = new FileInputStream(conf)) {
                     props.load(fis);
                 }
-                applyProps(props);
-                return;
+                if ("true".equals(props.getProperty("manual_opt_in"))) {
+                    applyProps(props);
+                    return;
+                }
+            } else if (conf != null && conf.exists()) {
+                // Clean up stale auto-generated fake_device.conf from older builds
+                conf.delete();
             }
         } catch (Throwable ignored) {
         }
-        // Default: Force 120 FPS Flagship Profile (OnePlus 12 CPH2581) so all games unlock 120 FPS
-        try {
-            Properties defProps = new Properties();
-            defProps.setProperty("manufacturer", "OnePlus");
-            defProps.setProperty("brand", "OnePlus");
-            defProps.setProperty("model", "CPH2581");
-            defProps.setProperty("device", "OP5929L1");
-            defProps.setProperty("product", "CPH2581");
-            defProps.setProperty("board", "pineapple");
-            applyProps(defProps);
-        } catch (Throwable ignored) {
-        }
+        // Default: Keep real host Build.* & SystemProperties so Java and Native libc
+        // device identities match 100% (prevents libanogs.so Java-vs-Native model mismatch).
     }
 
     private static void applyProps(Properties props) {

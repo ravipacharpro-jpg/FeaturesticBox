@@ -2,9 +2,12 @@
 #include "Log.h"
 #include <cstring>
 #include <cstdlib>
+#include <limits.h>
+#include <mutex>
 
 jmethodID getAbsolutePathMethodId;
 list<IO::RelocateInfo> relocate_rule;
+static std::mutex relocate_rule_mutex;
 
 const char *IO::redirectPath(const char *__path) {
     if (!__path || __path[0] == '\0') return __path;
@@ -19,6 +22,11 @@ const char *IO::redirectPath(const char *__path) {
             || strstr(__path, "/Download/") != nullptr) {
         return __path;
     }
+
+    thread_local char tls_bufs[4][PATH_MAX];
+    thread_local int tls_idx = 0;
+
+    std::lock_guard<std::mutex> lock(relocate_rule_mutex);
     for (auto iterator = relocate_rule.begin(); iterator != relocate_rule.end(); ++iterator) {
         const IO::RelocateInfo &info = *iterator;
         if (!info.targetPath || !info.relocatePath) continue;
@@ -31,8 +39,9 @@ const char *IO::redirectPath(const char *__path) {
                 && (__path[targetLen] == '\0' || __path[targetLen] == '/')) {
             size_t relocateLen = strlen(info.relocatePath);
             size_t tailLen = strlen(__path + targetLen);
-            char *ret = static_cast<char *>(malloc(relocateLen + tailLen + 1));
-            if (ret) {
+            if (relocateLen + tailLen + 1 <= PATH_MAX) {
+                char *ret = tls_bufs[tls_idx];
+                tls_idx = (tls_idx + 1) & 3;
                 memcpy(ret, info.relocatePath, relocateLen);
                 memcpy(ret + relocateLen, __path + targetLen, tailLen + 1);
                 return ret;
@@ -52,6 +61,12 @@ jobject IO::redirectPath(JNIEnv *env, jobject path) {
 
 void IO::addRule(const char *targetPath, const char *relocatePath) {
     if (!targetPath || !relocatePath) return;
+    std::lock_guard<std::mutex> lock(relocate_rule_mutex);
+    for (auto it = relocate_rule.begin(); it != relocate_rule.end(); ++it) {
+        if (it->targetPath && strcmp(it->targetPath, targetPath) == 0) {
+            return;
+        }
+    }
     IO::RelocateInfo info{};
     info.targetPath = strdup(targetPath);
     info.relocatePath = strdup(relocatePath);
@@ -69,5 +84,6 @@ void IO::init(JNIEnv *env) {
     jclass tmpFile = env->FindClass("java/io/File");
     if (tmpFile) {
         getAbsolutePathMethodId = env->GetMethodID(tmpFile, "getAbsolutePath", "()Ljava/lang/String;");
+        env->DeleteLocalRef(tmpFile);
     }
 }

@@ -16,6 +16,7 @@ LOCAL_CFLAGS := \
 	-fdata-sections \
 	-fstack-protector-strong \
 	-D_FORTIFY_SOURCE=2 \
+	-funwind-tables \
 	-fcommon
 
 # -------- CPP FLAGS (NO CODE REMOVED) --------
@@ -31,8 +32,8 @@ LOCAL_CPPFLAGS := \
 	-D_FORTIFY_SOURCE=2 \
 	-fexceptions \
 	-fno-rtti \
-	-fno-unwind-tables \
-	-fno-asynchronous-unwind-tables \
+	-funwind-tables \
+	-fasynchronous-unwind-tables \
 	-fcommon
 
 # -------- LINKER FLAGS --------

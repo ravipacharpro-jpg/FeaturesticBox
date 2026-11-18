@@ -139,13 +139,15 @@ public class IActivityManagerProxy extends ClassInvocationStub {
 				return method.invoke(who, args);
 			}
 
+			MethodParameterUtils.replaceFirstAppPkg(args);
 			if (BuildCompat.isQ() || BuildCompat.isR()) {
-				if (args.length > 1 && args[1] instanceof String) {
+				if (args.length > 1 && args[1] instanceof String && !args[1].equals(authority)) {
 					args[1] = FeaturesticBoxCore.getHostPkg();
 				}
 			}
 
-			if ("settings".equals(authority) || "media".equals(authority) || "telephony".equals(authority)) {
+			if ("settings".equals(authority) || "media".equals(authority) || "telephony".equals(authority)
+					|| com.featurestic.box.core.GmsCore.GMS_DYNAMITE_AUTHORITY.equals(authority)) {
 				Object content = method.invoke(who, args);
 				if (content != null) {
 					ContentProviderDelegate.update(content, authority);
@@ -156,7 +158,11 @@ public class IActivityManagerProxy extends ClassInvocationStub {
 			ProviderInfo providerInfo = FeaturesticBoxCore.getBPackageManager().resolveContentProvider(authority, FileUtils.FileMode.MODE_IWUSR, BActivityThread.getUserId());
 
 			if (providerInfo == null) {
-				return method.invoke(who, args);
+				Object content = method.invoke(who, args);
+				if (content != null) {
+					ContentProviderDelegate.update(content, authority);
+				}
+				return content;
 			}
 
 			IBinder providerBinder = null;
@@ -222,7 +228,7 @@ public class IActivityManagerProxy extends ClassInvocationStub {
             Intent intent = (Intent) args[intentIdx];
             String resolvedType = (intentIdx + 1 < args.length && args[intentIdx + 1] instanceof String)
                     ? (String) args[intentIdx + 1] : null;
-            if (intent == null) {
+            if (intent == null || com.featurestic.box.core.GmsCore.isMeasurementIntent(intent)) {
                 return null;
             }
             int userId = BActivityThread.getUserId();

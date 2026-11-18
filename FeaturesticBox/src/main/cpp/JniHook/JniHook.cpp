@@ -1,6 +1,7 @@
 #include <jni.h>
 #include <cstdint>
 #include <cstdlib>
+#include <string>
 #include "JniHook.h"
 #include "Log.h"
 #include "ArtMethod.h"
@@ -20,19 +21,19 @@ static struct {
     jmethodID get_method_name_id;
 } HookEnv;
 
-static const char *GetMethodDesc(JNIEnv *env, jobject javaMethod) {
-    auto desc = reinterpret_cast<jstring>(env->CallStaticObjectMethod(HookEnv.method_utils_class, HookEnv.get_method_desc_id, javaMethod));
-    return desc ? env->GetStringUTFChars(desc, JNI_FALSE) : nullptr;
-}
-
-static const char *GetMethodDeclaringClass(JNIEnv *env, jobject javaMethod) {
-    auto desc = reinterpret_cast<jstring>(env->CallStaticObjectMethod(HookEnv.method_utils_class, HookEnv.get_method_declaring_class_id, javaMethod));
-    return desc ? env->GetStringUTFChars(desc, JNI_FALSE) : nullptr;
-}
-
-static const char *GetMethodName(JNIEnv *env, jobject javaMethod) {
-    auto desc = reinterpret_cast<jstring>(env->CallStaticObjectMethod(HookEnv.method_utils_class, HookEnv.get_method_name_id, javaMethod));
-    return desc ? env->GetStringUTFChars(desc, JNI_FALSE) : nullptr;
+static std::string GetJavaStaticString(JNIEnv *env, jmethodID mid, jobject javaMethod) {
+    if (!env || !HookEnv.method_utils_class || !mid || !javaMethod) return {};
+    auto jstr = reinterpret_cast<jstring>(env->CallStaticObjectMethod(HookEnv.method_utils_class, mid, javaMethod));
+    if (env->ExceptionCheck()) {
+        env->ExceptionClear();
+        return {};
+    }
+    if (!jstr) return {};
+    const char *chars = env->GetStringUTFChars(jstr, nullptr);
+    std::string res = chars ? chars : "";
+    if (chars) env->ReleaseStringUTFChars(jstr, chars);
+    env->DeleteLocalRef(jstr);
+    return res;
 }
 
 inline static uint32_t GetAccessFlags(const char *art_method) {
@@ -131,11 +132,11 @@ bool CheckFlags(void *artMethod) {
 }
 
 void JniHook::HookJniFun(JNIEnv *env, jobject java_method, void *new_fun, void **orig_fun, bool is_static) {
-    const char *class_name = GetMethodDeclaringClass(env, java_method);
-    const char *method_name = GetMethodName(env, java_method);
-    const char *sign = GetMethodDesc(env, java_method);
-    if (class_name && method_name && sign) {
-        HookJniFun(env, class_name, method_name, sign, new_fun, orig_fun, is_static);
+    std::string class_name = GetJavaStaticString(env, HookEnv.get_method_declaring_class_id, java_method);
+    std::string method_name = GetJavaStaticString(env, HookEnv.get_method_name_id, java_method);
+    std::string sign = GetJavaStaticString(env, HookEnv.get_method_desc_id, java_method);
+    if (!class_name.empty() && !method_name.empty() && !sign.empty()) {
+        HookJniFun(env, class_name.c_str(), method_name.c_str(), sign.c_str(), new_fun, orig_fun, is_static);
     }
 }
 
@@ -273,7 +274,6 @@ void JniHook::InitJniHook(JNIEnv *env, int api_level) {
         }
     }
     if (foundNativeIdx < 0) {
-        // Standard ArtMethod entry_point_from_jni_ slot fallback (slot 2 on 64-bit, slot 3/4 on 32-bit)
         foundNativeIdx = (sizeof(uintptr_t) == 8) ? 2 : 3;
     }
     HookEnv.art_method_native_offset = foundNativeIdx;

@@ -4,55 +4,26 @@
 #include <sys/stat.h>
 #include <dlfcn.h>
 #include <cstring>
-
-typedef void (*FeaturesticBoxLibLoadedCallback_t)(const char *libPath);
-#include <sys/mman.h>
 #include <unistd.h>
 #include <cstdio>
 
-static void unlockLibraryXomSegments(const char *libPathOrName) {
-    if (!libPathOrName || libPathOrName[0] == '\0') return;
-    const char *baseName = strrchr(libPathOrName, '/');
-    baseName = baseName ? (baseName + 1) : libPathOrName;
-    if (strstr(baseName, "libanogs.so") == nullptr
-            && strstr(baseName, "libUE4.so") == nullptr
-            && strstr(baseName, "libtersafe.so") == nullptr
-            && strstr(baseName, "libgcloud.so") == nullptr
-            && strstr(baseName, "libil2cpp.so") == nullptr
-            && strstr(baseName, "libunity.so") == nullptr
-            && strstr(baseName, "libTDataMaster.so") == nullptr) {
-        return;
-    }
-    FILE *fp = fopen("/proc/self/maps", "rt");
-    if (!fp) return;
-    long pageSize = sysconf(_SC_PAGESIZE);
-    if (pageSize <= 0) pageSize = 4096;
-    char line[512];
-    while (fgets(line, sizeof(line), fp)) {
-        if (strstr(line, baseName) == nullptr) continue;
-        unsigned long long startAddr = 0, endAddr = 0;
-        char perms[8] = {0};
-        if (sscanf(line, "%llx-%llx %7s", &startAddr, &endAddr, perms) == 3) {
-            if (strstr(perms, "---") != nullptr) continue;
-            // Unlock Execute-Only Memory (--xp) to r-xp so .so offset reads/patches never trigger SEGV_ACCERR
-            if (strchr(perms, 'x') != nullptr && strchr(perms, 'r') == nullptr) {
-                uintptr_t alignedStart = static_cast<uintptr_t>(startAddr) & ~static_cast<uintptr_t>(pageSize - 1);
-                uintptr_t alignedEnd = (static_cast<uintptr_t>(endAddr) + pageSize - 1) & ~static_cast<uintptr_t>(pageSize - 1);
-                mprotect(reinterpret_cast<void *>(alignedStart), alignedEnd - alignedStart, PROT_READ | PROT_EXEC);
-            }
-        }
-    }
-    fclose(fp);
-}
+typedef void (*FeaturesticBoxLibLoadedCallback_t)(const char *libPath);
 
+static inline void releaseRedirectJString(JNIEnv *env, jstring orig, jstring redirected) {
+    if (env && redirected && redirected != orig && !env->IsSameObject(orig, redirected)) {
+        env->DeleteLocalRef(redirected);
+    }
+}
 
 static void ensureReadOnlySoIfNeeded(JNIEnv *env, jstring name) {
     if (!env || !name) return;
     const char *nameC = env->GetStringUTFChars(name, nullptr);
     if (!nameC) return;
-    if (nameC[0] == '/' && strstr(nameC, "/data/") != nullptr) {
+    // Never chmod real host /data/app/ libraries (read-only system/installd owned);
+    // only adjust virtual container extracted .so files if writable.
+    if (nameC[0] == '/' && strstr(nameC, "/data/app/") == nullptr && strstr(nameC, "/data/") != nullptr) {
         struct stat st;
-        if (stat(nameC, &st) == 0 && S_ISREG(st.st_mode)) {
+        if (stat(nameC, &st) == 0 && S_ISREG(st.st_mode) && st.st_uid == getuid()) {
             chmod(nameC, S_IRUSR | S_IXUSR | S_IRGRP | S_IXGRP | S_IROTH | S_IXOTH);
         }
     }
@@ -63,11 +34,12 @@ static void notifyLibraryLoadedIfNeeded(JNIEnv *env, jstring targetName) {
     if (!env || !targetName) return;
     const char *nameC = env->GetStringUTFChars(targetName, nullptr);
     if (!nameC) return;
-    unlockLibraryXomSegments(nameC);
+    // IMPORTANT: Never call mprotect() to strip Execute-Only Memory (--xp -> r-xp) on
+    // libanogs.so, libUE4.so, libgcloud.so, or libTDataMaster.so!
+    // BGMI v4.7.0 (libanogs.so) verifies its --xp segments in /proc/self/maps and performs
+    // an XOM self-read check ~7-8s after noticesList: []. Stripping --xp triggers ACE's
+    // delayed background thread crash.
     void *sym = dlsym(RTLD_DEFAULT, "FeaturesticBox_OnLibraryLoaded");
-    if (!sym) {
-        sym = dlsym(RTLD_DEFAULT, "FeaturesticBox_OnLibraryLoaded");
-    }
     if (sym) {
         FeaturesticBoxLibLoadedCallback_t cb = reinterpret_cast<FeaturesticBoxLibLoadedCallback_t>(sym);
         cb(nameC);
@@ -97,6 +69,7 @@ HOOK_JNI(jstring, nativeLoad, JNIEnv *env, jobject obj, jstring name, jobject cl
     if (errorMsg == nullptr) {
         notifyLibraryLoadedIfNeeded(env, targetName);
     }
+    releaseRedirectJString(env, name, redirected);
     return errorMsg;
 }
 
@@ -111,6 +84,7 @@ HOOK_JNI(jstring, nativeLoad2, JNIEnv *env, jobject obj, jstring name, jobject c
     if (errorMsg == nullptr) {
         notifyLibraryLoadedIfNeeded(env, targetName);
     }
+    releaseRedirectJString(env, name, redirected);
     return errorMsg;
 }
 

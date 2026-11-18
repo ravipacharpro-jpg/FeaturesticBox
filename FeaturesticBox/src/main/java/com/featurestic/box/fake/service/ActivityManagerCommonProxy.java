@@ -256,6 +256,9 @@ public class ActivityManagerCommonProxy {
                 return method.invoke(who, args);
             }
             Intent intent = (Intent) args[intentIndex];
+            if (com.featurestic.box.core.GmsCore.isMeasurementIntent(intent)) {
+                return 0;
+            }
 
             int connectionIndex = MethodParameterUtils.getIndex(args, IServiceConnection.class);
             IServiceConnection connection = connectionIndex < 0

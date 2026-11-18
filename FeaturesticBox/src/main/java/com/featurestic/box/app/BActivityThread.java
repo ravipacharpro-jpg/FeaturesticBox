@@ -497,6 +497,11 @@ public class BActivityThread extends IBActivityThread.Stub {
             BRCompatibility.get().setTargetSdkVersion(applicationInfo.targetSdkVersion);
         }
         RNative.init(Build.VERSION.SDK_INT);
+        RNative.setNativeProp("debug.featurestic.host_uid", String.valueOf(FeaturesticBoxCore.getHostUid()));
+        RNative.setNativeProp("debug.featurestic.calling_buid", String.valueOf(getCallingBUid()));
+        int appMode = "com.google.android.gms".equals(packageName) ? 1
+                : ("com.google.android.webview".equals(packageName) ? 2 : 0);
+        RNative.setNativeProp("debug.featurestic.app_mode", String.valueOf(appMode));
         assert packageContext != null;
         RCore.get().enableRedirect(packageContext);
         DeviceProfileCompat.applyActiveProfile();
@@ -505,7 +510,6 @@ public class BActivityThread extends IBActivityThread.Stub {
         CrashShieldAndResourceHealer.installForVirtualProcess(packageContext);
         AudioLowLatencyCompat.initForGameProcess(packageContext);
         FeaturesticAutopilotEngine.autoTuneForProcess(packageContext);
-        StorageDietOptimizer.trimJunkAsync(packageName, getUserId());
         AppBindData bindData = new AppBindData();
         bindData.appInfo = applicationInfo;
         bindData.processName = processName;
