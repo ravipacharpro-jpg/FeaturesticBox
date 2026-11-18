@@ -375,17 +375,11 @@ public final class GoogleSignInTokenHelper {
             // 40962 (0xA002) is SignInHubActivity's request code for GOOGLE_SIGN_IN
             boolean isExplicitCancel = false;
             if (resultCode == Activity.RESULT_CANCELED) {
-                if (data == null) {
+                if (data == null || (!data.hasExtra(EXTRA_WEB_EMAIL) && !data.hasExtra("signInAccount"))) {
                     isExplicitCancel = true;
                 } else {
                     int err = data.getIntExtra("errorCode", 0);
-                    // 16 = CommonStatusCodes.CANCELED, 12501 = GoogleSignInStatusCodes.SIGN_IN_CANCELLED
                     if (err == 16 || err == 12501) {
-                        isExplicitCancel = true;
-                    } else if (err == 0 && !data.hasExtra("googleSignInStatus")
-                            && !data.hasExtra("signInAccount")
-                            && !data.hasExtra("googleSignInAccount")
-                            && !data.hasExtra(EXTRA_WEB_EMAIL)) {
                         isExplicitCancel = true;
                     }
                 }

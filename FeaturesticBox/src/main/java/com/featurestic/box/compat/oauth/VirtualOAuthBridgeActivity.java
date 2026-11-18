@@ -126,27 +126,34 @@ public final class VirtualOAuthBridgeActivity extends Activity {
                         android.view.WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);
             }
             if (savedInstanceState == null) {
-                Intent nativePickerIntent = null;
                 try {
-                    nativePickerIntent = launchIntent.getParcelableExtra(ExternalAuthRouter.EXTRA_PROVIDER_INTENT);
-                } catch (Throwable ignored) {
-                }
-                if (nativePickerIntent != null) {
-                    try {
-                        if (getWindow() != null) {
-                            getWindow().setBackgroundDrawable(
-                                    new android.graphics.drawable.ColorDrawable(Color.TRANSPARENT));
-                        }
-                        nativePickerIntent.removeExtra(ExternalAuthRouter.EXTRA_DIRECT_PROVIDER_DISPATCH);
-                        nativePickerIntent.setFlags(nativePickerIntent.getFlags()
-                                & ~Intent.FLAG_ACTIVITY_NEW_TASK
-                                & ~Intent.FLAG_ACTIVITY_NEW_DOCUMENT
-                                & ~Intent.FLAG_ACTIVITY_MULTIPLE_TASK);
-                        startActivityForResult(nativePickerIntent, REQUEST_GOOGLE_NATIVE_PICKER);
-                        return;
-                    } catch (Throwable t) {
-                        Log.w(TAG, "Official GMS picker launch failed, falling back to MicroG UI: " + t.getMessage());
+                    if (getWindow() != null) {
+                        getWindow().setBackgroundDrawable(
+                                new android.graphics.drawable.ColorDrawable(Color.TRANSPARENT));
                     }
+                    Intent chooseIntent;
+                    if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.M) {
+                        chooseIntent = AccountManager.newChooseAccountIntent(
+                                null,
+                                null,
+                                new String[]{"com.google"},
+                                "Choose a Google account to continue to BGMI",
+                                null,
+                                null,
+                                null);
+                    } else {
+                        @SuppressWarnings("deprecation")
+                        Intent legacy = AccountManager.newChooseAccountIntent(
+                                null, null, new String[]{"com.google"}, true, null, null, null, null);
+                        chooseIntent = legacy;
+                    }
+                    if (chooseIntent != null && chooseIntent.resolveActivity(getPackageManager()) != null) {
+                        chooseIntent.putExtra("alwaysPromptForAccount", true);
+                        startActivityForResult(chooseIntent, REQUEST_CHOOSE_GOOGLE_ACCOUNT);
+                        return;
+                    }
+                } catch (Throwable t) {
+                    Log.w(TAG, "Official GMS AccountPicker launch failed, falling back to MicroG UI: " + t.getMessage());
                 }
                 launchMicroGGoogleSignInFlow();
             }
