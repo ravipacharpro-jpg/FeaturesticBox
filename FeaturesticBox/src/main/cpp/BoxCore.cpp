@@ -858,10 +858,12 @@ static void *nativeGuardWatcherThreadMain(void * /*arg*/) {
             lastCount = count;
             sGameLibLoadedCount.store(count, std::memory_order_relaxed);
             sanitizeInheritedPtyFileDescriptors();
-            installHeapAndRefBaseSafetyGuards();
-            installOrReassertPassiveNativeCrashDiagnostics();
+            // NOTE: Removed installHeapAndRefBaseSafetyGuards() and
+            // installOrReassertPassiveNativeCrashDiagnostics() - they were causing
+            // SIGBUS/SIGSEGV crashes
         } else if (count > 0 && (i % 4 == 0)) {
-            installOrReassertPassiveNativeCrashDiagnostics();
+            // NOTE: installOrReassertPassiveNativeCrashDiagnostics() removed -
+            // it was causing SIGBUS/SIGSEGV crashes
         }
     }
     return nullptr;
@@ -1122,8 +1124,9 @@ void BoxCore::onNativeLibraryLoaded(const char *libPath) {
         }
     }
     sanitizeInheritedPtyFileDescriptors();
-    installHeapAndRefBaseSafetyGuards();
-    installOrReassertPassiveNativeCrashDiagnostics();
+    // NOTE: Removed installHeapAndRefBaseSafetyGuards() and
+    // installOrReassertPassiveNativeCrashDiagnostics() - they were causing
+    // SIGBUS/SIGSEGV crashes by hooking libc free() and signal handlers
 }
 
 void BoxCore::updateUidConfig(int hostUid, int callingBUid, int appMode) {
@@ -1298,8 +1301,9 @@ void init(JNIEnv *env, jobject clazz, jint api_level) {
         sCachedCallingBUid.store(initialBUid, std::memory_order_relaxed);
     }
 
-    installHeapAndRefBaseSafetyGuards();
-    installOrReassertPassiveNativeCrashDiagnostics();
+    // NOTE: Removed installHeapAndRefBaseSafetyGuards() and
+    // installOrReassertPassiveNativeCrashDiagnostics() - they were causing
+    // SIGBUS/SIGSEGV crashes by hooking libc free() and signal handlers
     JniHook::InitJniHook(env, api_level);
 
     VMEnv.initialized = true;
