@@ -662,7 +662,8 @@ static void passiveNativeCrashDiagnosticsHandler(int sig, siginfo_t *info, void 
     // For SEGV_ACCERR on a valid mapped data/code address (where PC != faultAddr),
     // allow the first probe on a thread to chain to libanogs.so's own SIGSEGV handler
     // in case it is an XOM self-check. If the same thread faults repeatedly or if
-    // libanort.so converts it into SIGBUS/SIGABRT, isolate and park the background thread!
+    // libanort.so converts it into SIGBUS/SIGABRT, just return gracefully instead of
+    // re-raising the signal which would kill the process.
     if (sig == SIGSEGV && siCode == SEGV_ACCERR && pcAddr != fAddr && fAddr >= 0x10000ULL) {
         tThreadSegvAccerrCount++;
         if (tThreadSegvAccerrCount <= 1) {
@@ -672,9 +673,10 @@ static void passiveNativeCrashDiagnosticsHandler(int sig, siginfo_t *info, void 
     }
 
     if (sGameLibLoadedCount.load(std::memory_order_relaxed) > 0 && !isCriticalGameOrMainThread()) {
-        // Don't park threads forever - this was causing SIGBUS crashes.
+        // Don't re-raise the signal - this was causing SIGBUS/SIGABRT crashes.
         // Just log and return to let the app continue gracefully.
         ALOGW("FEATURESTIC: Signal %d caught on non-critical thread, returning gracefully", sig);
+        return;
     }
 
     chainPreviousSignal(sig, info, ucontext);
