@@ -99,9 +99,6 @@ public class RNative {
                 }
                 if (!isInjected) {
                     android.util.Log.i(TAG, "Loading external plugin .so after GameActivity + maps ready (ready=" + ready + ", libLoaded=" + sGameLibLoaded + ")");
-                    // Set native crash recovery point before loading plugin .so — catches
-                    // stack protector / SIGABRT crashes from native game libraries.
-                    setNativeCrashRecoveryPoint();
                     loadExternalPlugin();
                 }
             } catch (Throwable ignored) {
@@ -218,7 +215,6 @@ public class RNative {
     public static native void addIORule(String targetPath, String relocatePath);
     public static native void hideXposed();
     public static native void setNativeProp(String key, String value);
-    public static native boolean setNativeCrashRecoveryPoint();
     public static native boolean isRuntimeSecure();
     public static native boolean lockHostSignature(Context context, String expectedSha256);
     public static native boolean authorizeSdkSession(

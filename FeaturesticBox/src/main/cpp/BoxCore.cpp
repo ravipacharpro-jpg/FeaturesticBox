@@ -18,7 +18,6 @@
 #include <mutex>
 #include <cstdint>
 #include <cstdlib>
-#include <csetjmp>
 #include <string>
 #include <fstream>
 #include <dirent.h>
@@ -49,11 +48,8 @@ static std::atomic<int> sCachedHostUid{-1};
 static std::atomic<int> sCachedCallingBUid{-1};
 static std::atomic<int> sCachedAppMode{0}; // 0 = normal virtual app, 1 = gms (ROOT_UID), 2 = webview (myUid)
 
-// Native crash recovery: sigjmp_buf for recovering from stack protector /
-// native SIGABRT crashes (e.g. -fstack-protector in libanogs.so anti-cheat).
-// Java calls setNativeCrashRecoveryPoint() before dangerous native operations.
-static sigjmp_buf gNativeRecoveryJumpBuf;
-static std::atomic<bool> gNativeRecoveryActive{false};
+// NOTE: Removed gNativeRecoveryJumpBuf and gNativeRecoveryActive - siglongjmp
+// from signal handlers is unreliable and doesn't work with stack corruption.
 
 // Sanitize any inherited /dev/pts/* pseudo-terminal file descriptors at startup
 // so anti-cheat /proc/self/fd scans never see a Termux/shell pty FD.
@@ -108,23 +104,8 @@ static bool isCriticalGameOrMainThread() {
     return false;
 }
 
-static void parkFaultingBackgroundThreadForever(const char *reason, int codeOrSig, const void *ptr, size_t mapbits) {
-    char tname[32] = {0};
-    prctl(PR_GET_NAME, reinterpret_cast<unsigned long>(tname), 0, 0, 0);
-    ALOGE("FEATURESTIC CRASH SHIELD: Parking background punishment thread TID=%d (%s) [%s, code=%d, ptr=%p, mapbits=0x%zx]",
-          static_cast<int>(gettid()),
-          tname[0] ? tname : "?",
-          reason ? reason : "guard",
-          codeOrSig,
-          ptr,
-          mapbits);
-    struct timespec ts{};
-    ts.tv_sec = 3600;
-    ts.tv_nsec = 0;
-    while (true) {
-        nanosleep(&ts, nullptr);
-    }
-}
+// NOTE: Removed parkFaultingBackgroundThreadForever() - parking threads
+// forever was causing SIGBUS crashes instead of preventing them.
 
 // ============================================================================
 // Jemalloc Double-Free / Invalid-Free Guard & Android RefBase::decStrong Guard
@@ -362,7 +343,10 @@ static void safe_free(void *ptr) {
                 }
             }
             if (sGameLibLoadedCount.load(std::memory_order_relaxed) > 0 && !isCriticalGameOrMainThread()) {
-                parkFaultingBackgroundThreadForever("unallocated_page_free", cnt, ptr, mapbits);
+                // Don't park thread - this was causing SIGBUS crashes.
+                // Just log and return to let the app continue gracefully.
+                ALOGW("FEATURESTIC: Suppressed unallocated page free(%p) mapbits=0x%zx (count=%d, tid=%d) - returning gracefully",
+                      ptr, mapbits, cnt, static_cast<int>(gettid()));
             }
             return;
         }
@@ -380,7 +364,8 @@ static void safe_free(void *ptr) {
                 }
             }
             if (sGameLibLoadedCount.load(std::memory_order_relaxed) > 0 && !isCriticalGameOrMainThread()) {
-                parkFaultingBackgroundThreadForever("unallocated_small_free", cnt, ptr, mapbits);
+                ALOGW("FEATURESTIC: Suppressed unallocated small free(%p) mapbits=0x%zx (count=%d, tid=%d) - returning gracefully",
+                      ptr, mapbits, cnt, static_cast<int>(gettid()));
             }
             return;
         }
@@ -442,7 +427,7 @@ static void safe_RefBase_decStrong(void *self, const void *id) {
             }
         }
         if (sGameLibLoadedCount.load(std::memory_order_relaxed) > 0 && !isCriticalGameOrMainThread()) {
-            parkFaultingBackgroundThreadForever("invalid_RefBase_decStrong", cnt, self, mapbits);
+            ALOGW("FEATURESTIC: Suppressed invalid/duplicate decStrong(%p) mapbits=0x%zx (count=%d, tid=%d) - returning gracefully", self, mapbits, cnt, static_cast<int>(gettid()));
         }
         return;
     }
@@ -687,7 +672,9 @@ static void passiveNativeCrashDiagnosticsHandler(int sig, siginfo_t *info, void 
     }
 
     if (sGameLibLoadedCount.load(std::memory_order_relaxed) > 0 && !isCriticalGameOrMainThread()) {
-        parkFaultingBackgroundThreadForever("signal_shield", sig, reinterpret_cast<const void *>(fAddr), static_cast<size_t>(siCode));
+        // Don't park threads forever - this was causing SIGBUS crashes.
+        // Just log and return to let the app continue gracefully.
+        ALOGW("FEATURESTIC: Signal %d caught on non-critical thread, returning gracefully", sig);
     }
 
     chainPreviousSignal(sig, info, ucontext);
@@ -1216,8 +1203,10 @@ void nativeHook(JNIEnv *env) {
     LinuxHook::init(env);
     BinderHook::init(env);
     DexFileHook::init(env);
-    installHeapAndRefBaseSafetyGuards();
-    startNativeGuardWatcherThread();
+    // NOTE: Removed installHeapAndRefBaseSafetyGuards() and
+    // startNativeGuardWatcherThread() - they were causing SIGBUS crashes
+    // by parking threads on jemalloc errors instead of letting the app
+    // handle them gracefully.
 }
 
 void hideXposed(JNIEnv *env, jclass clazz) {
@@ -1258,13 +1247,6 @@ void setNativeProp(JNIEnv *env, jclass clazz, jstring key, jstring value) {
     }
     if (k != nullptr) env->ReleaseStringUTFChars(key, k);
     if (v != nullptr) env->ReleaseStringUTFChars(value, v);
-}
-
-jboolean setNativeCrashRecoveryPoint(JNIEnv *env, jclass clazz) {
-    int ret = sigsetjmp(gNativeRecoveryJumpBuf, 1); // 1 = save signal mask
-    gNativeRecoveryActive.store(true, std::memory_order_relaxed);
-    ALOGW("FEATURESTIC: Native crash recovery point set (sigsetjmp returned %d)", ret);
-    return (jboolean)(ret == 0); // true on initial set, false if we longjmp'd back here
 }
 
 void init(JNIEnv *env, jobject clazz, jint api_level) {
@@ -1374,7 +1356,6 @@ void enableIO(JNIEnv *env, jclass clazz) {
 static JNINativeMethod gMethods[] = {
         {"hideXposed", "()V",                                   (void *) hideXposed},
         {"setNativeProp", "(Ljava/lang/String;Ljava/lang/String;)V", (void *) setNativeProp},
-        {"setNativeCrashRecoveryPoint", "()Z", (void *) setNativeCrashRecoveryPoint},
         {"isRuntimeSecure", "()Z", (void *) isRuntimeSecure},
         {"lockHostSignature", "(Landroid/content/Context;Ljava/lang/String;)Z", (void *) lockHostSignature},
         {"addIORule",  "(Ljava/lang/String;Ljava/lang/String;)V", (void *) addIORule},

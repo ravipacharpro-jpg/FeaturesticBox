@@ -540,20 +540,10 @@ public class BActivityThread extends IBActivityThread.Stub {
         Application application = null;
         try {
             onBeforeCreateApplication(packageName, processName, packageContext);
-            // Set native crash recovery point before makeApplication — catches
-            // stack protector / SIGABRT crashes from native game libraries
-            // (e.g. libanogs.so anti-cheat) during Application creation.
-            boolean recoverySet = RNative.setNativeCrashRecoveryPoint();
-            if (!recoverySet) {
-                // We longjmp'd back here after a native crash — skip makeApplication
-                // to avoid re-crashing, and continue with a null application.
-                Log.w(TAG, "Native crash recovery triggered during makeApplication, skipping guest Application");
-            } else {
-                application = BRLoadedApk.get(loadedApk).makeApplication(false, null);
-                if (application == null) {
-                    // Fallback: try with instrumentation enabled
-                    application = BRLoadedApk.get(loadedApk).makeApplication(true, null);
-                }
+            application = BRLoadedApk.get(loadedApk).makeApplication(false, null);
+            if (application == null) {
+                // Fallback: try with instrumentation enabled
+                application = BRLoadedApk.get(loadedApk).makeApplication(true, null);
             }
             if (application == null) {
                 // Do not crash the cloned app if makeApplication returns null.
