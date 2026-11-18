@@ -1166,13 +1166,8 @@ public final class VirtualOAuthBridgeActivity extends Activity {
                     resultCode = RESULT_OK;
                 }
             }
-            if (data != null && (ExternalAuthRouter.isGoogleDirectAuthPackage(providerPkg)
-                    || "com.google.android.gms".equals(providerPkg))) {
-                boolean enriched = com.featurestic.box.compat.auth.GoogleSignInTokenHelper.enrichSignInResultIntent(data, true);
-                if (enriched) {
-                    resultCode = RESULT_OK;
-                }
-            }
+            // Pass GMS Google Sign-In result untouched to guest process (com.pubg.imobile)
+            // so guest classloader can unmarshal authentic GoogleSignInAccount without host corruption
             boolean delivered = completeBridgeResult(resultCode, data);
             authDiagnostic("provider_result", providerPkg, delivered);
             return;

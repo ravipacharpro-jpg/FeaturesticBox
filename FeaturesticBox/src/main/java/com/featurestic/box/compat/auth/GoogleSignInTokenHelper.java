@@ -206,9 +206,8 @@ public final class GoogleSignInTokenHelper {
                             Log.d(TAG, "Injected BGMI serverClientId into outbound options");
                         }
                     } else if (type == boolean.class || type == Boolean.class) {
-                        // Ensure BOTH mIdTokenRequested and mServerAuthCodeRequested are TRUE when serverClientId is present
-                        if (f.getName().equals("zah") || f.getName().equalsIgnoreCase("mServerAuthCodeRequested")
-                                || f.getName().equals("zag") || f.getName().equalsIgnoreCase("mIdTokenRequested")) {
+                        // Ensure mIdTokenRequested is TRUE when serverClientId is present
+                        if (f.getName().equals("zag") || f.getName().equalsIgnoreCase("mIdTokenRequested")) {
                             f.set(googleSignInOptions, true);
                             Log.d(TAG, "Ensured " + f.getName() + " is true on outbound options");
                         }
@@ -717,8 +716,8 @@ public final class GoogleSignInTokenHelper {
             boolean isFakeIdToken = curIdToken != null && (curIdToken.contains("fbox1") || !curIdToken.contains("."));
             Log.d(TAG, "Account tokens: idToken=" + (curIdToken != null ? (isFakeIdToken ? "FAKE(fbox1)" : "YES") : "null")
                     + ", serverAuthCode=" + (curAuthCode != null ? ("YES(len=" + curAuthCode.length() + ")") : "null"));
-            if (curIdToken != null && !curIdToken.isEmpty() && !isFakeIdToken
-                    && curAuthCode != null && !curAuthCode.isEmpty()) {
+            if (curIdToken != null && !curIdToken.isEmpty() && !isFakeIdToken) {
+                Log.d(TAG, "Authentic Google ID token already present from Google Play Services, preserving directly!");
                 return;
             }
 
@@ -867,7 +866,7 @@ public final class GoogleSignInTokenHelper {
                 return null;
             });
             new Thread(task, "Featurestic-GoogleTokenFetcher").start();
-            return task.get(4500, java.util.concurrent.TimeUnit.MILLISECONDS);
+            return task.get(1200, java.util.concurrent.TimeUnit.MILLISECONDS);
         } catch (Throwable t) {
             Log.w(TAG, "tryFetchRealGoogleToken error: " + t.getMessage());
         }
@@ -918,7 +917,7 @@ public final class GoogleSignInTokenHelper {
                 return null;
             });
             new Thread(task, "Featurestic-GoogleAuthCodeFetcher").start();
-            return task.get(4500, java.util.concurrent.TimeUnit.MILLISECONDS);
+            return task.get(1200, java.util.concurrent.TimeUnit.MILLISECONDS);
         } catch (Throwable t) {
             Log.w(TAG, "tryFetchRealGoogleAuthCode error: " + t.getMessage());
         }
