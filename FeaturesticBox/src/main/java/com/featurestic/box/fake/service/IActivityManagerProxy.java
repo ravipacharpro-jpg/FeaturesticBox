@@ -231,6 +231,11 @@ public class IActivityManagerProxy extends ClassInvocationStub {
             if (intent == null || com.featurestic.box.core.GmsCore.isMeasurementIntent(intent)) {
                 return null;
             }
+            if (intent.getComponent() != null
+                    && intent.getComponent().getClassName() != null
+                    && intent.getComponent().getClassName().startsWith("com.featurestic.")) {
+                intent.setComponent(new ComponentName(FeaturesticBoxCore.getHostPkg(), intent.getComponent().getClassName()));
+            }
             int userId = BActivityThread.getUserId();
             ResolveInfo resolveInfo = FeaturesticBoxCore.getBPackageManager().resolveService(intent, 0, resolvedType, userId);
             if (resolveInfo == null && intent.getComponent() == null && intent.getPackage() == null) {

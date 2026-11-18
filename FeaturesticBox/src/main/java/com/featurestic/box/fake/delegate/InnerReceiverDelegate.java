@@ -65,6 +65,65 @@ public class InnerReceiverDelegate extends IIntentReceiver.Stub {
         return delegate;
     }
 
+    private static boolean tryInvokeExtendedPerformReceive(
+            Object target,
+            Intent perIntent,
+            int resultCode,
+            String data,
+            Bundle extras,
+            boolean ordered,
+            boolean sticky,
+            int sendingUser) {
+        if (target == null) return false;
+        try {
+            for (Method m : target.getClass().getDeclaredMethods()) {
+                if (!"performReceive".equals(m.getName())) continue;
+                Class<?>[] pTypes = m.getParameterTypes();
+                // On Android 14-16 (API 34-36), LoadedApk$ReceiverDispatcher.performReceive
+                // and InnerReceiver.performReceive have an 8, 9, or 10-arg overload
+                // (e.g. Intent, int, String, Bundle, boolean, boolean, boolean assumeDelivered, int sendingUser, int sendingUid, String sendingPackage)
+                // that avoids the 7-arg raw IIntentReceiver Log.wtf check.
+                if (pTypes.length >= 8
+                        && pTypes[0] == Intent.class
+                        && pTypes[1] == int.class
+                        && pTypes[2] == String.class
+                        && pTypes[3] == Bundle.class
+                        && pTypes[4] == boolean.class
+                        && pTypes[5] == boolean.class) {
+                    Object[] invokeArgs = new Object[pTypes.length];
+                    invokeArgs[0] = perIntent;
+                    invokeArgs[1] = resultCode;
+                    invokeArgs[2] = data;
+                    invokeArgs[3] = extras;
+                    invokeArgs[4] = ordered;
+                    invokeArgs[5] = sticky;
+                    int intSlot = 0;
+                    for (int i = 6; i < pTypes.length; i++) {
+                        if (pTypes[i] == boolean.class) {
+                            invokeArgs[i] = ordered; // assumeDelivered
+                        } else if (pTypes[i] == int.class) {
+                            if (intSlot == 0) {
+                                invokeArgs[i] = sendingUser;
+                            } else {
+                                invokeArgs[i] = -1; // sendingUid / flags
+                            }
+                            intSlot++;
+                        } else if (pTypes[i] == String.class) {
+                            invokeArgs[i] = null; // sendingPackage
+                        } else {
+                            invokeArgs[i] = null;
+                        }
+                    }
+                    m.setAccessible(true);
+                    m.invoke(target, invokeArgs);
+                    return true;
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        return false;
+    }
+
     @Override
     public void performReceive(Intent intent, int resultCode, String data, Bundle extras, boolean ordered, boolean sticky, int sendingUser) throws RemoteException {
         if (intent == null) {
@@ -82,10 +141,13 @@ public class InnerReceiverDelegate extends IIntentReceiver.Stub {
             perIntent = intent;
         }
 
-        // On Android 14-16 (API 34-36), calling the 7-arg InnerReceiver.performReceive
-        // directly triggers Log.wtf("LoadedApk", "performReceive() called targeting raw IIntentReceiver").
-        // Dispatch directly to LoadedApk$ReceiverDispatcher.performReceive when available.
         Object dispatcher = mDispatcherRef != null ? mDispatcherRef.get() : null;
+        if (tryInvokeExtendedPerformReceive(dispatcher, perIntent, resultCode, data, extras, ordered, sticky, sendingUser)) {
+            return;
+        }
+        if (tryInvokeExtendedPerformReceive(mIntentReceiver, perIntent, resultCode, data, extras, ordered, sticky, sendingUser)) {
+            return;
+        }
         if (dispatcher != null) {
             try {
                 Method m7 = dispatcher.getClass().getDeclaredMethod(
@@ -95,25 +157,6 @@ public class InnerReceiverDelegate extends IIntentReceiver.Stub {
                 m7.setAccessible(true);
                 m7.invoke(dispatcher, perIntent, resultCode, data, extras, ordered, sticky, sendingUser);
                 return;
-            } catch (Throwable ignored) {
-            }
-            try {
-                for (Method m : dispatcher.getClass().getDeclaredMethods()) {
-                    if ("performReceive".equals(m.getName())) {
-                        Class<?>[] pTypes = m.getParameterTypes();
-                        if (pTypes.length == 10) {
-                            m.setAccessible(true);
-                            m.invoke(dispatcher, perIntent, resultCode, data, extras,
-                                    ordered, sticky, 0, sendingUser, -1, null);
-                            return;
-                        } else if (pTypes.length == 9) {
-                            m.setAccessible(true);
-                            m.invoke(dispatcher, perIntent, resultCode, data, extras,
-                                    ordered, sticky, sendingUser, -1, null);
-                            return;
-                        }
-                    }
-                }
             } catch (Throwable ignored) {
             }
         }

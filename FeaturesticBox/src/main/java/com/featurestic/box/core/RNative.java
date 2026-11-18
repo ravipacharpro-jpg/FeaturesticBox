@@ -83,11 +83,20 @@ public class RNative {
                             || isLibraryMappedInProcMaps("libil2cpp.so")
                             || isLibraryMappedInProcMaps("libunity.so")) {
                         ready = true;
+                        sGameLibLoaded = true;
+                        try {
+                            setNativeProp("debug.featurestic.gamelibs_ready", "1");
+                        } catch (Throwable ignored) {
+                        }
                         break;
                     }
                     Thread.sleep(300L);
                 }
                 Thread.sleep(Math.max(1000L, delayMs));
+                try {
+                    setNativeProp("debug.featurestic.gamelibs_ready", "1");
+                } catch (Throwable ignored) {
+                }
                 if (!isInjected) {
                     android.util.Log.i(TAG, "Loading external plugin .so after GameActivity + maps ready (ready=" + ready + ", libLoaded=" + sGameLibLoaded + ")");
                     loadExternalPlugin();

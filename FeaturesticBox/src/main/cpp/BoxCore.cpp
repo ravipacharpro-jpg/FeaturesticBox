@@ -11,6 +11,7 @@
 #include <Hook/RuntimeHook.h>
 #include <Hook/LinuxHook.h>
 #include <Hook/And64InlineHook/And64InlineHook.hpp>
+#include "SandHook/xdl.h"
 #include "SdkIdentityGuard.h"
 #include <algorithm>
 #include <atomic>
@@ -20,9 +21,11 @@
 #include <string>
 #include <fstream>
 #include <dirent.h>
+#include <fcntl.h>
 #include <unistd.h>
 #include <cstring>
 #include <signal.h>
+#include <pthread.h>
 #include <sys/mman.h>
 #include <sys/prctl.h>
 #include <time.h>
@@ -37,24 +40,63 @@ static struct sigaction sOldSigbusAction{};
 static struct sigaction sOldSigabrtAction{};
 static bool sSignalGuardInstalled = false;
 static std::atomic<int> sGameLibLoadedCount{0};
+static std::atomic<bool> sWatcherThreadStarted{false};
 
 static std::atomic<int> sCachedHostUid{-1};
 static std::atomic<int> sCachedCallingBUid{-1};
 static std::atomic<int> sCachedAppMode{0}; // 0 = normal virtual app, 1 = gms (ROOT_UID), 2 = webview (myUid)
 
+// Sanitize any inherited /dev/pts/* pseudo-terminal file descriptors at startup
+// so anti-cheat /proc/self/fd scans never see a Termux/shell pty FD.
+static void sanitizeInheritedPtyFileDescriptors() {
+    DIR *dir = opendir("/proc/self/fd");
+    if (!dir) return;
+    int devNull = open("/dev/null", O_RDWR);
+    if (devNull < 0) {
+        closedir(dir);
+        return;
+    }
+    int dirFd = dirfd(dir);
+    struct dirent *entry;
+    while ((entry = readdir(dir)) != nullptr) {
+        if (entry->d_name[0] == '.') continue;
+        int fd = atoi(entry->d_name);
+        if (fd < 0 || fd == dirFd || fd == devNull) continue;
+        char linkPath[64];
+        char target[256];
+        snprintf(linkPath, sizeof(linkPath), "/proc/self/fd/%d", fd);
+        ssize_t len = readlink(linkPath, target, sizeof(target) - 1);
+        if (len > 0) {
+            target[len] = '\0';
+            if (strncmp(target, "/dev/pts/", 9) == 0) {
+                dup2(devNull, fd);
+            }
+        }
+    }
+    close(devNull);
+    closedir(dir);
+}
+
 // ============================================================================
 // Jemalloc Double-Free / Invalid-Free Guard & Android RefBase::decStrong Guard
 // ============================================================================
 // On Android 16 (API 36) non-root devices using Bionic jemalloc (4KB pages,
-// 2MB arena chunks aligned to 0x200000), a concurrent teardown or ACE punishment
-// at ~1.2s after AndroidThunkJava_GetTransmissionRawJsonContent passes an
-// already-freed 5-page (20KB, 0x5000-byte) extent (mapbits: 0x5ff0, where
-// bit 0 CHUNK_MAP_ALLOCATED == 0) to free() on one background thread while
-// another background thread simultaneously calls RefBase::decStrong() on an
-// object whose strong count is already 0 (or whose page is already freed).
+// 2MB arena chunks aligned to 0x200000, LG_LARGE_MINCLASS = 15 i.e. 32KB),
+// at ~25-31s uptime (3.0s after AndroidThunkJava_GetTransmissionRawJsonContent),
+// a background worker thread passes an already-freed 5-page (20KB, 0x5000-byte)
+// page-aligned extent (mapbits: 0x5ff0, where bit 0 CHUNK_MAP_ALLOCATED == 0)
+// to free(), while another thread may call RefBase::decStrong() on a freed
+// page-aligned address (+0x5000).
 //
-// Calibrating the exact jemalloc chunk map_bits offset at startup lets us check
-// mapbits in 3 instructions before je_free or RefBase::decStrong can call abort()!
+// Why v2 calibration missed 0x5ff0:
+//   1. In Bionic jemalloc, 5*4096 (20KB) and 6*4096 (24KB) are SMALL-BIN runs
+//      (< 32KB), so while allocated they have CHUNK_MAP_LARGE == 0 and a small
+//      binind (not 0xff0). Only allocations >= 32KB (>= 8 pages, e.g. 9*4096 =
+//      36KB and 10*4096 = 40KB) have mapbits 0x9ff3 / 0xaff3 while allocated,
+//      and transition to 0x9ff0 / 0xaff0 when freed!
+//   2. We also hook libc.so's free() directly via A64HookFunction (just like
+//      RefBase::decStrong in libutils.so) so 100% of free() calls across all
+//      linker namespaces (clns-9, clns-10, system) pass through safe_free().
 static std::recursive_mutex sHeapSafetyMutex;
 static void (*sOrigFree)(void *) = nullptr;
 static void (*sOrigRefBaseDecStrong)(void *, const void *) = nullptr;
@@ -62,6 +104,7 @@ static void (*sOrigWeakrefDecWeak)(void *, const void *) = nullptr;
 
 #if defined(__LP64__)
 static int sJemallocMapbitsBaseIdx = -1;
+static int sJemallocMapbitsStride = 1;
 static bool sJemallocCalibrated = false;
 static std::atomic<int> sSuppressedFreeCount{0};
 static std::atomic<int> sSuppressedRefBaseCount{0};
@@ -79,49 +122,101 @@ static bool isPageMappedSafe(uintptr_t addr) {
     return mincore(reinterpret_cast<void *>(pageBase), 4096, &vec) == 0;
 }
 
+static bool isJemallocPtrInvalidOrUnallocated(uintptr_t uptr, size_t *outMapbits = nullptr);
+
 static void calibrateJemallocChunkLayout() {
     if (sJemallocCalibrated) return;
-    // Allocate a 5-page (0x5000 = 20480 bytes) large extent and a 6-page (0x6000 = 24576 bytes) large extent.
-    // In Bionic jemalloc (4KB page, 2MB chunk), a 5-page allocated large extent has mapbits:
-    //   size (0x5000) | BININD_INVALID (0xff0) | CHUNK_MAP_LARGE (0x2) | CHUNK_MAP_ALLOCATED (0x1) = 0x5ff3.
-    // A 6-page allocated large extent has mapbits = 0x6ff3.
-    void *p5 = malloc(5 * 4096);
-    void *p6 = malloc(6 * 4096);
-    if (p5 != nullptr && p6 != nullptr) {
-        uintptr_t u5 = untagPtr(p5);
-        uintptr_t u6 = untagPtr(p6);
-        uintptr_t chunk5 = u5 & ~uintptr_t(0x1FFFFF);
-        uintptr_t chunk6 = u6 & ~uintptr_t(0x1FFFFF);
-        size_t pageind5 = (u5 - chunk5) >> 12;
-        size_t pageind6 = (u6 - chunk6) >> 12;
-        if (pageind5 >= 1 && pageind5 < 512 && pageind6 >= 1 && pageind6 < 512
-                && isPageMappedSafe(chunk5) && isPageMappedSafe(chunk6)) {
-            const auto *words5 = reinterpret_cast<const size_t *>(chunk5);
-            const auto *words6 = reinterpret_cast<const size_t *>(chunk6);
-            for (int k = 0; k < 512; ++k) {
-                if ((words5[k] & 0xFFF3ULL) == 0x5FF3ULL) {
-                    int candidateBase = k - static_cast<int>(pageind5);
-                    int idx6 = candidateBase + static_cast<int>(pageind6);
-                    if (idx6 >= 0 && idx6 < 512 && (words6[idx6] & 0xFFF3ULL) == 0x6FF3ULL) {
-                        sJemallocMapbitsBaseIdx = candidateBase;
-                        sJemallocCalibrated = true;
-                        ALOGD("JemallocGuard calibrated: mapbitsBaseIdx=%d (pageind5=%zu, pageind6=%zu)",
-                              sJemallocMapbitsBaseIdx, pageind5, pageind6);
-                        break;
+    // Allocate two large extents >= 32KB (9 pages = 36KB = 0x9000, 10 pages = 40KB = 0xa000)
+    // separated by a 4KB barrier so freeing p9 cannot coalesce with p10.
+    // In Bionic jemalloc (4KB page, 2MB chunk, 13-page header = 6656 size_t words):
+    //   - While allocated: mapbits has CHUNK_MAP_BININD_MASK (0xff0) | CHUNK_MAP_LARGE (0x2) | CHUNK_MAP_ALLOCATED (0x1) -> (mapbits & 0xFF3) == 0xFF3 (specifically 0x9ff3 and 0xaff3).
+    //   - After free(p9): mapbits clears CHUNK_MAP_LARGE and CHUNK_MAP_ALLOCATED -> (mapbits & 0xFF3) == 0xFF0 (e.g. 0x9ff0).
+    void *p9 = malloc(9 * 4096);
+    void *barrier = malloc(4096);
+    void *p10 = malloc(10 * 4096);
+
+    if (p9 != nullptr && p10 != nullptr) {
+        uintptr_t u9 = untagPtr(p9);
+        uintptr_t u10 = untagPtr(p10);
+        uintptr_t chunk9 = u9 & ~uintptr_t(0x1FFFFF);
+        uintptr_t chunk10 = u10 & ~uintptr_t(0x1FFFFF);
+        size_t pageind9 = (u9 - chunk9) >> 12;
+        size_t pageind10 = (u10 - chunk10) >> 12;
+
+        // Scan up to all 13 header pages (13 * 4096 / 8 = 6656 words), though map_bits
+        // in Bionic jemalloc is in page 0 (words 0..511).
+        constexpr int kMaxHeaderWords = 13 * 512;
+        if (pageind9 >= 13 && pageind9 < 512 && isPageMappedSafe(chunk9)) {
+            const auto *words9 = reinterpret_cast<const volatile size_t *>(chunk9);
+            size_t *before9 = static_cast<size_t *>(malloc(kMaxHeaderWords * sizeof(size_t)));
+            if (before9 != nullptr) {
+                for (int k = 0; k < kMaxHeaderWords; ++k) {
+                    before9[k] = words9[k];
+                }
+                // Free p9 using standard free (before A64HookFunction hooks free)
+                free(p9);
+                p9 = nullptr;
+
+                int foundK9 = -1;
+                for (int k = 0; k < kMaxHeaderWords; ++k) {
+                    // Look for the header word that had CHUNK_MAP_LARGE | CHUNK_MAP_ALLOCATED (0x3)
+                    // and BININD_INVALID (0xff0) before free(p9), and transitioned to unallocated
+                    // (0xff0 with bits 0..1 == 0) immediately after free(p9)!
+                    if ((before9[k] & 0xFF3ULL) == 0xFF3ULL && (words9[k] & 0xFF3ULL) == 0xFF0ULL) {
+                        // Prefer exact 9-page size match (0x9ff3) if multiple pages changed
+                        if ((before9[k] & 0xFFFF3ULL) == 0x9FF3ULL || foundK9 < 0) {
+                            foundK9 = k;
+                            if ((before9[k] & 0xFFFF3ULL) == 0x9FF3ULL) {
+                                break;
+                            }
+                        }
                     }
                 }
+
+                if (foundK9 >= 0) {
+                    int stride = 1;
+                    if (chunk9 == chunk10 && pageind10 >= 13 && pageind10 < 512 && pageind10 != pageind9) {
+                        for (int k = 0; k < kMaxHeaderWords; ++k) {
+                            if ((words9[k] & 0xFFFF3ULL) == 0xAFF3ULL) {
+                                int diffK = k - foundK9;
+                                int diffP = static_cast<int>(pageind10) - static_cast<int>(pageind9);
+                                if (diffP != 0 && (diffK % diffP) == 0 && (diffK / diffP) >= 1 && (diffK / diffP) <= 16) {
+                                    stride = diffK / diffP;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    sJemallocMapbitsStride = stride;
+                    sJemallocMapbitsBaseIdx = foundK9 - static_cast<int>(pageind9) * stride;
+                    sJemallocCalibrated = true;
+
+                    size_t verifyBits = 0;
+                    bool selfTest = isJemallocPtrInvalidOrUnallocated(u9, &verifyBits);
+                    ALOGE("JemallocGuard calibrated: baseIdx=%d, stride=%d, k9=%d, pageind9=%zu, before=0x%zx, after=0x%zx, selfTest=%d (verifyBits=0x%zx)",
+                          sJemallocMapbitsBaseIdx,
+                          sJemallocMapbitsStride,
+                          foundK9,
+                          pageind9,
+                          before9[foundK9],
+                          static_cast<size_t>(words9[foundK9]),
+                          selfTest ? 1 : 0,
+                          verifyBits);
+                }
+                free(before9);
             }
         }
     }
-    if (p5 != nullptr) free(p5);
-    if (p6 != nullptr) free(p6);
+    if (p9 != nullptr) free(p9);
+    if (p10 != nullptr) free(p10);
+    if (barrier != nullptr) free(barrier);
 }
 
 // Returns true if ptr definitely resides in a jemalloc arena chunk page whose
 // mapbits indicate it is UNALLOCATED ((mapbits & 1) == 0, e.g. mapbits == 0x5ff0)
 // or is an invalid interior pointer into a large allocation.
-static bool isJemallocPtrInvalidOrUnallocated(uintptr_t uptr, size_t *outMapbits = nullptr) {
-    if (!sJemallocCalibrated || sJemallocMapbitsBaseIdx < -64 || sJemallocMapbitsBaseIdx > 64) {
+static bool isJemallocPtrInvalidOrUnallocated(uintptr_t uptr, size_t *outMapbits) {
+    if (!sJemallocCalibrated) {
         return false;
     }
     uintptr_t chunk = uptr & ~uintptr_t(0x1FFFFF);
@@ -130,23 +225,23 @@ static bool isJemallocPtrInvalidOrUnallocated(uintptr_t uptr, size_t *outMapbits
     if (pageind < 13 || pageind >= 512) {
         return false;
     }
-    int wordIdx = sJemallocMapbitsBaseIdx + static_cast<int>(pageind);
-    if (wordIdx < 0 || wordIdx >= 512) {
+    int wordIdx = sJemallocMapbitsBaseIdx + static_cast<int>(pageind) * sJemallocMapbitsStride;
+    if (wordIdx < 0 || wordIdx >= (13 * 512)) {
         return false;
     }
     if (!isPageMappedSafe(chunk)) {
         return true;
     }
     const auto *chunkWords = reinterpret_cast<const volatile size_t *>(chunk);
-    size_t mapbits = chunkWords[wordIdx];
-    if (outMapbits != nullptr) {
-        *outMapbits = mapbits;
-    }
     // Sanity check that chunk header looks like a genuine jemalloc arena chunk:
-    // chunkWords[0] is arena_t* (a valid mapped pointer in user space).
+    // chunkWords[0] is arena_t* (a valid 8-byte-aligned pointer in user space).
     uintptr_t arenaPtr = untagPtr(reinterpret_cast<const void *>(chunkWords[0]));
     if (arenaPtr < 0x10000ULL || arenaPtr >= UINT64_C(0x0001000000000000) || (arenaPtr & 0x7ULL) != 0) {
         return false;
+    }
+    size_t mapbits = chunkWords[wordIdx];
+    if (outMapbits != nullptr) {
+        *outMapbits = mapbits;
     }
     // 1. CHUNK_MAP_ALLOCATED (bit 0) == 0 -> value not allocated (e.g. mapbits == 0x5ff0)!
     if ((mapbits & 0x1ULL) == 0) {
@@ -156,13 +251,60 @@ static bool isJemallocPtrInvalidOrUnallocated(uintptr_t uptr, size_t *outMapbits
     if ((mapbits & 0x2ULL) != 0 && (uptr & 0xFFFULL) != 0) {
         return true;
     }
-    // 3. Small allocation ((mapbits & 2) == 0) with BININD_INVALID (0xff) -> corrupted mapbits!
+    // 3. Small allocation ((mapbits & 2) == 0) with BININD_INVALID (0xff) -> unallocated/corrupted mapbits!
     if ((mapbits & 0x2ULL) == 0 && ((mapbits >> 4) & 0xFFULL) == 0xFFULL) {
         return true;
     }
     return false;
 }
 #endif
+
+struct UnwindBacktraceState {
+    int depth;
+    void *xdlCache;
+};
+
+static _Unwind_Reason_Code crashUnwindCallback(struct _Unwind_Context *context, void *arg) {
+    auto *state = static_cast<UnwindBacktraceState *>(arg);
+    uintptr_t pc = _Unwind_GetIP(context);
+    if (pc != 0) {
+        xdl_info_t xinfo{};
+        if (xdl_addr(reinterpret_cast<void *>(pc), &xinfo, &state->xdlCache) && xinfo.dli_fname) {
+            uintptr_t offset = pc - reinterpret_cast<uintptr_t>(xinfo.dli_fbase);
+            ALOGE("  #%02d pc 0x%016llX  %s (+0x%llX) [%s]",
+                  state->depth,
+                  static_cast<unsigned long long>(pc),
+                  xinfo.dli_fname,
+                  static_cast<unsigned long long>(offset),
+                  xinfo.dli_sname ? xinfo.dli_sname : "?");
+        } else {
+            Dl_info info{};
+            if (dladdr(reinterpret_cast<void *>(pc), &info) && info.dli_fname) {
+                uintptr_t offset = pc - reinterpret_cast<uintptr_t>(info.dli_fbase);
+                ALOGE("  #%02d pc 0x%016llX  %s (+0x%llX) [%s]",
+                      state->depth,
+                      static_cast<unsigned long long>(pc),
+                      info.dli_fname,
+                      static_cast<unsigned long long>(offset),
+                      info.dli_sname ? info.dli_sname : "?");
+            } else {
+                ALOGE("  #%02d pc 0x%016llX  <unknown>",
+                      state->depth,
+                      static_cast<unsigned long long>(pc));
+            }
+        }
+        state->depth++;
+    }
+    return (state->depth >= 16) ? _URC_END_OF_STACK : _URC_NO_REASON;
+}
+
+static void logCurrentThreadBacktrace() {
+    UnwindBacktraceState btState{0, nullptr};
+    _Unwind_Backtrace(crashUnwindCallback, &btState);
+    if (btState.xdlCache != nullptr) {
+        xdl_addr_clean(&btState.xdlCache);
+    }
+}
 
 static void safe_free(void *ptr) {
     if (ptr == nullptr) return;
@@ -171,16 +313,21 @@ static void safe_free(void *ptr) {
     if (uptr < 0x10000ULL) {
         return;
     }
-    // Serialize page-aligned frees (all large extents like 0x5000 mapbits:5ff0 and run heads)
-    // and check jemalloc mapbits before calling libc free().
+    // Serialize page-aligned frees (all large extents and run heads like 0x756ed9b000 with mapbits:5ff0)
+    // and verify jemalloc mapbits before calling libc free().
     if ((uptr & 0xFFFULL) == 0) {
         std::lock_guard<std::recursive_mutex> lock(sHeapSafetyMutex);
         size_t mapbits = 0;
         if (!isPageMappedSafe(uptr) || isJemallocPtrInvalidOrUnallocated(uptr, &mapbits)) {
             int cnt = ++sSuppressedFreeCount;
             if (cnt <= 16) {
-                ALOGW("JemallocGuard: suppressed invalid/double free(%p) mapbits=0x%zx (count=%d, tid=%d)",
-                      ptr, mapbits, cnt, static_cast<int>(gettid()));
+                char tname[32] = {0};
+                prctl(PR_GET_NAME, reinterpret_cast<unsigned long>(tname), 0, 0, 0);
+                ALOGE("JemallocGuard: SUPPRESSED invalid/double free(%p) mapbits=0x%zx (count=%d, tid=%d [%s])",
+                      ptr, mapbits, cnt, static_cast<int>(gettid()), tname[0] ? tname : "?");
+                if (cnt == 1) {
+                    logCurrentThreadBacktrace();
+                }
             }
             return;
         }
@@ -193,7 +340,7 @@ static void safe_free(void *ptr) {
         if (isJemallocPtrInvalidOrUnallocated(uptr, &mapbits)) {
             int cnt = ++sSuppressedFreeCount;
             if (cnt <= 16) {
-                ALOGW("JemallocGuard: suppressed unallocated small free(%p) mapbits=0x%zx (count=%d, tid=%d)",
+                ALOGE("JemallocGuard: SUPPRESSED unallocated small free(%p) mapbits=0x%zx (count=%d, tid=%d)",
                       ptr, mapbits, cnt, static_cast<int>(gettid()));
             }
             return;
@@ -220,7 +367,7 @@ static void safe_RefBase_decStrong(void *self, const void *id) {
     if (!isPageMappedSafe(uSelf) || isJemallocPtrInvalidOrUnallocated(uSelf)) {
         int cnt = ++sSuppressedRefBaseCount;
         if (cnt <= 16) {
-            ALOGW("RefBaseGuard: suppressed decStrong(%p) on unallocated/unmapped object (count=%d, tid=%d)",
+            ALOGE("RefBaseGuard: SUPPRESSED decStrong(%p) on unallocated/unmapped object (count=%d, tid=%d)",
                   self, cnt, static_cast<int>(gettid()));
         }
         return;
@@ -239,7 +386,7 @@ static void safe_RefBase_decStrong(void *self, const void *id) {
             || !isPageMappedSafe(uRefs) || isJemallocPtrInvalidOrUnallocated(uRefs)) {
         int cnt = ++sSuppressedRefBaseCount;
         if (cnt <= 16) {
-            ALOGW("RefBaseGuard: suppressed decStrong(%p) with invalid mRefs=%p (count=%d, tid=%d)",
+            ALOGE("RefBaseGuard: SUPPRESSED decStrong(%p) with invalid mRefs=%p (count=%d, tid=%d)",
                   self, refs, cnt, static_cast<int>(gettid()));
         }
         return;
@@ -248,7 +395,7 @@ static void safe_RefBase_decStrong(void *self, const void *id) {
     if (untagPtr(mBase) != uSelf) {
         int cnt = ++sSuppressedRefBaseCount;
         if (cnt <= 16) {
-            ALOGW("RefBaseGuard: suppressed decStrong(%p) with mismatched mBase=%p (count=%d, tid=%d)",
+            ALOGE("RefBaseGuard: SUPPRESSED decStrong(%p) with mismatched mBase=%p (count=%d, tid=%d)",
                   self, mBase, cnt, static_cast<int>(gettid()));
         }
         return;
@@ -258,7 +405,7 @@ static void safe_RefBase_decStrong(void *self, const void *id) {
     if (curStrong < 1) {
         int cnt = ++sSuppressedRefBaseCount;
         if (cnt <= 16) {
-            ALOGW("RefBaseGuard: suppressed duplicate decStrong(%p) with mStrong=%d (count=%d, tid=%d)",
+            ALOGE("RefBaseGuard: SUPPRESSED duplicate decStrong(%p) with mStrong=%d (count=%d, tid=%d)",
                   self, curStrong, cnt, static_cast<int>(gettid()));
         }
         return;
@@ -285,7 +432,7 @@ static void safe_weakref_decWeak(void *refs, const void *id) {
     if (curWeak < 1) {
         int cnt = ++sSuppressedRefBaseCount;
         if (cnt <= 16) {
-            ALOGW("RefBaseGuard: suppressed duplicate decWeak(%p) with mWeak=%d (count=%d, tid=%d)",
+            ALOGE("RefBaseGuard: SUPPRESSED duplicate decWeak(%p) with mWeak=%d (count=%d, tid=%d)",
                   refs, curWeak, cnt, static_cast<int>(gettid()));
         }
         return;
@@ -300,8 +447,6 @@ static void safe_weakref_decWeak(void *refs, const void *id) {
 static void patchGotSlotSafe(void **slot, void *replacement) {
     if (slot == nullptr || replacement == nullptr || *slot == replacement) return;
     uintptr_t pageStart = reinterpret_cast<uintptr_t>(slot) & ~uintptr_t(0xFFF);
-    // Temporarily make the GOT / RELRO page writable, update the 8-byte pointer,
-    // and leave it readable+writable (standard .got.plt) without ever touching .text/--xp!
     if (mprotect(reinterpret_cast<void *>(pageStart), 4096, PROT_READ | PROT_WRITE) == 0) {
         *slot = replacement;
     }
@@ -339,7 +484,6 @@ static int gotHookPhdrCallback(struct dl_phdr_info *info, size_t /*size*/, void 
     if (!info || !info->dlpi_name || info->dlpi_name[0] == '\0' || !info->dlpi_phdr) {
         return 0;
     }
-    // Never patch our own library or Bionic libc/linker/art internals
     if (strstr(info->dlpi_name, "libFeaturesticCore.so") != nullptr
             || strstr(info->dlpi_name, "/libc.so") != nullptr
             || strstr(info->dlpi_name, "/ld-android.so") != nullptr
@@ -409,7 +553,25 @@ static void installHeapAndRefBaseSafetyGuards() {
     static bool sGuardsInitialized = false;
     if (!sGuardsInitialized) {
         sGuardsInitialized = true;
-        sOrigFree = reinterpret_cast<void (*)(void *)>(dlsym(RTLD_DEFAULT, "free"));
+#if defined(__LP64__)
+        // 1. Calibrate Bionic jemalloc chunk mapbits layout FIRST using raw malloc/free.
+        calibrateJemallocChunkLayout();
+#endif
+        // 2. Hook libc.so free() directly via A64HookFunction so 100% of free() calls
+        //    across all classloader namespaces (clns-9, clns-10, system) enter safe_free().
+        void *freeSym = dlsym(RTLD_DEFAULT, "free");
+#if defined(__aarch64__)
+        if (freeSym) {
+            A64HookFunction(freeSym,
+                            reinterpret_cast<void *>(safe_free),
+                            reinterpret_cast<void **>(&sOrigFree));
+        }
+#endif
+        if (!sOrigFree && freeSym) {
+            sOrigFree = reinterpret_cast<void (*)(void *)>(freeSym);
+        }
+
+        // 3. Hook libutils.so RefBase::decStrong and RefBase::weakref_type::decWeak via A64HookFunction.
         void *libutils = dlopen("libutils.so", RTLD_NOW | RTLD_NOLOAD);
         if (!libutils) {
             libutils = dlopen("libutils.so", RTLD_NOW);
@@ -436,40 +598,10 @@ static void installHeapAndRefBaseSafetyGuards() {
                 sOrigWeakrefDecWeak = reinterpret_cast<void (*)(void *, const void *)>(decWeakSym);
             }
         }
-#if defined(__LP64__)
-        calibrateJemallocChunkLayout();
-#endif
     }
 #if defined(__LP64__)
-    dl_iterate_phdr(gotHookPhdrCallback, nullptr);
+    xdl_iterate_phdr(gotHookPhdrCallback, nullptr, XDL_DEFAULT);
 #endif
-}
-
-struct UnwindBacktraceState {
-    int depth;
-};
-
-static _Unwind_Reason_Code crashUnwindCallback(struct _Unwind_Context *context, void *arg) {
-    auto *state = static_cast<UnwindBacktraceState *>(arg);
-    uintptr_t pc = _Unwind_GetIP(context);
-    if (pc != 0) {
-        Dl_info info{};
-        if (dladdr(reinterpret_cast<void *>(pc), &info) && info.dli_fname) {
-            uintptr_t offset = pc - reinterpret_cast<uintptr_t>(info.dli_fbase);
-            ALOGE("  #%02d pc 0x%016llX  %s (+0x%llX) [%s]",
-                  state->depth,
-                  static_cast<unsigned long long>(pc),
-                  info.dli_fname,
-                  static_cast<unsigned long long>(offset),
-                  info.dli_sname ? info.dli_sname : "?");
-        } else {
-            ALOGE("  #%02d pc 0x%016llX  <unknown>",
-                  state->depth,
-                  static_cast<unsigned long long>(pc));
-        }
-        state->depth++;
-    }
-    return (state->depth >= 24) ? _URC_END_OF_STACK : _URC_NO_REASON;
 }
 
 static void recordNativeCrashOffsetLog(int sig, uintptr_t faultAddr, void *ucontext) {
@@ -491,9 +623,10 @@ static void recordNativeCrashOffsetLog(int sig, uintptr_t faultAddr, void *ucont
         x0Addr = static_cast<uintptr_t>(uc->uc_mcontext.arm_r0);
     }
 #endif
-    Dl_info pcInfo{}, lrInfo{};
-    dladdr(reinterpret_cast<void *>(pcAddr), &pcInfo);
-    dladdr(reinterpret_cast<void *>(lrAddr), &lrInfo);
+    void *xdlCache = nullptr;
+    xdl_info_t pcInfo{}, lrInfo{};
+    xdl_addr(reinterpret_cast<void *>(pcAddr), &pcInfo, &xdlCache);
+    xdl_addr(reinterpret_cast<void *>(lrAddr), &lrInfo, &xdlCache);
 
     uintptr_t pcOffset = (pcInfo.dli_fbase != nullptr && pcAddr >= reinterpret_cast<uintptr_t>(pcInfo.dli_fbase))
             ? (pcAddr - reinterpret_cast<uintptr_t>(pcInfo.dli_fbase)) : pcAddr;
@@ -514,8 +647,10 @@ static void recordNativeCrashOffsetLog(int sig, uintptr_t faultAddr, void *ucont
           lrInfo.dli_fname ? lrInfo.dli_fname : "unknown",
           static_cast<unsigned long long>(lrOffset));
 
-    UnwindBacktraceState btState{0};
-    _Unwind_Backtrace(crashUnwindCallback, &btState);
+    if (xdlCache != nullptr) {
+        xdl_addr_clean(&xdlCache);
+    }
+    logCurrentThreadBacktrace();
 }
 
 static bool isCriticalGameOrMainThread() {
@@ -566,9 +701,9 @@ static void passiveNativeCrashDiagnosticsHandler(int sig, siginfo_t *info, void 
     // 2. If a non-essential background worker thread (not main thread, not UE4/Render/Binder)
     //    raises SIGABRT / SIGBUS / unmapped SIGSEGV after game libraries are loaded,
     //    park that single faulting background thread instead of chaining to libanort.so's
-    //    SIGABRT->SIGBUS process killer.
+    //    SIGABRT->SIGSEGV/SIGBUS process killer.
     if (sGameLibLoadedCount.load(std::memory_order_relaxed) > 0 && !isCriticalGameOrMainThread()) {
-        ALOGW("FEATURESTIC CRASH SHIELD: Isolating faulting background thread TID=%d on signal=%d",
+        ALOGE("FEATURESTIC CRASH SHIELD: Isolating faulting background thread TID=%d on signal=%d",
               static_cast<int>(gettid()), sig);
         struct timespec ts{};
         ts.tv_sec = 3600;
@@ -606,6 +741,66 @@ static void installOrReassertPassiveNativeCrashDiagnostics() {
         }
     }
     sSignalGuardInstalled = true;
+}
+
+static int countMappedGameLibraries() {
+    FILE *fp = fopen("/proc/self/maps", "r");
+    if (!fp) return 0;
+    bool hasAnort = false;
+    bool hasAnogs = false;
+    bool hasHdmpve = false;
+    bool hasUE4 = false;
+    bool hasCrashKit = false;
+    char line[512];
+    while (fgets(line, sizeof(line), fp)) {
+        if (!hasAnort && strstr(line, "libanort.so") != nullptr) hasAnort = true;
+        if (!hasAnogs && strstr(line, "libanogs.so") != nullptr) hasAnogs = true;
+        if (!hasHdmpve && strstr(line, "libhdmpve.so") != nullptr) hasHdmpve = true;
+        if (!hasUE4 && strstr(line, "libUE4.so") != nullptr) hasUE4 = true;
+        if (!hasCrashKit && strstr(line, "libCrashKit.so") != nullptr) hasCrashKit = true;
+    }
+    fclose(fp);
+    return (hasAnort ? 1 : 0) + (hasAnogs ? 1 : 0) + (hasHdmpve ? 1 : 0) + (hasUE4 ? 1 : 0) + (hasCrashKit ? 1 : 0);
+}
+
+static void *nativeGuardWatcherThreadMain(void * /*arg*/) {
+    prctl(PR_SET_NAME, reinterpret_cast<unsigned long>(" Binder:guard"), 0, 0, 0);
+    int lastCount = 0;
+    // Monitor for the first 45 seconds (180 * 250ms) as game libraries in clns-10 load
+    // and register their signal handlers (libanort.so at t+0.6s, libCrashKit.so at t+6.5s).
+    for (int i = 0; i < 180; ++i) {
+        struct timespec ts{};
+        ts.tv_sec = 0;
+        ts.tv_nsec = 250 * 1000 * 1000L; // 250ms
+        nanosleep(&ts, nullptr);
+
+        int count = countMappedGameLibraries();
+        if (count > lastCount) {
+            lastCount = count;
+            sGameLibLoadedCount.store(count, std::memory_order_relaxed);
+            sanitizeInheritedPtyFileDescriptors();
+            installHeapAndRefBaseSafetyGuards();
+            installOrReassertPassiveNativeCrashDiagnostics();
+        } else if (count > 0 && (i % 8 == 0)) {
+            // Every 2.0s after game libraries are mapped, re-assert our signal guard
+            // in case libanort.so / libCrashKit.so re-registered sigaction handlers.
+            installOrReassertPassiveNativeCrashDiagnostics();
+        }
+    }
+    return nullptr;
+}
+
+static void startNativeGuardWatcherThread() {
+    bool expected = false;
+    if (!sWatcherThreadStarted.compare_exchange_strong(expected, true)) {
+        return;
+    }
+    pthread_t tid;
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+    pthread_create(&tid, &attr, nativeGuardWatcherThreadMain, nullptr);
+    pthread_attr_destroy(&attr);
 }
 }
 
@@ -849,6 +1044,7 @@ void BoxCore::onNativeLibraryLoaded(const char *libPath) {
             sGameLibLoadedCount.fetch_add(1, std::memory_order_relaxed);
         }
     }
+    sanitizeInheritedPtyFileDescriptors();
     installHeapAndRefBaseSafetyGuards();
     installOrReassertPassiveNativeCrashDiagnostics();
 }
@@ -933,6 +1129,7 @@ void nativeHook(JNIEnv *env) {
     BinderHook::init(env);
     DexFileHook::init(env);
     installHeapAndRefBaseSafetyGuards();
+    startNativeGuardWatcherThread();
 }
 
 void hideXposed(JNIEnv *env, jclass clazz) {
@@ -965,6 +1162,8 @@ void setNativeProp(JNIEnv *env, jclass clazz, jstring key, jstring value) {
             if (huid > 0) sCachedHostUid.store(huid, std::memory_order_relaxed);
         } else if (strcmp(k, "debug.featurestic.app_mode") == 0) {
             sCachedAppMode.store(atoi(v), std::memory_order_relaxed);
+        } else if (strcmp(k, "debug.featurestic.gamelibs_ready") == 0) {
+            BoxCore::onNativeLibraryLoaded("libUE4.so");
         } else {
             SystemPropertiesHook::setProp(k, v);
         }
@@ -980,6 +1179,7 @@ void init(JNIEnv *env, jobject clazz, jint api_level) {
     VMEnv.api_level = api_level;
     VMEnv.initialized = false;
     sCachedHostUid.store(static_cast<int>(getuid()), std::memory_order_relaxed);
+    sanitizeInheritedPtyFileDescriptors();
 
     jclass localClass = env->FindClass(VMCORE_CLASS);
     if (localClass == nullptr) {
