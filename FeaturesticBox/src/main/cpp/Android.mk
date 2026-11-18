@@ -64,6 +64,10 @@ LOCAL_C_INCLUDES += $(LOCAL_PATH)/libzip
 # --- Source Files ---
 FEATURESTIC_CORE_SRC := $(wildcard $(LOCAL_PATH)/*.cpp)
 FEATURESTIC_CORE_SRC += $(wildcard $(LOCAL_PATH)/Hook/*.cpp)
+ifeq ($(TARGET_ARCH_ABI),arm64-v8a)
+LOCAL_C_INCLUDES += $(LOCAL_PATH)/Hook/And64InlineHook
+FEATURESTIC_CORE_SRC += $(LOCAL_PATH)/Hook/And64InlineHook/And64InlineHook.cpp
+endif
 FEATURESTIC_CORE_SRC += $(wildcard $(LOCAL_PATH)/IO/*.cpp)
 FEATURESTIC_CORE_SRC += $(wildcard $(LOCAL_PATH)/JniHook/*.cpp)
 FEATURESTIC_CORE_SRC += $(wildcard $(LOCAL_PATH)/SandHook/*.cpp)
