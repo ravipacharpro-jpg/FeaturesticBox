@@ -197,6 +197,8 @@ public class GmsCore {
         }
         String lower = uri.toString().toLowerCase(Locale.US);
         return lower.contains("measurementdynamite")
+                || lower.contains("measurement.dynamite")
+                || lower.contains(".measurement")
                 || lower.contains("/measurement")
                 || lower.contains("firebaseanalytics")
                 || lower.contains("appmeasurement");
