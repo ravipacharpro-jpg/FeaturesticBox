@@ -537,7 +537,7 @@ public class BActivityThread extends IBActivityThread.Stub {
             Security.removeProvider("AndroidNSSP");
             BRNetworkSecurityConfigProvider.get().install(packageContext);
         }
-        Application application;
+        Application application = null;
         try {
             onBeforeCreateApplication(packageName, processName, packageContext);
             // Set native crash recovery point before makeApplication — catches
