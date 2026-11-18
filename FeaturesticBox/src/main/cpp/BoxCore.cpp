@@ -18,6 +18,7 @@
 #include <mutex>
 #include <cstdint>
 #include <cstdlib>
+#include <csetjmp>
 #include <string>
 #include <fstream>
 #include <dirent.h>
@@ -47,6 +48,12 @@ static int (*sOrigSigaction64)(int, const struct sigaction *, struct sigaction *
 static std::atomic<int> sCachedHostUid{-1};
 static std::atomic<int> sCachedCallingBUid{-1};
 static std::atomic<int> sCachedAppMode{0}; // 0 = normal virtual app, 1 = gms (ROOT_UID), 2 = webview (myUid)
+
+// Native crash recovery: sigjmp_buf for recovering from stack protector /
+// native SIGABRT crashes (e.g. -fstack-protector in libanogs.so anti-cheat).
+// Java calls setNativeCrashRecoveryPoint() before dangerous native operations.
+static sigjmp_buf gNativeRecoveryJumpBuf;
+static std::atomic<bool> gNativeRecoveryActive{false};
 
 // Sanitize any inherited /dev/pts/* pseudo-terminal file descriptors at startup
 // so anti-cheat /proc/self/fd scans never see a Termux/shell pty FD.
@@ -683,6 +690,15 @@ static void passiveNativeCrashDiagnosticsHandler(int sig, siginfo_t *info, void 
         parkFaultingBackgroundThreadForever("signal_shield", sig, reinterpret_cast<const void *>(fAddr), static_cast<size_t>(siCode));
     }
 
+    // If SIGABRT (e.g. -fstack-protector stack corruption in libanogs.so
+    // anti-cheat) and we have an active recovery point, try siglongjmp back
+    // to a safe Java/native boundary instead of crashing the whole process.
+    if (sig == SIGABRT && gNativeRecoveryActive.load(std::memory_order_relaxed)) {
+        ALOGW("FEATURESTIC: Caught SIGABRT (stack corruption detected), attempting native crash recovery via siglongjmp");
+        siglongjmp(gNativeRecoveryJumpBuf, 1);
+        ALOGE("FEATURESTIC: siglongjmp did not return, falling through to chainPreviousSignal");
+    }
+
     chainPreviousSignal(sig, info, ucontext);
 }
 
@@ -1256,6 +1272,13 @@ void setNativeProp(JNIEnv *env, jclass clazz, jstring key, jstring value) {
     if (v != nullptr) env->ReleaseStringUTFChars(value, v);
 }
 
+jboolean setNativeCrashRecoveryPoint(JNIEnv *env, jclass clazz) {
+    int ret = sigsetjmp(gNativeRecoveryJumpBuf, 1); // 1 = save signal mask
+    gNativeRecoveryActive.store(true, std::memory_order_relaxed);
+    ALOGW("FEATURESTIC: Native crash recovery point set (sigsetjmp returned %d)", ret);
+    return (jboolean)(ret == 0); // true on initial set, false if we longjmp'd back here
+}
+
 void init(JNIEnv *env, jobject clazz, jint api_level) {
     if (env == nullptr) return;
 
@@ -1363,6 +1386,7 @@ void enableIO(JNIEnv *env, jclass clazz) {
 static JNINativeMethod gMethods[] = {
         {"hideXposed", "()V",                                   (void *) hideXposed},
         {"setNativeProp", "(Ljava/lang/String;Ljava/lang/String;)V", (void *) setNativeProp},
+        {"setNativeCrashRecoveryPoint", "()Z", (void *) setNativeCrashRecoveryPoint},
         {"isRuntimeSecure", "()Z", (void *) isRuntimeSecure},
         {"lockHostSignature", "(Landroid/content/Context;Ljava/lang/String;)Z", (void *) lockHostSignature},
         {"addIORule",  "(Ljava/lang/String;Ljava/lang/String;)V", (void *) addIORule},
