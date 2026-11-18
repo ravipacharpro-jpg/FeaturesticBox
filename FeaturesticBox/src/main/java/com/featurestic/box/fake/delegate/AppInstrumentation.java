@@ -268,14 +268,6 @@ public final class AppInstrumentation extends BaseInstrumentationDelegate implem
 		FeaturesticBatteryAndOemGuard.onGameResumed(activity);
 		try {
 			com.featurestic.box.core.RNative.onGameActivityResumed(activity);
-			if (activity != null && activity.getClass().getName().contains("GameActivity")) {
-				new Handler(Looper.getMainLooper()).postDelayed(() -> {
-					try {
-						com.featurestic.box.core.RNative.setNativeProp("debug.featurestic.rearm_crash_log", "1");
-					} catch (Throwable ignored) {
-					}
-				}, 6000L);
-			}
 		} catch (Throwable ignored) {
 		}
 	}

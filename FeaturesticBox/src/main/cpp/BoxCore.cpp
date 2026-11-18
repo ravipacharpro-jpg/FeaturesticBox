@@ -21,16 +21,12 @@
 #include <cstring>
 #include <signal.h>
 #include <sys/mman.h>
-#include <sys/prctl.h>
-#include <dlfcn.h>
 #include <elf.h>
 
 namespace {
 static struct sigaction sOldSigsegvAction;
 static struct sigaction sOldSigbusAction;
-static struct sigaction sOldSigabrtAction;
 static bool sSignalGuardInstalled = false;
-static volatile sig_atomic_t sInCrashLog = 0;
 static volatile uintptr_t sLastUnlockedPage = 0;
 static volatile int sSamePageRetryCount = 0;
 
@@ -63,89 +59,73 @@ static bool isProtectedGameLibraryAddr(uintptr_t faultAddr) {
     return matched;
 }
 
-static void logFrameAddress(int idx, uintptr_t addr) {
-    if (addr < 0x10000) return;
-    Dl_info dli{};
-    if (dladdr(reinterpret_cast<void *>(addr), &dli) != 0 && dli.dli_fname != nullptr) {
-        const char *slash = strrchr(dli.dli_fname, '/');
-        const char *mod = slash ? (slash + 1) : dli.dli_fname;
-        uintptr_t base = reinterpret_cast<uintptr_t>(dli.dli_fbase);
-        uintptr_t off = (addr >= base) ? (addr - base) : addr;
-        ALOGE("FEATURESTIC BT #%02d: %s + 0x%llX (pc=0x%llX, sym=%s)",
-              idx, mod,
-              static_cast<unsigned long long>(off),
-              static_cast<unsigned long long>(addr),
-              dli.dli_sname ? dli.dli_sname : "?");
-    } else {
-        ALOGE("FEATURESTIC BT #%02d: <unknown> (pc=0x%llX)",
-              idx, static_cast<unsigned long long>(addr));
-    }
-}
 
 static void recordNativeCrashOffsetLog(int sig, uintptr_t faultAddr, void *ucontext) {
-    if (sInCrashLog) return;
-    sInCrashLog = 1;
-
-    char tname[32] = {0};
-    prctl(PR_GET_NAME, reinterpret_cast<unsigned long>(tname), 0, 0, 0);
-
     uintptr_t pcAddr = 0;
-    uintptr_t lrAddr = 0;
-    uintptr_t spAddr = 0;
-    uintptr_t fpAddr = 0;
 #if defined(__aarch64__)
     if (ucontext != nullptr) {
         ucontext_t *uc = reinterpret_cast<ucontext_t *>(ucontext);
         pcAddr = static_cast<uintptr_t>(uc->uc_mcontext.pc);
-        lrAddr = static_cast<uintptr_t>(uc->uc_mcontext.regs[30]);
-        fpAddr = static_cast<uintptr_t>(uc->uc_mcontext.regs[29]);
-        spAddr = static_cast<uintptr_t>(uc->uc_mcontext.sp);
     }
 #elif defined(__arm__)
     if (ucontext != nullptr) {
         ucontext_t *uc = reinterpret_cast<ucontext_t *>(ucontext);
         pcAddr = static_cast<uintptr_t>(uc->uc_mcontext.arm_pc);
-        lrAddr = static_cast<uintptr_t>(uc->uc_mcontext.arm_lr);
-        fpAddr = static_cast<uintptr_t>(uc->uc_mcontext.arm_fp);
-        spAddr = static_cast<uintptr_t>(uc->uc_mcontext.arm_sp);
     }
 #endif
-    ALOGE("FEATURESTIC CRASH CATCHER: sig=%d thread=%s PC=0x%llX LR=0x%llX SP=0x%llX FP=0x%llX Fault=0x%llX",
-          sig, tname,
-          static_cast<unsigned long long>(pcAddr),
-          static_cast<unsigned long long>(lrAddr),
-          static_cast<unsigned long long>(spAddr),
-          static_cast<unsigned long long>(fpAddr),
-          static_cast<unsigned long long>(faultAddr));
+    uintptr_t lookupAddr = (pcAddr != 0) ? pcAddr : faultAddr;
+    FILE *maps = fopen("/proc/self/maps", "rt");
+    char moduleName[256] = "unknown.so";
+    uintptr_t moduleBase = 0;
+    char perms[16] = "----";
 
-    logFrameAddress(0, pcAddr);
-    if (lrAddr != 0 && lrAddr != pcAddr) {
-        logFrameAddress(1, lrAddr);
+    if (maps != nullptr) {
+        char line[512];
+        while (fgets(line, sizeof(line), maps)) {
+            unsigned long long startAddr = 0, endAddr = 0, fileOffset = 0;
+            char p[8] = {0};
+            char pathBuf[256] = {0};
+            int parsed = sscanf(line, "%llx-%llx %7s %llx %*s %*s %255s",
+                                &startAddr, &endAddr, p, &fileOffset, pathBuf);
+            if (parsed >= 4 && lookupAddr >= startAddr && lookupAddr < endAddr) {
+                moduleBase = static_cast<uintptr_t>(startAddr - fileOffset);
+                strncpy(perms, p, sizeof(perms) - 1);
+                if (parsed == 5 && pathBuf[0] != '\0') {
+                    const char *slash = strrchr(pathBuf, '/');
+                    strncpy(moduleName, slash ? (slash + 1) : pathBuf, sizeof(moduleName) - 1);
+                }
+                break;
+            }
+        }
+        fclose(maps);
     }
-#if defined(__aarch64__)
-    uintptr_t curFp = fpAddr;
-    for (int i = 2; i < 16; ++i) {
-        if (curFp == 0 || (curFp & 0x7) != 0) break;
-        if (spAddr != 0 && (curFp < spAddr || curFp > spAddr + 262144)) break;
-        uintptr_t *frame = reinterpret_cast<uintptr_t *>(curFp);
-        uintptr_t nextFp = frame[0];
-        uintptr_t retAddr = frame[1];
-        if (retAddr == 0) break;
-        logFrameAddress(i, retAddr);
-        if (nextFp <= curFp || nextFp - curFp > 65536) break;
-        curFp = nextFp;
+
+    uintptr_t relOffset = (lookupAddr >= moduleBase && moduleBase != 0)
+            ? (lookupAddr - moduleBase) : lookupAddr;
+
+    FILE *out = fopen("/data/local/tmp/featurestic_last_crash.log", "wt");
+    if (out != nullptr) {
+        fprintf(out, "%s + 0x%llX (Signal %d, PC=0x%llX, Fault=0x%llX, Perms=%s)\n",
+                moduleName,
+                static_cast<unsigned long long>(relOffset),
+                sig,
+                static_cast<unsigned long long>(pcAddr),
+                static_cast<unsigned long long>(faultAddr),
+                perms);
+        fclose(out);
     }
-#endif
-    sInCrashLog = 0;
+    ALOGE("FEATURESTIC CRASH CATCHER: %s + 0x%llX (Signal=%d, PC=0x%llX, Fault=0x%llX)",
+          moduleName,
+          static_cast<unsigned long long>(relOffset),
+          sig,
+          static_cast<unsigned long long>(pcAddr),
+          static_cast<unsigned long long>(faultAddr));
 }
 
-static void anogsMemoryFaultHandler(int sig, siginfo_t *info, void *ucontext);
-
 static void chainPreviousSignal(int sig, siginfo_t *info, void *ucontext) {
-    struct sigaction *prev = (sig == SIGSEGV) ? &sOldSigsegvAction
-            : (sig == SIGBUS ? &sOldSigbusAction : &sOldSigabrtAction);
+    struct sigaction *prev = (sig == SIGSEGV) ? &sOldSigsegvAction : &sOldSigbusAction;
     if (prev->sa_flags & SA_SIGINFO) {
-        if (prev->sa_sigaction != nullptr && prev->sa_sigaction != anogsMemoryFaultHandler) {
+        if (prev->sa_sigaction != nullptr) {
             prev->sa_sigaction(sig, info, ucontext);
             return;
         }
@@ -186,28 +166,15 @@ static void anogsMemoryFaultHandler(int sig, siginfo_t *info, void *ucontext) {
     chainPreviousSignal(sig, info, ucontext);
 }
 
-static void rearmCrashDiagnosticHandler() {
-    struct sigaction cur{};
+static void installAnogsMemoryFaultGuard() {
+    if (sSignalGuardInstalled) return;
+    sSignalGuardInstalled = true;
     struct sigaction sa{};
     sa.sa_sigaction = anogsMemoryFaultHandler;
     sigemptyset(&sa.sa_mask);
     sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
-
-    if (sigaction(SIGABRT, nullptr, &cur) == 0 && cur.sa_sigaction != anogsMemoryFaultHandler) {
-        sigaction(SIGABRT, &sa, &sOldSigabrtAction);
-    }
-    if (sigaction(SIGBUS, nullptr, &cur) == 0 && cur.sa_sigaction != anogsMemoryFaultHandler) {
-        sigaction(SIGBUS, &sa, &sOldSigbusAction);
-    }
-    if (sigaction(SIGSEGV, nullptr, &cur) == 0 && cur.sa_sigaction != anogsMemoryFaultHandler) {
-        sigaction(SIGSEGV, &sa, &sOldSigsegvAction);
-    }
-}
-
-static void installAnogsMemoryFaultGuard() {
-    if (sSignalGuardInstalled) return;
-    sSignalGuardInstalled = true;
-    rearmCrashDiagnosticHandler();
+    sigaction(SIGSEGV, &sa, &sOldSigsegvAction);
+    sigaction(SIGBUS, &sa, &sOldSigbusAction);
 }
 }
 
@@ -712,9 +679,6 @@ void setNativeProp(JNIEnv *env, jclass clazz, jstring key, jstring value) {
     if (k != nullptr && v != nullptr) {
         if (strcmp(k, "debug.featurestic.streamproof") == 0) {
             sNativeStreamproofEnabled = (v[0] == '1');
-        } else if (strcmp(k, "debug.featurestic.rearm_crash_log") == 0 && v[0] == '1') {
-            rearmCrashDiagnosticHandler();
-            ALOGE("FeaturesticCore: rearmed SIGABRT/SIGBUS/SIGSEGV diagnostic backtrace logger");
         } else if (strcmp(k, "debug.featurestic.login_gate") == 0) {
             if (strcmp(v, "1") == 0) sNativeLoginGateState = 1;
             else if (strncmp(v, "UNLOCKED_", 9) == 0) sNativeLoginGateState = 2;
