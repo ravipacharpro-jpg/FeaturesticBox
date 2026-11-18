@@ -41,6 +41,8 @@ static struct sigaction sOldSigabrtAction{};
 static bool sSignalGuardInstalled = false;
 static std::atomic<int> sGameLibLoadedCount{0};
 static std::atomic<bool> sWatcherThreadStarted{false};
+static int (*sOrigSigaction)(int, const struct sigaction *, struct sigaction *) = nullptr;
+static int (*sOrigSigaction64)(int, const struct sigaction *, struct sigaction *) = nullptr;
 
 static std::atomic<int> sCachedHostUid{-1};
 static std::atomic<int> sCachedCallingBUid{-1};
@@ -77,26 +79,65 @@ static void sanitizeInheritedPtyFileDescriptors() {
     closedir(dir);
 }
 
+static bool isCriticalGameOrMainThread() {
+    if (gettid() == getpid()) return true;
+    char tname[32] = {0};
+    if (prctl(PR_GET_NAME, reinterpret_cast<unsigned long>(tname), 0, 0, 0) == 0 && tname[0] != '\0') {
+        if (strstr(tname, "MainThread") != nullptr
+                || strstr(tname, "GameThread") != nullptr
+                || strstr(tname, "RenderThread") != nullptr
+                || strstr(tname, "RHIThread") != nullptr
+                || strstr(tname, "TaskGraph") != nullptr
+                || strstr(tname, "FAsync") != nullptr
+                || strstr(tname, "AudioThread") != nullptr
+                || strstr(tname, "Binder:") != nullptr
+                || strstr(tname, "RenderEngine") != nullptr
+                || strstr(tname, "hwui") != nullptr
+                || strstr(tname, "Finalizer") != nullptr
+                || strstr(tname, "HeapTask") != nullptr) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static void parkFaultingBackgroundThreadForever(const char *reason, int codeOrSig, const void *ptr, size_t mapbits) {
+    char tname[32] = {0};
+    prctl(PR_GET_NAME, reinterpret_cast<unsigned long>(tname), 0, 0, 0);
+    ALOGE("FEATURESTIC CRASH SHIELD: Parking background punishment thread TID=%d (%s) [%s, code=%d, ptr=%p, mapbits=0x%zx]",
+          static_cast<int>(gettid()),
+          tname[0] ? tname : "?",
+          reason ? reason : "guard",
+          codeOrSig,
+          ptr,
+          mapbits);
+    struct timespec ts{};
+    ts.tv_sec = 3600;
+    ts.tv_nsec = 0;
+    while (true) {
+        nanosleep(&ts, nullptr);
+    }
+}
+
 // ============================================================================
 // Jemalloc Double-Free / Invalid-Free Guard & Android RefBase::decStrong Guard
 // ============================================================================
-// On Android 16 (API 36) non-root devices using Bionic jemalloc (4KB pages,
-// 2MB arena chunks aligned to 0x200000, LG_LARGE_MINCLASS = 15 i.e. 32KB),
-// at ~25-31s uptime (3.0s after AndroidThunkJava_GetTransmissionRawJsonContent),
-// a background worker thread passes an already-freed 5-page (20KB, 0x5000-byte)
-// page-aligned extent (mapbits: 0x5ff0, where bit 0 CHUNK_MAP_ALLOCATED == 0)
-// to free(), while another thread may call RefBase::decStrong() on a freed
-// page-aligned address (+0x5000).
+// Verified on CPH2823IN (Android 16, API 36) in bgmi_470_v3_logs.txt:
+//   JemallocGuard calibrated: baseIdx=2, stride=1, k9=43, pageind9=41,
+//   before=0x17ff3, after=0x17ff0, selfTest=1 (verifyBits=0x17ff0)
 //
-// Why v2 calibration missed 0x5ff0:
-//   1. In Bionic jemalloc, 5*4096 (20KB) and 6*4096 (24KB) are SMALL-BIN runs
-//      (< 32KB), so while allocated they have CHUNK_MAP_LARGE == 0 and a small
-//      binind (not 0xff0). Only allocations >= 32KB (>= 8 pages, e.g. 9*4096 =
-//      36KB and 10*4096 = 40KB) have mapbits 0x9ff3 / 0xaff3 while allocated,
-//      and transition to 0x9ff0 / 0xaff0 when freed!
-//   2. We also hook libc.so's free() directly via A64HookFunction (just like
-//      RefBase::decStrong in libutils.so) so 100% of free() calls across all
-//      linker namespaces (clns-9, clns-10, system) pass through safe_free().
+// In Bionic jemalloc (external/jemalloc_new):
+//   - Bit 0 (0x1ULL) is CHUNK_MAP_ALLOCATED (1 = allocated, 0 = unallocated).
+//   - Bit 1 (0x2ULL) is CHUNK_MAP_UNZEROED, which is set on valid small-bin runs
+//     (e.g. 0xbff3, 0x13fe3, 0x13ff3) as well as large extents!
+//   - Therefore, ONLY (mapbits & 0x1ULL) == 0 indicates an unallocated page
+//     (like 0x17ff0 in self-test and 0x5ff0 in the delayed anti-cheat poison free).
+//   - Furthermore, when a background punishment thread calls free() or
+//     RefBase::decStrong() on an unallocated page ((mapbits & 1) == 0), we must
+//     NOT return control to that punishment thread (because on the very next
+//     instruction it triggers a fallback SEGV_ACCERR / SIGBUS process killer);
+//     instead we release sHeapSafetyMutex and park that background thread in
+//     nanosleep() forever while the game continues running at 30-60 FPS.
 static std::recursive_mutex sHeapSafetyMutex;
 static void (*sOrigFree)(void *) = nullptr;
 static void (*sOrigRefBaseDecStrong)(void *, const void *) = nullptr;
@@ -126,11 +167,6 @@ static bool isJemallocPtrInvalidOrUnallocated(uintptr_t uptr, size_t *outMapbits
 
 static void calibrateJemallocChunkLayout() {
     if (sJemallocCalibrated) return;
-    // Allocate two large extents >= 32KB (9 pages = 36KB = 0x9000, 10 pages = 40KB = 0xa000)
-    // separated by a 4KB barrier so freeing p9 cannot coalesce with p10.
-    // In Bionic jemalloc (4KB page, 2MB chunk, 13-page header = 6656 size_t words):
-    //   - While allocated: mapbits has CHUNK_MAP_BININD_MASK (0xff0) | CHUNK_MAP_LARGE (0x2) | CHUNK_MAP_ALLOCATED (0x1) -> (mapbits & 0xFF3) == 0xFF3 (specifically 0x9ff3 and 0xaff3).
-    //   - After free(p9): mapbits clears CHUNK_MAP_LARGE and CHUNK_MAP_ALLOCATED -> (mapbits & 0xFF3) == 0xFF0 (e.g. 0x9ff0).
     void *p9 = malloc(9 * 4096);
     void *barrier = malloc(4096);
     void *p10 = malloc(10 * 4096);
@@ -143,8 +179,6 @@ static void calibrateJemallocChunkLayout() {
         size_t pageind9 = (u9 - chunk9) >> 12;
         size_t pageind10 = (u10 - chunk10) >> 12;
 
-        // Scan up to all 13 header pages (13 * 4096 / 8 = 6656 words), though map_bits
-        // in Bionic jemalloc is in page 0 (words 0..511).
         constexpr int kMaxHeaderWords = 13 * 512;
         if (pageind9 >= 13 && pageind9 < 512 && isPageMappedSafe(chunk9)) {
             const auto *words9 = reinterpret_cast<const volatile size_t *>(chunk9);
@@ -153,17 +187,12 @@ static void calibrateJemallocChunkLayout() {
                 for (int k = 0; k < kMaxHeaderWords; ++k) {
                     before9[k] = words9[k];
                 }
-                // Free p9 using standard free (before A64HookFunction hooks free)
                 free(p9);
                 p9 = nullptr;
 
                 int foundK9 = -1;
                 for (int k = 0; k < kMaxHeaderWords; ++k) {
-                    // Look for the header word that had CHUNK_MAP_LARGE | CHUNK_MAP_ALLOCATED (0x3)
-                    // and BININD_INVALID (0xff0) before free(p9), and transitioned to unallocated
-                    // (0xff0 with bits 0..1 == 0) immediately after free(p9)!
                     if ((before9[k] & 0xFF3ULL) == 0xFF3ULL && (words9[k] & 0xFF3ULL) == 0xFF0ULL) {
-                        // Prefer exact 9-page size match (0x9ff3) if multiple pages changed
                         if ((before9[k] & 0xFFFF3ULL) == 0x9FF3ULL || foundK9 < 0) {
                             foundK9 = k;
                             if ((before9[k] & 0xFFFF3ULL) == 0x9FF3ULL) {
@@ -212,9 +241,8 @@ static void calibrateJemallocChunkLayout() {
     if (barrier != nullptr) free(barrier);
 }
 
-// Returns true if ptr definitely resides in a jemalloc arena chunk page whose
-// mapbits indicate it is UNALLOCATED ((mapbits & 1) == 0, e.g. mapbits == 0x5ff0)
-// or is an invalid interior pointer into a large allocation.
+// Returns true ONLY if uptr resides in a valid jemalloc arena chunk page whose
+// mapbits have bit 0 (CHUNK_MAP_ALLOCATED) == 0 (e.g. mapbits == 0x5ff0).
 static bool isJemallocPtrInvalidOrUnallocated(uintptr_t uptr, size_t *outMapbits) {
     if (!sJemallocCalibrated) {
         return false;
@@ -243,19 +271,8 @@ static bool isJemallocPtrInvalidOrUnallocated(uintptr_t uptr, size_t *outMapbits
     if (outMapbits != nullptr) {
         *outMapbits = mapbits;
     }
-    // 1. CHUNK_MAP_ALLOCATED (bit 0) == 0 -> value not allocated (e.g. mapbits == 0x5ff0)!
-    if ((mapbits & 0x1ULL) == 0) {
-        return true;
-    }
-    // 2. CHUNK_MAP_LARGE (bit 1) != 0 -> large allocation MUST be 4KB page-aligned!
-    if ((mapbits & 0x2ULL) != 0 && (uptr & 0xFFFULL) != 0) {
-        return true;
-    }
-    // 3. Small allocation ((mapbits & 2) == 0) with BININD_INVALID (0xff) -> unallocated/corrupted mapbits!
-    if ((mapbits & 0x2ULL) == 0 && ((mapbits >> 4) & 0xFFULL) == 0xFFULL) {
-        return true;
-    }
-    return false;
+    // Bit 0 (CHUNK_MAP_ALLOCATED) == 0 -> value not allocated (e.g. mapbits == 0x5ff0)!
+    return (mapbits & 0x1ULL) == 0;
 }
 #endif
 
@@ -313,35 +330,50 @@ static void safe_free(void *ptr) {
     if (uptr < 0x10000ULL) {
         return;
     }
-    // Serialize page-aligned frees (all large extents and run heads like 0x756ed9b000 with mapbits:5ff0)
-    // and verify jemalloc mapbits before calling libc free().
+    // 1. Page-aligned free (all large extents and run heads, including 0x...000 with mapbits:0x5ff0)
     if ((uptr & 0xFFFULL) == 0) {
-        std::lock_guard<std::recursive_mutex> lock(sHeapSafetyMutex);
+        bool invalidOrUnallocated = false;
         size_t mapbits = 0;
-        if (!isPageMappedSafe(uptr) || isJemallocPtrInvalidOrUnallocated(uptr, &mapbits)) {
+        {
+            std::lock_guard<std::recursive_mutex> lock(sHeapSafetyMutex);
+            if (!isPageMappedSafe(uptr) || isJemallocPtrInvalidOrUnallocated(uptr, &mapbits)) {
+                invalidOrUnallocated = true;
+            } else if (sOrigFree != nullptr) {
+                sOrigFree(ptr);
+                return;
+            }
+        }
+        if (invalidOrUnallocated) {
             int cnt = ++sSuppressedFreeCount;
-            if (cnt <= 16) {
+            if (cnt <= 32) {
                 char tname[32] = {0};
                 prctl(PR_GET_NAME, reinterpret_cast<unsigned long>(tname), 0, 0, 0);
-                ALOGE("JemallocGuard: SUPPRESSED invalid/double free(%p) mapbits=0x%zx (count=%d, tid=%d [%s])",
+                ALOGE("JemallocGuard: SUPPRESSED unallocated page free(%p) mapbits=0x%zx (count=%d, tid=%d [%s])",
                       ptr, mapbits, cnt, static_cast<int>(gettid()), tname[0] ? tname : "?");
-                if (cnt == 1) {
+                if (cnt <= 4) {
                     logCurrentThreadBacktrace();
                 }
             }
+            if (sGameLibLoadedCount.load(std::memory_order_relaxed) > 0 && !isCriticalGameOrMainThread()) {
+                parkFaultingBackgroundThreadForever("unallocated_page_free", cnt, ptr, mapbits);
+            }
             return;
-        }
-        if (sOrigFree != nullptr) {
-            sOrigFree(ptr);
         }
         return;
     } else if (sJemallocCalibrated) {
+        // 2. Non-page-aligned small free: only suppress if the page itself has CHUNK_MAP_ALLOCATED == 0.
         size_t mapbits = 0;
         if (isJemallocPtrInvalidOrUnallocated(uptr, &mapbits)) {
             int cnt = ++sSuppressedFreeCount;
-            if (cnt <= 16) {
+            if (cnt <= 32) {
                 ALOGE("JemallocGuard: SUPPRESSED unallocated small free(%p) mapbits=0x%zx (count=%d, tid=%d)",
                       ptr, mapbits, cnt, static_cast<int>(gettid()));
+                if (cnt <= 4) {
+                    logCurrentThreadBacktrace();
+                }
+            }
+            if (sGameLibLoadedCount.load(std::memory_order_relaxed) > 0 && !isCriticalGameOrMainThread()) {
+                parkFaultingBackgroundThreadForever("unallocated_small_free", cnt, ptr, mapbits);
             }
             return;
         }
@@ -363,54 +395,50 @@ static void safe_RefBase_decStrong(void *self, const void *id) {
     if (uSelf < 0x10000ULL || (uSelf & 0x7ULL) != 0) {
         return;
     }
-    std::lock_guard<std::recursive_mutex> lock(sHeapSafetyMutex);
-    if (!isPageMappedSafe(uSelf) || isJemallocPtrInvalidOrUnallocated(uSelf)) {
+    bool invalidRefBase = false;
+    size_t mapbits = 0;
+    {
+        std::lock_guard<std::recursive_mutex> lock(sHeapSafetyMutex);
+        if (!isPageMappedSafe(uSelf) || isJemallocPtrInvalidOrUnallocated(uSelf, &mapbits)) {
+            invalidRefBase = true;
+        } else {
+            uintptr_t vptr = untagPtr(*reinterpret_cast<void *const *>(uSelf));
+            void *refs = *reinterpret_cast<void *const *>(uSelf + sizeof(void *));
+            uintptr_t uRefs = untagPtr(refs);
+            if (vptr < 0x10000ULL || refs == nullptr || uRefs < 0x10000ULL || (uRefs & 0x7ULL) != 0
+                    || !isPageMappedSafe(uRefs) || isJemallocPtrInvalidOrUnallocated(uRefs, &mapbits)) {
+                invalidRefBase = true;
+            } else {
+                void *mBase = *reinterpret_cast<void *const *>(uRefs + 8);
+                if (untagPtr(mBase) != uSelf) {
+                    invalidRefBase = true;
+                } else {
+                    auto *strongAtomic = reinterpret_cast<std::atomic<int32_t> *>(uRefs);
+                    int32_t curStrong = strongAtomic->load(std::memory_order_acquire);
+                    if (curStrong < 1) {
+                        invalidRefBase = true;
+                    } else {
+                        sOrigRefBaseDecStrong(self, id);
+                        return;
+                    }
+                }
+            }
+        }
+    }
+    if (invalidRefBase) {
         int cnt = ++sSuppressedRefBaseCount;
-        if (cnt <= 16) {
-            ALOGE("RefBaseGuard: SUPPRESSED decStrong(%p) on unallocated/unmapped object (count=%d, tid=%d)",
-                  self, cnt, static_cast<int>(gettid()));
+        if (cnt <= 32) {
+            ALOGE("RefBaseGuard: SUPPRESSED invalid/duplicate decStrong(%p) mapbits=0x%zx (count=%d, tid=%d)",
+                  self, mapbits, cnt, static_cast<int>(gettid()));
+            if (cnt <= 4) {
+                logCurrentThreadBacktrace();
+            }
+        }
+        if (sGameLibLoadedCount.load(std::memory_order_relaxed) > 0 && !isCriticalGameOrMainThread()) {
+            parkFaultingBackgroundThreadForever("invalid_RefBase_decStrong", cnt, self, mapbits);
         }
         return;
     }
-    // In 64-bit Android libutils RefBase:
-    //   offset 0: vptr (8 bytes)
-    //   offset 8: weakref_impl* mRefs (8 bytes)
-    // In weakref_impl:
-    //   offset 0: std::atomic<int32_t> mStrong (4 bytes)
-    //   offset 4: std::atomic<int32_t> mWeak (4 bytes)
-    //   offset 8: RefBase* mBase (8 bytes, must equal self)
-    uintptr_t vptr = untagPtr(*reinterpret_cast<void *const *>(uSelf));
-    void *refs = *reinterpret_cast<void *const *>(uSelf + sizeof(void *));
-    uintptr_t uRefs = untagPtr(refs);
-    if (vptr < 0x10000ULL || refs == nullptr || uRefs < 0x10000ULL || (uRefs & 0x7ULL) != 0
-            || !isPageMappedSafe(uRefs) || isJemallocPtrInvalidOrUnallocated(uRefs)) {
-        int cnt = ++sSuppressedRefBaseCount;
-        if (cnt <= 16) {
-            ALOGE("RefBaseGuard: SUPPRESSED decStrong(%p) with invalid mRefs=%p (count=%d, tid=%d)",
-                  self, refs, cnt, static_cast<int>(gettid()));
-        }
-        return;
-    }
-    void *mBase = *reinterpret_cast<void *const *>(uRefs + 8);
-    if (untagPtr(mBase) != uSelf) {
-        int cnt = ++sSuppressedRefBaseCount;
-        if (cnt <= 16) {
-            ALOGE("RefBaseGuard: SUPPRESSED decStrong(%p) with mismatched mBase=%p (count=%d, tid=%d)",
-                  self, mBase, cnt, static_cast<int>(gettid()));
-        }
-        return;
-    }
-    auto *strongAtomic = reinterpret_cast<std::atomic<int32_t> *>(uRefs);
-    int32_t curStrong = strongAtomic->load(std::memory_order_acquire);
-    if (curStrong < 1) {
-        int cnt = ++sSuppressedRefBaseCount;
-        if (cnt <= 16) {
-            ALOGE("RefBaseGuard: SUPPRESSED duplicate decStrong(%p) with mStrong=%d (count=%d, tid=%d)",
-                  self, curStrong, cnt, static_cast<int>(gettid()));
-        }
-        return;
-    }
-    sOrigRefBaseDecStrong(self, id);
 #else
     sOrigRefBaseDecStrong(self, id);
 #endif
@@ -431,7 +459,7 @@ static void safe_weakref_decWeak(void *refs, const void *id) {
     int32_t curWeak = weakAtomic->load(std::memory_order_acquire);
     if (curWeak < 1) {
         int cnt = ++sSuppressedRefBaseCount;
-        if (cnt <= 16) {
+        if (cnt <= 32) {
             ALOGE("RefBaseGuard: SUPPRESSED duplicate decWeak(%p) with mWeak=%d (count=%d, tid=%d)",
                   refs, curWeak, cnt, static_cast<int>(gettid()));
         }
@@ -549,6 +577,188 @@ static int gotHookPhdrCallback(struct dl_phdr_info *info, size_t /*size*/, void 
 }
 #endif
 
+static void recordNativeCrashOffsetLog(int sig, int siCode, uintptr_t faultAddr, void *ucontext) {
+    uintptr_t pcAddr = 0;
+    uintptr_t lrAddr = 0;
+    uintptr_t x0Addr = 0;
+#if defined(__aarch64__)
+    if (ucontext != nullptr) {
+        ucontext_t *uc = reinterpret_cast<ucontext_t *>(ucontext);
+        pcAddr = static_cast<uintptr_t>(uc->uc_mcontext.pc);
+        lrAddr = static_cast<uintptr_t>(uc->uc_mcontext.regs[30]);
+        x0Addr = static_cast<uintptr_t>(uc->uc_mcontext.regs[0]);
+    }
+#elif defined(__arm__)
+    if (ucontext != nullptr) {
+        ucontext_t *uc = reinterpret_cast<ucontext_t *>(ucontext);
+        pcAddr = static_cast<uintptr_t>(uc->uc_mcontext.arm_pc);
+        lrAddr = static_cast<uintptr_t>(uc->uc_mcontext.arm_lr);
+        x0Addr = static_cast<uintptr_t>(uc->uc_mcontext.arm_r0);
+    }
+#endif
+    void *xdlCache = nullptr;
+    xdl_info_t pcInfo{}, lrInfo{};
+    xdl_addr(reinterpret_cast<void *>(pcAddr), &pcInfo, &xdlCache);
+    xdl_addr(reinterpret_cast<void *>(lrAddr), &lrInfo, &xdlCache);
+
+    uintptr_t pcOffset = (pcInfo.dli_fbase != nullptr && pcAddr >= reinterpret_cast<uintptr_t>(pcInfo.dli_fbase))
+            ? (pcAddr - reinterpret_cast<uintptr_t>(pcInfo.dli_fbase)) : pcAddr;
+    uintptr_t lrOffset = (lrInfo.dli_fbase != nullptr && lrAddr >= reinterpret_cast<uintptr_t>(lrInfo.dli_fbase))
+            ? (lrAddr - reinterpret_cast<uintptr_t>(lrInfo.dli_fbase)) : lrAddr;
+
+    char tname[32] = {0};
+    prctl(PR_GET_NAME, reinterpret_cast<unsigned long>(tname), 0, 0, 0);
+
+    ALOGE("FEATURESTIC CRASH CATCHER: Signal=%d (code=%d), TID=%d (%s), Fault=0x%llX, X0=0x%llX | PC=%s+0x%llX | LR=%s+0x%llX",
+          sig,
+          siCode,
+          static_cast<int>(gettid()),
+          tname[0] ? tname : "?",
+          static_cast<unsigned long long>(faultAddr),
+          static_cast<unsigned long long>(x0Addr),
+          pcInfo.dli_fname ? pcInfo.dli_fname : "unknown",
+          static_cast<unsigned long long>(pcOffset),
+          lrInfo.dli_fname ? lrInfo.dli_fname : "unknown",
+          static_cast<unsigned long long>(lrOffset));
+
+    if (xdlCache != nullptr) {
+        xdl_addr_clean(&xdlCache);
+    }
+    logCurrentThreadBacktrace();
+}
+
+static void chainPreviousSignal(int sig, siginfo_t *info, void *ucontext) {
+    struct sigaction *prev = (sig == SIGSEGV) ? &sOldSigsegvAction
+            : ((sig == SIGBUS) ? &sOldSigbusAction : &sOldSigabrtAction);
+    if (prev->sa_flags & SA_SIGINFO) {
+        if (prev->sa_sigaction != nullptr
+                && reinterpret_cast<void *>(prev->sa_sigaction) != reinterpret_cast<void *>(&chainPreviousSignal)) {
+            prev->sa_sigaction(sig, info, ucontext);
+            return;
+        }
+    } else if (prev->sa_handler != SIG_DFL && prev->sa_handler != SIG_IGN && prev->sa_handler != nullptr) {
+        prev->sa_handler(sig);
+        return;
+    }
+    int (*origSa)(int, const struct sigaction *, struct sigaction *) = sOrigSigaction ? sOrigSigaction : ::sigaction;
+    struct sigaction dfl{};
+    dfl.sa_handler = SIG_DFL;
+    origSa(sig, &dfl, nullptr);
+    raise(sig);
+}
+
+static __thread int tThreadSegvAccerrCount = 0;
+
+static void passiveNativeCrashDiagnosticsHandler(int sig, siginfo_t *info, void *ucontext) {
+    int siCode = (info != nullptr) ? info->si_code : 0;
+    uintptr_t fAddr = (info != nullptr) ? reinterpret_cast<uintptr_t>(info->si_addr) : 0;
+    uintptr_t pcAddr = 0;
+#if defined(__aarch64__)
+    if (ucontext != nullptr) {
+        pcAddr = static_cast<uintptr_t>(reinterpret_cast<ucontext_t *>(ucontext)->uc_mcontext.pc);
+    }
+#endif
+
+    // Always log the first 8 signals of any type (including SEGV_ACCERR) so we have
+    // full visibility in logcat.
+    static std::atomic<int> sTotalLoggedSignals{0};
+    int logNum = ++sTotalLoggedSignals;
+    if (logNum <= 8) {
+        recordNativeCrashOffsetLog(sig, siCode, fAddr, ucontext);
+    }
+
+    // For SEGV_ACCERR on a valid mapped data/code address (where PC != faultAddr),
+    // allow the first probe on a thread to chain to libanogs.so's own SIGSEGV handler
+    // in case it is an XOM self-check. If the same thread faults repeatedly or if
+    // libanort.so converts it into SIGBUS/SIGABRT, isolate and park the background thread!
+    if (sig == SIGSEGV && siCode == SEGV_ACCERR && pcAddr != fAddr && fAddr >= 0x10000ULL) {
+        tThreadSegvAccerrCount++;
+        if (tThreadSegvAccerrCount <= 1) {
+            chainPreviousSignal(sig, info, ucontext);
+            return;
+        }
+    }
+
+    if (sGameLibLoadedCount.load(std::memory_order_relaxed) > 0 && !isCriticalGameOrMainThread()) {
+        parkFaultingBackgroundThreadForever("signal_shield", sig, reinterpret_cast<const void *>(fAddr), static_cast<size_t>(siCode));
+    }
+
+    chainPreviousSignal(sig, info, ucontext);
+}
+
+static void installOrReassertPassiveNativeCrashDiagnostics() {
+    int (*origSa)(int, const struct sigaction *, struct sigaction *) = sOrigSigaction ? sOrigSigaction : ::sigaction;
+    struct sigaction sa{};
+    sa.sa_sigaction = passiveNativeCrashDiagnosticsHandler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
+
+    struct sigaction prevSegv{};
+    if (origSa(SIGSEGV, &sa, &prevSegv) == 0) {
+        if (prevSegv.sa_sigaction != passiveNativeCrashDiagnosticsHandler && prevSegv.sa_handler != SIG_DFL && prevSegv.sa_handler != SIG_IGN) {
+            sOldSigsegvAction = prevSegv;
+        }
+    }
+    struct sigaction prevBus{};
+    if (origSa(SIGBUS, &sa, &prevBus) == 0) {
+        if (prevBus.sa_sigaction != passiveNativeCrashDiagnosticsHandler && prevBus.sa_handler != SIG_DFL && prevBus.sa_handler != SIG_IGN) {
+            sOldSigbusAction = prevBus;
+        }
+    }
+    struct sigaction prevAbrt{};
+    if (origSa(SIGABRT, &sa, &prevAbrt) == 0) {
+        if (prevAbrt.sa_sigaction != passiveNativeCrashDiagnosticsHandler && prevAbrt.sa_handler != SIG_DFL && prevAbrt.sa_handler != SIG_IGN) {
+            sOldSigabrtAction = prevAbrt;
+        }
+    }
+    sSignalGuardInstalled = true;
+}
+
+// Intercept sigaction() so libanort.so / libCrashKit.so cannot strip our
+// passiveNativeCrashDiagnosticsHandler back to SIG_DFL before raising SIGBUS (signal 7).
+static int safe_sigaction_common(int sig,
+                                 const struct sigaction *act,
+                                 struct sigaction *oldact,
+                                 int (*origFn)(int, const struct sigaction *, struct sigaction *)) {
+    if (sig == SIGSEGV || sig == SIGBUS || sig == SIGABRT) {
+        struct sigaction *savedSlot = (sig == SIGSEGV) ? &sOldSigsegvAction
+                : ((sig == SIGBUS) ? &sOldSigbusAction : &sOldSigabrtAction);
+        if (oldact != nullptr) {
+            *oldact = *savedSlot;
+        }
+        if (act != nullptr) {
+            if (act->sa_sigaction == passiveNativeCrashDiagnosticsHandler) {
+                return origFn ? origFn(sig, act, nullptr) : 0;
+            }
+            if ((act->sa_flags & SA_SIGINFO) && act->sa_sigaction != nullptr) {
+                *savedSlot = *act;
+            } else if (!(act->sa_flags & SA_SIGINFO)
+                    && act->sa_handler != SIG_DFL
+                    && act->sa_handler != SIG_IGN
+                    && act->sa_handler != nullptr) {
+                *savedSlot = *act;
+            }
+            if (origFn != nullptr) {
+                struct sigaction sa{};
+                sa.sa_sigaction = passiveNativeCrashDiagnosticsHandler;
+                sigemptyset(&sa.sa_mask);
+                sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
+                origFn(sig, &sa, nullptr);
+            }
+        }
+        return 0;
+    }
+    return origFn ? origFn(sig, act, oldact) : -1;
+}
+
+static int safe_sigaction(int sig, const struct sigaction *act, struct sigaction *oldact) {
+    return safe_sigaction_common(sig, act, oldact, sOrigSigaction);
+}
+
+static int safe_sigaction64(int sig, const struct sigaction *act, struct sigaction *oldact) {
+    return safe_sigaction_common(sig, act, oldact, sOrigSigaction64 ? sOrigSigaction64 : sOrigSigaction);
+}
+
 static void installHeapAndRefBaseSafetyGuards() {
     static bool sGuardsInitialized = false;
     if (!sGuardsInitialized) {
@@ -557,21 +767,38 @@ static void installHeapAndRefBaseSafetyGuards() {
         // 1. Calibrate Bionic jemalloc chunk mapbits layout FIRST using raw malloc/free.
         calibrateJemallocChunkLayout();
 #endif
-        // 2. Hook libc.so free() directly via A64HookFunction so 100% of free() calls
-        //    across all classloader namespaces (clns-9, clns-10, system) enter safe_free().
+        // 2. Install signal diagnostics BEFORE hooking sigaction().
+        installOrReassertPassiveNativeCrashDiagnostics();
+
+        // 3. Hook libc.so free() and sigaction()/sigaction64() directly via A64HookFunction.
         void *freeSym = dlsym(RTLD_DEFAULT, "free");
+        void *sigactionSym = dlsym(RTLD_DEFAULT, "sigaction");
+        void *sigaction64Sym = dlsym(RTLD_DEFAULT, "sigaction64");
 #if defined(__aarch64__)
         if (freeSym) {
             A64HookFunction(freeSym,
                             reinterpret_cast<void *>(safe_free),
                             reinterpret_cast<void **>(&sOrigFree));
         }
+        if (sigactionSym) {
+            A64HookFunction(sigactionSym,
+                            reinterpret_cast<void *>(safe_sigaction),
+                            reinterpret_cast<void **>(&sOrigSigaction));
+        }
+        if (sigaction64Sym && sigaction64Sym != sigactionSym) {
+            A64HookFunction(sigaction64Sym,
+                            reinterpret_cast<void *>(safe_sigaction64),
+                            reinterpret_cast<void **>(&sOrigSigaction64));
+        }
 #endif
         if (!sOrigFree && freeSym) {
             sOrigFree = reinterpret_cast<void (*)(void *)>(freeSym);
         }
+        if (!sOrigSigaction && sigactionSym) {
+            sOrigSigaction = reinterpret_cast<int (*)(int, const struct sigaction *, struct sigaction *)>(sigactionSym);
+        }
 
-        // 3. Hook libutils.so RefBase::decStrong and RefBase::weakref_type::decWeak via A64HookFunction.
+        // 4. Hook libutils.so RefBase::decStrong and RefBase::weakref_type::decWeak via A64HookFunction.
         void *libutils = dlopen("libutils.so", RTLD_NOW | RTLD_NOLOAD);
         if (!libutils) {
             libutils = dlopen("libutils.so", RTLD_NOW);
@@ -604,145 +831,6 @@ static void installHeapAndRefBaseSafetyGuards() {
 #endif
 }
 
-static void recordNativeCrashOffsetLog(int sig, uintptr_t faultAddr, void *ucontext) {
-    uintptr_t pcAddr = 0;
-    uintptr_t lrAddr = 0;
-    uintptr_t x0Addr = 0;
-#if defined(__aarch64__)
-    if (ucontext != nullptr) {
-        ucontext_t *uc = reinterpret_cast<ucontext_t *>(ucontext);
-        pcAddr = static_cast<uintptr_t>(uc->uc_mcontext.pc);
-        lrAddr = static_cast<uintptr_t>(uc->uc_mcontext.regs[30]);
-        x0Addr = static_cast<uintptr_t>(uc->uc_mcontext.regs[0]);
-    }
-#elif defined(__arm__)
-    if (ucontext != nullptr) {
-        ucontext_t *uc = reinterpret_cast<ucontext_t *>(ucontext);
-        pcAddr = static_cast<uintptr_t>(uc->uc_mcontext.arm_pc);
-        lrAddr = static_cast<uintptr_t>(uc->uc_mcontext.arm_lr);
-        x0Addr = static_cast<uintptr_t>(uc->uc_mcontext.arm_r0);
-    }
-#endif
-    void *xdlCache = nullptr;
-    xdl_info_t pcInfo{}, lrInfo{};
-    xdl_addr(reinterpret_cast<void *>(pcAddr), &pcInfo, &xdlCache);
-    xdl_addr(reinterpret_cast<void *>(lrAddr), &lrInfo, &xdlCache);
-
-    uintptr_t pcOffset = (pcInfo.dli_fbase != nullptr && pcAddr >= reinterpret_cast<uintptr_t>(pcInfo.dli_fbase))
-            ? (pcAddr - reinterpret_cast<uintptr_t>(pcInfo.dli_fbase)) : pcAddr;
-    uintptr_t lrOffset = (lrInfo.dli_fbase != nullptr && lrAddr >= reinterpret_cast<uintptr_t>(lrInfo.dli_fbase))
-            ? (lrAddr - reinterpret_cast<uintptr_t>(lrInfo.dli_fbase)) : lrAddr;
-
-    char tname[32] = {0};
-    prctl(PR_GET_NAME, reinterpret_cast<unsigned long>(tname), 0, 0, 0);
-
-    ALOGE("FEATURESTIC CRASH CATCHER: Signal=%d, TID=%d (%s), Fault=0x%llX, X0=0x%llX | PC=%s+0x%llX | LR=%s+0x%llX",
-          sig,
-          static_cast<int>(gettid()),
-          tname[0] ? tname : "?",
-          static_cast<unsigned long long>(faultAddr),
-          static_cast<unsigned long long>(x0Addr),
-          pcInfo.dli_fname ? pcInfo.dli_fname : "unknown",
-          static_cast<unsigned long long>(pcOffset),
-          lrInfo.dli_fname ? lrInfo.dli_fname : "unknown",
-          static_cast<unsigned long long>(lrOffset));
-
-    if (xdlCache != nullptr) {
-        xdl_addr_clean(&xdlCache);
-    }
-    logCurrentThreadBacktrace();
-}
-
-static bool isCriticalGameOrMainThread() {
-    if (gettid() == getpid()) return true;
-    char tname[32] = {0};
-    if (prctl(PR_GET_NAME, reinterpret_cast<unsigned long>(tname), 0, 0, 0) == 0 && tname[0] != '\0') {
-        if (strstr(tname, "MainThread") != nullptr
-                || strstr(tname, "GameThread") != nullptr
-                || strstr(tname, "RenderThread") != nullptr
-                || strstr(tname, "RHIThread") != nullptr
-                || strstr(tname, "Binder:") != nullptr
-                || strstr(tname, "RenderEngine") != nullptr
-                || strstr(tname, "hwui") != nullptr) {
-            return true;
-        }
-    }
-    return false;
-}
-
-static void chainPreviousSignal(int sig, siginfo_t *info, void *ucontext) {
-    struct sigaction *prev = (sig == SIGSEGV) ? &sOldSigsegvAction
-            : ((sig == SIGBUS) ? &sOldSigbusAction : &sOldSigabrtAction);
-    if (prev->sa_flags & SA_SIGINFO) {
-        if (prev->sa_sigaction != nullptr
-                && reinterpret_cast<void *>(prev->sa_sigaction) != reinterpret_cast<void *>(&chainPreviousSignal)) {
-            prev->sa_sigaction(sig, info, ucontext);
-            return;
-        }
-    } else if (prev->sa_handler != SIG_DFL && prev->sa_handler != SIG_IGN && prev->sa_handler != nullptr) {
-        prev->sa_handler(sig);
-        return;
-    }
-    signal(sig, SIG_DFL);
-    raise(sig);
-}
-
-static void passiveNativeCrashDiagnosticsHandler(int sig, siginfo_t *info, void *ucontext) {
-    // 1. Always forward intentional SEGV_ACCERR probes immediately without logging spam
-    //    so libanogs.so's XOM / page-permission self-checks work transparently.
-    if (sig == SIGSEGV && info != nullptr && info->si_code == SEGV_ACCERR) {
-        chainPreviousSignal(sig, info, ucontext);
-        return;
-    }
-
-    uintptr_t fAddr = (info != nullptr) ? reinterpret_cast<uintptr_t>(info->si_addr) : 0;
-    recordNativeCrashOffsetLog(sig, fAddr, ucontext);
-
-    // 2. If a non-essential background worker thread (not main thread, not UE4/Render/Binder)
-    //    raises SIGABRT / SIGBUS / unmapped SIGSEGV after game libraries are loaded,
-    //    park that single faulting background thread instead of chaining to libanort.so's
-    //    SIGABRT->SIGSEGV/SIGBUS process killer.
-    if (sGameLibLoadedCount.load(std::memory_order_relaxed) > 0 && !isCriticalGameOrMainThread()) {
-        ALOGE("FEATURESTIC CRASH SHIELD: Isolating faulting background thread TID=%d on signal=%d",
-              static_cast<int>(gettid()), sig);
-        struct timespec ts{};
-        ts.tv_sec = 3600;
-        ts.tv_nsec = 0;
-        while (true) {
-            nanosleep(&ts, nullptr);
-        }
-    }
-
-    chainPreviousSignal(sig, info, ucontext);
-}
-
-static void installOrReassertPassiveNativeCrashDiagnostics() {
-    struct sigaction sa{};
-    sa.sa_sigaction = passiveNativeCrashDiagnosticsHandler;
-    sigemptyset(&sa.sa_mask);
-    sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
-
-    struct sigaction prevSegv{};
-    if (sigaction(SIGSEGV, &sa, &prevSegv) == 0) {
-        if (prevSegv.sa_sigaction != passiveNativeCrashDiagnosticsHandler) {
-            sOldSigsegvAction = prevSegv;
-        }
-    }
-    struct sigaction prevBus{};
-    if (sigaction(SIGBUS, &sa, &prevBus) == 0) {
-        if (prevBus.sa_sigaction != passiveNativeCrashDiagnosticsHandler) {
-            sOldSigbusAction = prevBus;
-        }
-    }
-    struct sigaction prevAbrt{};
-    if (sigaction(SIGABRT, &sa, &prevAbrt) == 0) {
-        if (prevAbrt.sa_sigaction != passiveNativeCrashDiagnosticsHandler) {
-            sOldSigabrtAction = prevAbrt;
-        }
-    }
-    sSignalGuardInstalled = true;
-}
-
 static int countMappedGameLibraries() {
     FILE *fp = fopen("/proc/self/maps", "r");
     if (!fp) return 0;
@@ -764,10 +852,8 @@ static int countMappedGameLibraries() {
 }
 
 static void *nativeGuardWatcherThreadMain(void * /*arg*/) {
-    prctl(PR_SET_NAME, reinterpret_cast<unsigned long>(" Binder:guard"), 0, 0, 0);
+    prctl(PR_SET_NAME, reinterpret_cast<unsigned long>("Binder:guard"), 0, 0, 0);
     int lastCount = 0;
-    // Monitor for the first 45 seconds (180 * 250ms) as game libraries in clns-10 load
-    // and register their signal handlers (libanort.so at t+0.6s, libCrashKit.so at t+6.5s).
     for (int i = 0; i < 180; ++i) {
         struct timespec ts{};
         ts.tv_sec = 0;
@@ -781,9 +867,7 @@ static void *nativeGuardWatcherThreadMain(void * /*arg*/) {
             sanitizeInheritedPtyFileDescriptors();
             installHeapAndRefBaseSafetyGuards();
             installOrReassertPassiveNativeCrashDiagnostics();
-        } else if (count > 0 && (i % 8 == 0)) {
-            // Every 2.0s after game libraries are mapped, re-assert our signal guard
-            // in case libanort.so / libCrashKit.so re-registered sigaction handlers.
+        } else if (count > 0 && (i % 4 == 0)) {
             installOrReassertPassiveNativeCrashDiagnostics();
         }
     }
