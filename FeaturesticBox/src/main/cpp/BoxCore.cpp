@@ -690,15 +690,6 @@ static void passiveNativeCrashDiagnosticsHandler(int sig, siginfo_t *info, void 
         parkFaultingBackgroundThreadForever("signal_shield", sig, reinterpret_cast<const void *>(fAddr), static_cast<size_t>(siCode));
     }
 
-    // If SIGABRT (e.g. -fstack-protector stack corruption in libanogs.so
-    // anti-cheat) and we have an active recovery point, try siglongjmp back
-    // to a safe Java/native boundary instead of crashing the whole process.
-    if (sig == SIGABRT && gNativeRecoveryActive.load(std::memory_order_relaxed)) {
-        ALOGW("FEATURESTIC: Caught SIGABRT (stack corruption detected), attempting native crash recovery via siglongjmp");
-        siglongjmp(gNativeRecoveryJumpBuf, 1);
-        ALOGE("FEATURESTIC: siglongjmp did not return, falling through to chainPreviousSignal");
-    }
-
     chainPreviousSignal(sig, info, ucontext);
 }
 
@@ -721,12 +712,9 @@ static void installOrReassertPassiveNativeCrashDiagnostics() {
             sOldSigbusAction = prevBus;
         }
     }
-    struct sigaction prevAbrt{};
-    if (origSa(SIGABRT, &sa, &prevAbrt) == 0) {
-        if (prevAbrt.sa_sigaction != passiveNativeCrashDiagnosticsHandler && prevAbrt.sa_handler != SIG_DFL && prevAbrt.sa_handler != SIG_IGN) {
-            sOldSigabrtAction = prevAbrt;
-        }
-    }
+    // NOTE: Intentionally NOT installing SIGABRT handler — siglongjmp from
+    // signal handlers is unreliable and doesn't work with stack corruption.
+    // Let Android handle SIGABRT naturally for native crashes in game libraries.
     sSignalGuardInstalled = true;
 }
 
