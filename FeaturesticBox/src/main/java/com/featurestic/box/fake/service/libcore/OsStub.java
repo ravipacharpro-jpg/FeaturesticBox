@@ -61,7 +61,17 @@ public class OsStub extends ClassInvocationStub {
                 && args[0] instanceof java.io.FileDescriptor) {
             NetworkLowLatencyOptimizer.optimizeSocketOnConnect((java.io.FileDescriptor) args[0]);
         }
-        Object result = super.invoke(proxy, method, args);
+        Object result;
+        try {
+            result = super.invoke(proxy, method, args);
+        } catch (android.system.ErrnoException e) {
+            throw e;
+        } catch (Throwable e) {
+            // Prevent exceptions from Os methods (e.g. ErrnoException when a
+            // native library file is not found) from becoming pending JNI
+            // exceptions that cause SIGABRT in cloned games.
+            return null;
+        }
         if ("socket".equals(mName) && result instanceof java.io.FileDescriptor) {
             NetworkLowLatencyOptimizer.optimizeSocketOnCreation((java.io.FileDescriptor) result, args);
         }
