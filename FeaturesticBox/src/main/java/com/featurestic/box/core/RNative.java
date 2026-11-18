@@ -52,17 +52,47 @@ public class RNative {
         }
     }
 
+    private static boolean isLibraryMappedInProcMaps(String... substrings) {
+        try (java.io.BufferedReader br = new java.io.BufferedReader(new java.io.FileReader("/proc/self/maps"))) {
+            boolean[] found = new boolean[substrings.length];
+            int remaining = substrings.length;
+            String line;
+            while ((line = br.readLine()) != null) {
+                for (int i = 0; i < substrings.length; i++) {
+                    if (!found[i] && line.contains(substrings[i])) {
+                        found[i] = true;
+                        remaining--;
+                        if (remaining == 0) return true;
+                    }
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        return false;
+    }
+
     private static synchronized void scheduleExternalPluginLoad(final long delayMs) {
         if (isInjected || sScheduledLoad) return;
         sScheduledLoad = true;
         new Thread(() -> {
             try {
-                Thread.sleep(delayMs);
-            } catch (InterruptedException ignored) {
-            }
-            if (!isInjected) {
-                android.util.Log.i(TAG, "Loading external plugin .so after GameActivity resume (libLoaded=" + sGameLibLoaded + ")");
-                loadExternalPlugin();
+                // Wait up to 30s until both libUE4.so and libanogs.so (or Unity libs) are actually mapped
+                boolean ready = false;
+                for (int i = 0; i < 100; i++) {
+                    if (isLibraryMappedInProcMaps("libUE4.so", "libanogs.so")
+                            || isLibraryMappedInProcMaps("libil2cpp.so")
+                            || isLibraryMappedInProcMaps("libunity.so")) {
+                        ready = true;
+                        break;
+                    }
+                    Thread.sleep(300L);
+                }
+                Thread.sleep(Math.max(1000L, delayMs));
+                if (!isInjected) {
+                    android.util.Log.i(TAG, "Loading external plugin .so after GameActivity + maps ready (ready=" + ready + ", libLoaded=" + sGameLibLoaded + ")");
+                    loadExternalPlugin();
+                }
+            } catch (Throwable ignored) {
             }
         }, "Featurestic-PluginInit").start();
     }
