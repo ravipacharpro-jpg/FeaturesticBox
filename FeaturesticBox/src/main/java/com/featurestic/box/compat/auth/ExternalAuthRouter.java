@@ -61,6 +61,8 @@ public final class ExternalAuthRouter {
             "com.featurestic.box.auth.GOOGLE_WEB_AUTH";
     public static final String EXTRA_GOOGLE_SERVER_CLIENT_ID =
             "com.featurestic.box.auth.GOOGLE_SERVER_CLIENT_ID";
+    public static final String EXTRA_GOOGLE_SCOPES =
+            "com.featurestic.box.auth.GOOGLE_SCOPES";
     public static final String EXTRA_BROWSER_AUTH =
             "com.featurestic.box.auth.BROWSER_AUTH";
     public static final String EXTRA_PROVIDER_INTENT =
@@ -399,34 +401,25 @@ public final class ExternalAuthRouter {
         }
 
         // Route Google Sign-In (GOOGLE_SIGN_IN / CHOOSE_ACCOUNT / Games Sign-In)
-        // Route through VirtualOAuthBridgeActivity as an external auth provider so the calling
-        // activity identity matches the host loader process (com.featurestic.loader, UID 10560).
-        // This eliminates the GMS masquerade check failure while opening the official Google
-        // Account Picker bottom sheet.
+        // directly to our MicroG-compatible Google Auth Engine inside VirtualOAuthBridgeActivity.
+        // Calling system GMS from the host loader fails SHA-1 verification against Krafton's OAuth
+        // client ID, whereas MicroG's direct `android.googleapis.com/auth` protocol uses the real
+        // target package + real SHA-1 digest to obtain genuine Google RSA-signed ID tokens.
         if (isGoogleInteractiveSignInIntent(source)) {
             normalizeGoogleAuthIntentInGuest(source);
             int bpid = BActivityThread.getAppPid();
             if (bpid >= 0 && bpid <= 24) {
-                if (isGooglePlayServicesAvailable()) {
-                    Intent providerIntent = new Intent(source);
-                    providerIntent.putExtra(EXTRA_DIRECT_PROVIDER_DISPATCH, true);
-                    Intent bridge = createBaseBridge(
-                            resultTo, resultWho, requestCode, virtualPackage, bpid);
-                    bridge.putExtra(EXTRA_EXTERNAL_AUTH, true);
-                    bridge.putExtra(EXTRA_PROVIDER_INTENT, providerIntent);
-                    bridge.addFlags(source.getFlags() & (
-                            Intent.FLAG_ACTIVITY_NO_ANIMATION
-                                    | Intent.FLAG_ACTIVITY_CLEAR_TOP
-                                    | Intent.FLAG_ACTIVITY_SINGLE_TOP));
-                    return prepareBridgeForLaunch(bridge);
-                }
                 Intent googleWebBridge = createBaseBridge(
                         resultTo, resultWho, requestCode, virtualPackage, bpid);
                 googleWebBridge.putExtra(EXTRA_EXTERNAL_AUTH, false);
                 googleWebBridge.putExtra(EXTRA_GOOGLE_WEB_AUTH, true);
                 String serverClientId = GoogleSignInTokenHelper.getLastServerClientId();
-                if (serverClientId != null) {
+                if (serverClientId != null && !serverClientId.isEmpty()) {
                     googleWebBridge.putExtra(EXTRA_GOOGLE_SERVER_CLIENT_ID, serverClientId);
+                }
+                String scopesStr = GoogleSignInTokenHelper.getLastRequestedScopesString();
+                if (scopesStr != null && !scopesStr.isEmpty()) {
+                    googleWebBridge.putExtra(EXTRA_GOOGLE_SCOPES, scopesStr);
                 }
                 return prepareBridgeForLaunch(googleWebBridge);
             }

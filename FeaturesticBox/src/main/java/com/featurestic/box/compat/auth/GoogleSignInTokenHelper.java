@@ -57,17 +57,43 @@ public final class GoogleSignInTokenHelper {
     public static final String EXTRA_WEB_NAME = "com.featurestic.box.google_web_name";
     public static final String EXTRA_WEB_SUB = "com.featurestic.box.google_web_sub";
     public static final String EXTRA_WEB_ID_TOKEN = "com.featurestic.box.google_web_id_token";
+    public static final String EXTRA_WEB_AUTH_CODE = "com.featurestic.box.google_web_auth_code";
+    public static final String EXTRA_WEB_GIVEN_NAME = "com.featurestic.box.google_web_given_name";
+    public static final String EXTRA_WEB_FAMILY_NAME = "com.featurestic.box.google_web_family_name";
+    public static final String EXTRA_WEB_PHOTO_URL = "com.featurestic.box.google_web_photo_url";
 
     private static volatile String sLastWebEmail;
     private static volatile String sLastWebName;
     private static volatile String sLastWebSub;
     private static volatile String sLastWebIdToken;
+    private static volatile String sLastWebAuthCode;
+    private static volatile String sLastWebGivenName;
+    private static volatile String sLastWebFamilyName;
+    private static volatile String sLastWebPhotoUrl;
 
     private GoogleSignInTokenHelper() {
     }
 
     public static String getLastServerClientId() {
         return sLastServerClientId;
+    }
+
+    public static String getLastRequestedScopesString() {
+        StringBuilder sb = new StringBuilder();
+        synchronized (sLastRequestedScopes) {
+            for (Object scopeObj : sLastRequestedScopes) {
+                if (scopeObj == null) continue;
+                String uri = invokeStringGetter(scopeObj, "getScopeUri");
+                if (uri == null || uri.trim().isEmpty()) {
+                    uri = scopeObj.toString();
+                }
+                if (uri != null && !uri.trim().isEmpty()) {
+                    if (sb.length() > 0) sb.append(' ');
+                    sb.append(uri.trim());
+                }
+            }
+        }
+        return sb.toString();
     }
 
     public static void prepareOutboundSignInIntent(Intent intent, String virtualPkg, String hostPkg) {
@@ -423,6 +449,10 @@ public final class GoogleSignInTokenHelper {
                 sLastWebName = data.getStringExtra(EXTRA_WEB_NAME);
                 sLastWebSub = data.getStringExtra(EXTRA_WEB_SUB);
                 sLastWebIdToken = data.getStringExtra(EXTRA_WEB_ID_TOKEN);
+                sLastWebAuthCode = data.getStringExtra(EXTRA_WEB_AUTH_CODE);
+                sLastWebGivenName = data.getStringExtra(EXTRA_WEB_GIVEN_NAME);
+                sLastWebFamilyName = data.getStringExtra(EXTRA_WEB_FAMILY_NAME);
+                sLastWebPhotoUrl = data.getStringExtra(EXTRA_WEB_PHOTO_URL);
             }
             if (data.hasExtra("authAccount")) {
                 String em = data.getStringExtra("authAccount");
@@ -516,9 +546,21 @@ public final class GoogleSignInTokenHelper {
                     ? sLastWebEmail.trim() : resolveDeviceGoogleEmail();
             String displayName = (sLastWebName != null && !sLastWebName.trim().isEmpty())
                     ? sLastWebName.trim() : (email.contains("@") ? email.split("@")[0] : "Player");
+            String givenName = (sLastWebGivenName != null && !sLastWebGivenName.trim().isEmpty())
+                    ? sLastWebGivenName.trim() : displayName;
+            String familyName = (sLastWebFamilyName != null && !sLastWebFamilyName.trim().isEmpty())
+                    ? sLastWebFamilyName.trim() : "";
+            Uri photoUri = null;
+            if (sLastWebPhotoUrl != null && !sLastWebPhotoUrl.trim().isEmpty()) {
+                try {
+                    photoUri = Uri.parse(sLastWebPhotoUrl.trim());
+                } catch (Throwable ignored) {
+                }
+            }
             String subId = (sLastWebSub != null && !sLastWebSub.trim().isEmpty())
                     ? sLastWebSub.trim()
                     : String.valueOf(Math.abs((long) email.hashCode()) + 100000000000000000L);
+            String obfId = computeObfuscatedId(subId, sLastVirtualPackage);
 
             Class<?> acctClass = Class.forName(
                     "com.google.android.gms.auth.api.signin.GoogleSignInAccount", false, cl);
@@ -532,6 +574,7 @@ public final class GoogleSignInTokenHelper {
                     Constructor<?> sc = scopeClass.getConstructor(String.class);
                     scopes.add(sc.newInstance("email"));
                     scopes.add(sc.newInstance("profile"));
+                    scopes.add(sc.newInstance("openid"));
                 } catch (Throwable ignored) {
                 }
             }
@@ -539,10 +582,11 @@ public final class GoogleSignInTokenHelper {
             String token = (sLastWebIdToken != null && sLastWebIdToken.contains("."))
                     ? sLastWebIdToken : tryFetchRealGoogleToken(email);
             if (token == null || !token.contains(".")) {
-                token = buildCompatibleIdToken(subId, email, displayName, displayName, "", null, sLastServerClientId);
+                token = buildCompatibleIdToken(subId, email, displayName, givenName, familyName,
+                        photoUri != null ? photoUri.toString() : null, sLastServerClientId);
             }
 
-            // Look for static factory method zaa(String id, String idToken, String email, String displayName, Uri photo, Long exp, String obf, Set<Scope> scopes)
+            // Look for static factory method zaa(id, idToken, email, displayName, givenName, familyName, photoUri, exp, obfId, scopes)
             for (Method m : acctClass.getDeclaredMethods()) {
                 if (!Modifier.isStatic(m.getModifiers()) || m.getReturnType() != acctClass) {
                     continue;
@@ -555,11 +599,27 @@ public final class GoogleSignInTokenHelper {
                     args[1] = token;
                     args[2] = email;
                     if (pt.length > 3 && pt[3] == String.class) args[3] = displayName;
+                    int extraStrIdx = 0;
                     for (int i = 4; i < pt.length; i++) {
                         if (pt[i] == Long.class || pt[i] == long.class) {
                             args[i] = Long.valueOf(System.currentTimeMillis() / 1000L + 3600L);
+                        } else if (pt[i] == Uri.class) {
+                            args[i] = photoUri;
                         } else if (pt[i] == String.class) {
-                            args[i] = email;
+                            // If this String comes after Long (exp), it's obfuscatedIdentifier!
+                            boolean afterLong = false;
+                            for (int j = 4; j < i; j++) {
+                                if (pt[j] == Long.class || pt[j] == long.class) {
+                                    afterLong = true;
+                                    break;
+                                }
+                            }
+                            if (afterLong) {
+                                args[i] = obfId;
+                            } else {
+                                args[i] = (extraStrIdx == 0) ? givenName : familyName;
+                                extraStrIdx++;
+                            }
                         } else if (Set.class.isAssignableFrom(pt[i])) {
                             args[i] = scopes;
                         } else {
@@ -579,6 +639,7 @@ public final class GoogleSignInTokenHelper {
                     for (int i = 0; i < pt.length; i++) {
                         if (pt[i] == int.class || pt[i] == Integer.class) args[i] = Integer.valueOf(3);
                         else if (pt[i] == long.class || pt[i] == Long.class) args[i] = Long.valueOf(System.currentTimeMillis() / 1000L + 3600L);
+                        else if (pt[i] == Uri.class) args[i] = photoUri;
                         else if (List.class.isAssignableFrom(pt[i])) args[i] = new ArrayList<>(scopes);
                         else if (Set.class.isAssignableFrom(pt[i])) args[i] = scopes;
                         else if (pt[i] == String.class) {
@@ -586,6 +647,10 @@ public final class GoogleSignInTokenHelper {
                             else if (i == 2) args[i] = token;
                             else if (i == 3) args[i] = email;
                             else if (i == 4) args[i] = displayName;
+                            else if (i == 6) args[i] = sLastWebAuthCode;
+                            else if (i == 8) args[i] = obfId;
+                            else if (i == 10) args[i] = givenName;
+                            else if (i == 11) args[i] = familyName;
                             else args[i] = email;
                         } else {
                             args[i] = null;
@@ -597,6 +662,21 @@ public final class GoogleSignInTokenHelper {
         } catch (Throwable ignored) {
         }
         return null;
+    }
+
+    private static String computeObfuscatedId(String subId, String pkg) {
+        try {
+            String input = (subId != null ? subId : "0") + ":" + (pkg != null ? pkg : "com.pubg.imobile");
+            java.security.MessageDigest md = java.security.MessageDigest.getInstance("MD5");
+            byte[] d = md.digest(input.getBytes(StandardCharsets.UTF_8));
+            StringBuilder sb = new StringBuilder(d.length * 2);
+            for (byte b : d) {
+                sb.append(String.format(java.util.Locale.US, "%02X", b));
+            }
+            return sb.toString();
+        } catch (Throwable ignored) {
+            return subId != null ? subId : "100000000000000000";
+        }
     }
 
     private static Object wrapInSignInAccount(ClassLoader cl, Object googleSignInAccount) {
@@ -714,10 +794,15 @@ public final class GoogleSignInTokenHelper {
             String curIdToken = invokeStringGetter(account, "getIdToken");
             String curAuthCode = invokeStringGetter(account, "getServerAuthCode");
             boolean isFakeIdToken = curIdToken != null && (curIdToken.contains("fbox1") || !curIdToken.contains("."));
-            Log.d(TAG, "Account tokens: idToken=" + (curIdToken != null ? (isFakeIdToken ? "FAKE(fbox1)" : "YES") : "null")
+            Log.d(TAG, "Account tokens: idToken=" + (curIdToken != null ? (isFakeIdToken ? "FAKE(fbox1)" : "YES(len=" + curIdToken.length() + ")") : "null")
                     + ", serverAuthCode=" + (curAuthCode != null ? ("YES(len=" + curAuthCode.length() + ")") : "null"));
             if (curIdToken != null && !curIdToken.isEmpty() && !isFakeIdToken) {
-                Log.d(TAG, "Authentic Google ID token already present from Google Play Services, preserving directly!");
+                if ((curAuthCode == null || curAuthCode.isEmpty()) && sLastWebAuthCode != null && !sLastWebAuthCode.isEmpty()) {
+                    injectStringFieldByGetter(account, "getServerAuthCode", sLastWebAuthCode);
+                    Log.d(TAG, "Injected real MicroG serverAuthCode (len=" + sLastWebAuthCode.length() + ") alongside authentic ID token!");
+                } else {
+                    Log.d(TAG, "Authentic Google ID token already present, preserving directly!");
+                }
                 return;
             }
 
@@ -777,6 +862,29 @@ public final class GoogleSignInTokenHelper {
                 cls = cls.getSuperclass();
             }
         } catch (Throwable ignored) {
+        }
+    }
+
+    private static void injectStringFieldByGetter(Object target, String getterName, String value) {
+        if (target == null || getterName == null || value == null) return;
+        Class<?> cls = target.getClass();
+        while (cls != null && cls != Object.class) {
+            for (Field f : cls.getDeclaredFields()) {
+                if (Modifier.isStatic(f.getModifiers()) || f.getType() != String.class) continue;
+                try {
+                    f.setAccessible(true);
+                    Object original = f.get(target);
+                    String probe = "__fbox_probe__";
+                    f.set(target, probe);
+                    if (probe.equals(invokeStringGetter(target, getterName))) {
+                        f.set(target, value);
+                        return;
+                    }
+                    f.set(target, original);
+                } catch (Throwable ignored) {
+                }
+            }
+            cls = cls.getSuperclass();
         }
     }
 

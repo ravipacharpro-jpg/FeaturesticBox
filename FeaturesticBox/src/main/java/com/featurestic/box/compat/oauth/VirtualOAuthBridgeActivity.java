@@ -86,6 +86,7 @@ public final class VirtualOAuthBridgeActivity extends Activity {
     private boolean callbackDispatched;
     private WebView embeddedWebView;
     private String serverClientId;
+    private String googleScopes;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -116,7 +117,13 @@ public final class VirtualOAuthBridgeActivity extends Activity {
             }
             serverClientId = launchIntent.getStringExtra(
                     ExternalAuthRouter.EXTRA_GOOGLE_SERVER_CLIENT_ID);
-            launchGoogleNativeAccountPickerOrWebView(serverClientId);
+            googleScopes = launchIntent.getStringExtra(
+                    ExternalAuthRouter.EXTRA_GOOGLE_SCOPES);
+            if (getWindow() != null) {
+                getWindow().setSoftInputMode(
+                        android.view.WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);
+            }
+            launchMicroGGoogleSignInFlow();
             return;
         }
 
@@ -206,242 +213,373 @@ public final class VirtualOAuthBridgeActivity extends Activity {
         }
     }
 
-    private void launchGoogleNativeAccountPickerOrWebView(final String serverClientId) {
+    private void launchMicroGGoogleSignInFlow() {
         try {
-            AccountManager am = AccountManager.get(this);
-            Account[] accounts = null;
-            try {
-                accounts = am.getAccountsByType("com.google");
-            } catch (Throwable ignored) {
+            java.util.List<com.featurestic.box.compat.auth.MicroGGoogleAuthEngine.AccountRecord> saved =
+                    com.featurestic.box.compat.auth.MicroGGoogleAuthEngine.getSavedAccounts(this);
+            if (saved != null && !saved.isEmpty()) {
+                showMicroGAccountPicker(saved);
+            } else {
+                launchMicroGEmbeddedSetupWebView(null);
             }
-
-            if (accounts != null && accounts.length > 0) {
-                showPremiumGoogleAccountPicker(accounts, serverClientId);
-                return;
-            }
-
-            try {
-                Intent chooseIntent = null;
-                for (java.lang.reflect.Method m : AccountManager.class.getMethods()) {
-                    if ("newChooseAccountIntent".equals(m.getName())) {
-                        Class<?>[] pTypes = m.getParameterTypes();
-                        if (pTypes.length == 7) {
-                            chooseIntent = (Intent) m.invoke(null, null, null, new String[]{"com.google"}, null, null, null, null);
-                            break;
-                        } else if (pTypes.length == 8) {
-                            chooseIntent = (Intent) m.invoke(null, null, null, new String[]{"com.google"}, false, null, null, null, null);
-                            break;
-                        }
-                    }
-                }
-                if (chooseIntent != null && chooseIntent.resolveActivity(getPackageManager()) != null) {
-                    startActivityForResult(chooseIntent, REQUEST_CHOOSE_GOOGLE_ACCOUNT);
-                    return;
-                }
-            } catch (Throwable ignored) {
-            }
-
-            launchGoogleWebLoginView(serverClientId);
         } catch (Throwable t) {
-            launchGoogleWebLoginView(serverClientId);
+            launchMicroGEmbeddedSetupWebView(null);
         }
     }
 
-    private void showPremiumGoogleAccountPicker(final Account[] accounts, final String serverClientId) {
+    private void configureGooglePopupWindow(boolean tallForWebView) {
         try {
+            if (getWindow() == null) return;
+            android.util.DisplayMetrics dm = getResources().getDisplayMetrics();
+            int targetW = tallForWebView
+                    ? Math.min(dp(440), (int) (dm.widthPixels * 0.92f))
+                    : Math.min(dp(380), (int) (dm.widthPixels * 0.90f));
+            int targetH = tallForWebView
+                    ? (int) (dm.heightPixels * 0.94f)
+                    : Math.min(dp(420), (int) (dm.heightPixels * 0.88f));
+            getWindow().setLayout(targetW, targetH);
+            getWindow().setGravity(Gravity.CENTER);
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private void showMicroGAccountPicker(
+            final java.util.List<com.featurestic.box.compat.auth.MicroGGoogleAuthEngine.AccountRecord> accounts) {
+        try {
+            configureGooglePopupWindow(false);
+
             LinearLayout root = new LinearLayout(this);
             root.setOrientation(LinearLayout.VERTICAL);
             root.setGravity(Gravity.CENTER_HORIZONTAL);
-            root.setPadding(dp(16), dp(18), dp(16), dp(18));
+            root.setPadding(dp(18), dp(18), dp(18), dp(16));
 
             android.graphics.drawable.GradientDrawable cardBg = new android.graphics.drawable.GradientDrawable();
-            cardBg.setColor(Color.parseColor("#150F24"));
-            cardBg.setCornerRadius(dp(24));
-            cardBg.setStroke(dp(2), Color.parseColor("#4A2E70"));
+            cardBg.setColor(Color.parseColor("#181A20"));
+            cardBg.setCornerRadius(dp(22));
+            cardBg.setStroke(dp(1), Color.parseColor("#2E3240"));
             root.setBackground(cardBg);
 
             LinearLayout header = new LinearLayout(this);
-            header.setOrientation(LinearLayout.VERTICAL);
-            header.setGravity(Gravity.CENTER_HORIZONTAL);
-            header.setPadding(0, dp(4), 0, dp(14));
-
-            TextView logoView = new TextView(this);
-            logoView.setText("G");
-            logoView.setTextSize(22f);
-            logoView.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
-            logoView.setGravity(Gravity.CENTER);
-            logoView.setTextColor(Color.WHITE);
-            android.graphics.drawable.GradientDrawable logoBg = new android.graphics.drawable.GradientDrawable();
-            logoBg.setShape(android.graphics.drawable.GradientDrawable.OVAL);
-            logoBg.setColors(new int[]{Color.parseColor("#A855F7"), Color.parseColor("#EC4899")});
-            logoView.setBackground(logoBg);
-            int logoSize = dp(44);
-            header.addView(logoView, new LinearLayout.LayoutParams(logoSize, logoSize));
-
-            TextView titleView = new TextView(this);
-            titleView.setText("Choose Google Account");
-            titleView.setTextColor(Color.parseColor("#F8F5FF"));
-            titleView.setTextSize(16.5f);
-            titleView.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
-            titleView.setPadding(0, dp(10), 0, dp(2));
-            header.addView(titleView);
-
-            TextView subtitleView = new TextView(this);
-            subtitleView.setText("1-Tap to continue to game");
-            subtitleView.setTextColor(Color.parseColor("#A99BBE"));
-            subtitleView.setTextSize(12.5f);
-            header.addView(subtitleView);
-
-            root.addView(header, new LinearLayout.LayoutParams(
+            header.setOrientation(LinearLayout.HORIZONTAL);
+            header.setGravity(Gravity.CENTER_VERTICAL);
+            header.setLayoutParams(new LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
-            android.view.View divider = new android.view.View(this);
-            divider.setBackgroundColor(Color.parseColor("#281C3D"));
-            root.addView(divider, new LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, dp(1)));
+            TextView gBadge = new TextView(this);
+            gBadge.setText("G");
+            gBadge.setTextColor(Color.WHITE);
+            gBadge.setTextSize(17f);
+            gBadge.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
+            gBadge.setGravity(Gravity.CENTER);
+            android.graphics.drawable.GradientDrawable gCircle = new android.graphics.drawable.GradientDrawable();
+            gCircle.setShape(android.graphics.drawable.GradientDrawable.OVAL);
+            gCircle.setColor(Color.parseColor("#4285F4"));
+            gBadge.setBackground(gCircle);
+            header.addView(gBadge, new LinearLayout.LayoutParams(dp(34), dp(34)));
+
+            LinearLayout titleCol = new LinearLayout(this);
+            titleCol.setOrientation(LinearLayout.VERTICAL);
+            LinearLayout.LayoutParams tcLp = new LinearLayout.LayoutParams(
+                    0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+            tcLp.setMargins(dp(12), 0, dp(8), 0);
+
+            TextView titleTv = new TextView(this);
+            titleTv.setText("Choose an account");
+            titleTv.setTextColor(Color.WHITE);
+            titleTv.setTextSize(15.5f);
+            titleTv.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
+            titleCol.addView(titleTv);
+
+            TextView subTv = new TextView(this);
+            subTv.setText("to continue to Battlegrounds Mobile India");
+            subTv.setTextColor(Color.parseColor("#9AA0A6"));
+            subTv.setTextSize(12f);
+            titleCol.addView(subTv);
+            header.addView(titleCol, tcLp);
+
+            TextView closeBtn = new TextView(this);
+            closeBtn.setText("✕");
+            closeBtn.setTextColor(Color.parseColor("#9AA0A6"));
+            closeBtn.setTextSize(17f);
+            closeBtn.setPadding(dp(8), dp(4), dp(4), dp(4));
+            closeBtn.setOnClickListener(v -> cancelEmbeddedWebView());
+            header.addView(closeBtn);
+            root.addView(header);
+
+            View div = new View(this);
+            div.setBackgroundColor(Color.parseColor("#2A2E3A"));
+            LinearLayout.LayoutParams divLp = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, dp(1));
+            divLp.setMargins(0, dp(12), 0, dp(10));
+            root.addView(div, divLp);
 
             android.widget.ScrollView scrollView = new android.widget.ScrollView(this);
-            LinearLayout listContainer = new LinearLayout(this);
-            listContainer.setOrientation(LinearLayout.VERTICAL);
-            listContainer.setPadding(0, dp(8), 0, dp(8));
+            scrollView.setLayoutParams(new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
+            LinearLayout listLayout = new LinearLayout(this);
+            listLayout.setOrientation(LinearLayout.VERTICAL);
 
-            int[][] avatarGradients = new int[][]{
-                {Color.parseColor("#A855F7"), Color.parseColor("#7C3AED")},
-                {Color.parseColor("#EC4899"), Color.parseColor("#BE185D")},
-                {Color.parseColor("#3B82F6"), Color.parseColor("#1D4ED8")},
-                {Color.parseColor("#10B981"), Color.parseColor("#047857")},
-                {Color.parseColor("#F59E0B"), Color.parseColor("#B45309")}
+            int[] avatarColors = new int[]{
+                    Color.parseColor("#4285F4"),
+                    Color.parseColor("#EA4335"),
+                    Color.parseColor("#34A853"),
+                    Color.parseColor("#FBBC05")
             };
 
-            for (int i = 0; i < accounts.length; i++) {
-                final Account account = accounts[i];
-                final String email = account.name;
-                String initial = (email != null && !email.isEmpty())
-                        ? email.substring(0, 1).toUpperCase(Locale.US) : "G";
-                final String userName = (email != null && email.contains("@"))
-                        ? email.split("@")[0] : "Google User";
+            for (int i = 0; i < accounts.size(); i++) {
+                final com.featurestic.box.compat.auth.MicroGGoogleAuthEngine.AccountRecord acc = accounts.get(i);
+                LinearLayout row = new LinearLayout(this);
+                row.setOrientation(LinearLayout.HORIZONTAL);
+                row.setGravity(Gravity.CENTER_VERTICAL);
+                row.setPadding(dp(12), dp(10), dp(10), dp(10));
 
-                LinearLayout itemRow = new LinearLayout(this);
-                itemRow.setOrientation(LinearLayout.HORIZONTAL);
-                itemRow.setGravity(Gravity.CENTER_VERTICAL);
-                itemRow.setPadding(dp(12), dp(10), dp(12), dp(10));
-                itemRow.setClickable(true);
-                itemRow.setFocusable(true);
-
-                android.graphics.drawable.GradientDrawable itemBg = new android.graphics.drawable.GradientDrawable();
-                itemBg.setColor(Color.parseColor("#1E1730"));
-                itemBg.setCornerRadius(dp(14));
-                itemBg.setStroke(dp(1), Color.parseColor("#382352"));
-                itemRow.setBackground(itemBg);
+                android.graphics.drawable.GradientDrawable rowBg = new android.graphics.drawable.GradientDrawable();
+                rowBg.setColor(Color.parseColor("#232732"));
+                rowBg.setCornerRadius(dp(14));
+                rowBg.setStroke(dp(1), Color.parseColor("#323747"));
+                row.setBackground(rowBg);
 
                 TextView avatar = new TextView(this);
+                String initial = (acc.displayName != null && !acc.displayName.isEmpty())
+                        ? acc.displayName.substring(0, 1).toUpperCase(Locale.US)
+                        : acc.email.substring(0, 1).toUpperCase(Locale.US);
                 avatar.setText(initial);
-                avatar.setTextSize(16f);
                 avatar.setTextColor(Color.WHITE);
+                avatar.setTextSize(15f);
                 avatar.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
                 avatar.setGravity(Gravity.CENTER);
                 android.graphics.drawable.GradientDrawable avBg = new android.graphics.drawable.GradientDrawable();
                 avBg.setShape(android.graphics.drawable.GradientDrawable.OVAL);
-                int[] grad = avatarGradients[i % avatarGradients.length];
-                avBg.setColors(grad);
+                avBg.setColor(avatarColors[i % avatarColors.length]);
                 avatar.setBackground(avBg);
-                int avSize = dp(38);
-                itemRow.addView(avatar, new LinearLayout.LayoutParams(avSize, avSize));
+                row.addView(avatar, new LinearLayout.LayoutParams(dp(38), dp(38)));
 
-                LinearLayout textCol = new LinearLayout(this);
-                textCol.setOrientation(LinearLayout.VERTICAL);
-                textCol.setPadding(dp(12), 0, 0, 0);
+                LinearLayout infoCol = new LinearLayout(this);
+                infoCol.setOrientation(LinearLayout.VERTICAL);
+                LinearLayout.LayoutParams icLp = new LinearLayout.LayoutParams(
+                        0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+                icLp.setMargins(dp(12), 0, dp(8), 0);
 
                 TextView nameTv = new TextView(this);
-                nameTv.setText(userName);
+                nameTv.setText(acc.displayName != null && !acc.displayName.isEmpty()
+                        ? acc.displayName : acc.email.split("@")[0]);
+                nameTv.setTextColor(Color.WHITE);
                 nameTv.setTextSize(14f);
-                nameTv.setTextColor(Color.parseColor("#F8F5FF"));
                 nameTv.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
-                textCol.addView(nameTv);
+                nameTv.setSingleLine(true);
+                infoCol.addView(nameTv);
 
                 TextView emailTv = new TextView(this);
-                emailTv.setText(email);
+                emailTv.setText(acc.email);
+                emailTv.setTextColor(Color.parseColor("#9AA0A6"));
                 emailTv.setTextSize(12f);
-                emailTv.setTextColor(Color.parseColor("#A99BBE"));
-                textCol.addView(emailTv);
+                emailTv.setSingleLine(true);
+                infoCol.addView(emailTv);
+                row.addView(infoCol, icLp);
 
-                LinearLayout.LayoutParams textLp = new LinearLayout.LayoutParams(
-                        0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
-                itemRow.addView(textCol, textLp);
-
-                TextView arrow = new TextView(this);
-                arrow.setText("➔");
-                arrow.setTextColor(Color.parseColor("#A855F7"));
-                arrow.setTextSize(14f);
-                itemRow.addView(arrow);
-
-                itemRow.setOnClickListener(v -> {
-                    callbackDispatched = true;
-                    android.widget.Toast.makeText(this, "Signing in with " + email + "...", android.widget.Toast.LENGTH_SHORT).show();
-                    finishGoogleWebSignInWithProfile(email, userName);
+                TextView removeBtn = new TextView(this);
+                removeBtn.setText("Remove");
+                removeBtn.setTextColor(Color.parseColor("#F28B82"));
+                removeBtn.setTextSize(11f);
+                removeBtn.setPadding(dp(8), dp(6), dp(6), dp(6));
+                removeBtn.setOnClickListener(v -> {
+                    com.featurestic.box.compat.auth.MicroGGoogleAuthEngine.removeAccount(this, acc.email);
+                    launchMicroGGoogleSignInFlow();
                 });
+                row.addView(removeBtn);
 
-                LinearLayout.LayoutParams itemLp = new LinearLayout.LayoutParams(
+                row.setOnClickListener(v -> performMicroGTokenExchangeAndFinish(acc));
+
+                LinearLayout.LayoutParams rowLp = new LinearLayout.LayoutParams(
                         ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-                itemLp.setMargins(0, dp(4), 0, dp(4));
-                listContainer.addView(itemRow, itemLp);
+                rowLp.setMargins(0, 0, 0, dp(8));
+                listLayout.addView(row, rowLp);
             }
 
-            scrollView.addView(listContainer, new ViewGroup.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-            LinearLayout.LayoutParams scrollLp = new LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f);
-            root.addView(scrollView, scrollLp);
+            scrollView.addView(listLayout);
+            root.addView(scrollView);
 
-            LinearLayout footer = new LinearLayout(this);
-            footer.setOrientation(LinearLayout.HORIZONTAL);
-            footer.setGravity(Gravity.CENTER_VERTICAL);
-            footer.setPadding(0, dp(12), 0, dp(4));
-
-            TextView cancelBtn = new TextView(this);
-            cancelBtn.setText("Cancel");
-            cancelBtn.setTextColor(Color.parseColor("#A99BBE"));
-            cancelBtn.setTextSize(13f);
-            cancelBtn.setPadding(dp(10), dp(8), dp(10), dp(8));
-            cancelBtn.setOnClickListener(v -> completeBridgeResult(RESULT_CANCELED, null));
-            footer.addView(cancelBtn);
-
-            android.view.View spacer = new android.view.View(this);
-            footer.addView(spacer, new LinearLayout.LayoutParams(0, 1, 1f));
-
-            TextView useAnotherBtn = new TextView(this);
-            useAnotherBtn.setText("+ Other Account (Web)");
-            useAnotherBtn.setTextColor(Color.parseColor("#A855F7"));
-            useAnotherBtn.setTextSize(13f);
-            useAnotherBtn.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
-            useAnotherBtn.setPadding(dp(10), dp(8), dp(10), dp(8));
-            useAnotherBtn.setOnClickListener(v -> launchGoogleWebLoginView(serverClientId));
-            footer.addView(useAnotherBtn);
-
-            root.addView(footer, new LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+            TextView addAccountBtn = new TextView(this);
+            addAccountBtn.setText("+ Use another Google account");
+            addAccountBtn.setTextColor(Color.parseColor("#8AB4F8"));
+            addAccountBtn.setTextSize(13.5f);
+            addAccountBtn.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
+            addAccountBtn.setGravity(Gravity.CENTER);
+            addAccountBtn.setPadding(dp(12), dp(11), dp(12), dp(11));
+            android.graphics.drawable.GradientDrawable addBg = new android.graphics.drawable.GradientDrawable();
+            addBg.setColor(Color.parseColor("#202430"));
+            addBg.setCornerRadius(dp(12));
+            addBg.setStroke(dp(1), Color.parseColor("#3B4256"));
+            addAccountBtn.setBackground(addBg);
+            addAccountBtn.setOnClickListener(v -> launchMicroGEmbeddedSetupWebView(null));
+            LinearLayout.LayoutParams addLp = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            addLp.setMargins(0, dp(8), 0, 0);
+            root.addView(addAccountBtn, addLp);
 
             setContentView(root);
         } catch (Throwable t) {
-            launchGoogleWebLoginView(serverClientId);
+            launchMicroGEmbeddedSetupWebView(null);
         }
     }
 
-    @SuppressLint({"SetJavaScriptEnabled", "AddJavascriptInterface"})
-    private void launchGoogleWebLoginView(final String serverClientId) {
+    private void showMicroGLoadingView(String title, String subtitle) {
         try {
-            final String googleLoginUrl =
-                    "https://accounts.google.com/AccountChooser?hl=en&continue=https%3A%2F%2Fmyaccount.google.com%2F";
-            final String googleFreshLoginUrl =
-                    "https://accounts.google.com/ServiceLogin?hl=en&elo=1&continue=https%3A%2F%2Fmyaccount.google.com%2F";
+            configureGooglePopupWindow(false);
+            LinearLayout root = new LinearLayout(this);
+            root.setOrientation(LinearLayout.VERTICAL);
+            root.setGravity(Gravity.CENTER);
+            root.setPadding(dp(24), dp(28), dp(24), dp(28));
+
+            android.graphics.drawable.GradientDrawable cardBg = new android.graphics.drawable.GradientDrawable();
+            cardBg.setColor(Color.parseColor("#181A20"));
+            cardBg.setCornerRadius(dp(22));
+            cardBg.setStroke(dp(1), Color.parseColor("#2E3240"));
+            root.setBackground(cardBg);
+
+            android.widget.ProgressBar pb = new android.widget.ProgressBar(this);
+            pb.setIndeterminate(true);
+            root.addView(pb, new LinearLayout.LayoutParams(dp(42), dp(42)));
+
+            TextView t = new TextView(this);
+            t.setText(title);
+            t.setTextColor(Color.WHITE);
+            t.setTextSize(15f);
+            t.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
+            t.setGravity(Gravity.CENTER);
+            LinearLayout.LayoutParams tLp = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            tLp.setMargins(0, dp(14), 0, dp(4));
+            root.addView(t, tLp);
+
+            TextView s = new TextView(this);
+            s.setText(subtitle);
+            s.setTextColor(Color.parseColor("#9AA0A6"));
+            s.setTextSize(12.5f);
+            s.setGravity(Gravity.CENTER);
+            root.addView(s, new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+            setContentView(root);
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private void showMicroGErrorView(String message, final Runnable retryAction) {
+        try {
+            configureGooglePopupWindow(false);
+            LinearLayout root = new LinearLayout(this);
+            root.setOrientation(LinearLayout.VERTICAL);
+            root.setGravity(Gravity.CENTER);
+            root.setPadding(dp(22), dp(24), dp(22), dp(22));
+
+            android.graphics.drawable.GradientDrawable cardBg = new android.graphics.drawable.GradientDrawable();
+            cardBg.setColor(Color.parseColor("#181A20"));
+            cardBg.setCornerRadius(dp(22));
+            cardBg.setStroke(dp(1), Color.parseColor("#4C2B2B"));
+            root.setBackground(cardBg);
+
+            TextView t = new TextView(this);
+            t.setText("Google Sign-In Error");
+            t.setTextColor(Color.parseColor("#F28B82"));
+            t.setTextSize(16f);
+            t.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
+            t.setGravity(Gravity.CENTER);
+            root.addView(t);
+
+            TextView msgTv = new TextView(this);
+            msgTv.setText(message != null ? message : "Authentication failed. Please try again.");
+            msgTv.setTextColor(Color.parseColor("#DADCE0"));
+            msgTv.setTextSize(12.5f);
+            msgTv.setGravity(Gravity.CENTER);
+            LinearLayout.LayoutParams mLp = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            mLp.setMargins(0, dp(10), 0, dp(18));
+            root.addView(msgTv, mLp);
+
+            LinearLayout btnRow = new LinearLayout(this);
+            btnRow.setOrientation(LinearLayout.HORIZONTAL);
+            btnRow.setGravity(Gravity.CENTER);
+
+            TextView retryBtn = new TextView(this);
+            retryBtn.setText("Try Again");
+            retryBtn.setTextColor(Color.WHITE);
+            retryBtn.setTextSize(13.5f);
+            retryBtn.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
+            retryBtn.setPadding(dp(18), dp(10), dp(18), dp(10));
+            android.graphics.drawable.GradientDrawable rBg = new android.graphics.drawable.GradientDrawable();
+            rBg.setColor(Color.parseColor("#4285F4"));
+            rBg.setCornerRadius(dp(12));
+            retryBtn.setBackground(rBg);
+            retryBtn.setOnClickListener(v -> {
+                if (retryAction != null) retryAction.run();
+                else launchMicroGEmbeddedSetupWebView(null);
+            });
+            btnRow.addView(retryBtn);
+
+            TextView cancelBtn = new TextView(this);
+            cancelBtn.setText("Cancel");
+            cancelBtn.setTextColor(Color.parseColor("#9AA0A6"));
+            cancelBtn.setTextSize(13.5f);
+            cancelBtn.setPadding(dp(18), dp(10), dp(18), dp(10));
+            cancelBtn.setOnClickListener(v -> cancelEmbeddedWebView());
+            LinearLayout.LayoutParams cLp = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            cLp.setMargins(dp(10), 0, 0, 0);
+            btnRow.addView(cancelBtn, cLp);
+
+            root.addView(btnRow);
+            setContentView(root);
+        } catch (Throwable ignored) {
+            cancelEmbeddedWebView();
+        }
+    }
+
+    private void performMicroGTokenExchangeAndFinish(
+            final com.featurestic.box.compat.auth.MicroGGoogleAuthEngine.AccountRecord account) {
+        if (callbackDispatched) return;
+        showMicroGLoadingView("Signing in with Google...", account.email);
+        new Thread(() -> {
+            final com.featurestic.box.compat.auth.MicroGGoogleAuthEngine.TokenBundle bundle =
+                    com.featurestic.box.compat.auth.MicroGGoogleAuthEngine.performAppSignIn(
+                            getApplicationContext(),
+                            account,
+                            virtualPackage,
+                            serverClientId,
+                            googleScopes);
+            mainHandler.post(() -> {
+                if (isFinishing() || isDestroyed() || callbackDispatched) return;
+                if (bundle != null && bundle.idToken != null && bundle.idToken.contains(".")) {
+                    deliverMicroGSuccessResult(bundle);
+                } else if (bundle != null && bundle.needsReAuth) {
+                    com.featurestic.box.compat.auth.MicroGGoogleAuthEngine.removeAccount(
+                            getApplicationContext(), account.email);
+                    android.widget.Toast.makeText(
+                            VirtualOAuthBridgeActivity.this,
+                            "Session expired, please sign in again.",
+                            android.widget.Toast.LENGTH_SHORT).show();
+                    launchMicroGEmbeddedSetupWebView(account.email);
+                } else {
+                    String err = bundle != null && bundle.error != null
+                            ? bundle.error : "Could not acquire Google ID token";
+                    showMicroGErrorView(err, () -> launchMicroGEmbeddedSetupWebView(account.email));
+                }
+            });
+        }, "Featurestic-MicroGTokenExchange").start();
+    }
+
+    @SuppressLint({"SetJavaScriptEnabled", "AddJavascriptInterface"})
+    private void launchMicroGEmbeddedSetupWebView(final String reAuthEmail) {
+        try {
+            configureGooglePopupWindow(true);
 
             LinearLayout root = new LinearLayout(this);
             root.setOrientation(LinearLayout.VERTICAL);
-            android.graphics.drawable.GradientDrawable compactBg = new android.graphics.drawable.GradientDrawable();
-            compactBg.setColor(Color.parseColor("#F51C1C1E"));
-            compactBg.setCornerRadius(dp(22));
-            compactBg.setStroke(dp(1), Color.parseColor("#33FFFFFF"));
-            root.setBackground(compactBg);
+            android.graphics.drawable.GradientDrawable cardBg = new android.graphics.drawable.GradientDrawable();
+            cardBg.setColor(Color.WHITE);
+            cardBg.setCornerRadius(dp(18));
+            cardBg.setStroke(dp(1), Color.parseColor("#2A2E3D"));
+            root.setBackground(cardBg);
             if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.LOLLIPOP) {
                 root.setClipToOutline(true);
             }
@@ -449,221 +587,466 @@ public final class VirtualOAuthBridgeActivity extends Activity {
             LinearLayout header = new LinearLayout(this);
             header.setOrientation(LinearLayout.HORIZONTAL);
             header.setGravity(Gravity.CENTER_VERTICAL);
-            header.setBackgroundColor(Color.parseColor("#1C1C1E"));
-            int padH = dp(14);
-            int padV = dp(10);
-            header.setPadding(padH, padV, padH, padV);
+            header.setBackgroundColor(Color.parseColor("#181A20"));
+            header.setPadding(dp(12), dp(8), dp(12), dp(8));
 
-            TextView titleView = new TextView(this);
-            titleView.setText("Google Web Sign-In");
-            titleView.setTextColor(Color.WHITE);
-            titleView.setTextSize(14.5f);
-            LinearLayout.LayoutParams titleLp = new LinearLayout.LayoutParams(
+            TextView gBadge = new TextView(this);
+            gBadge.setText("G");
+            gBadge.setTextColor(Color.WHITE);
+            gBadge.setTextSize(13f);
+            gBadge.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
+            gBadge.setGravity(Gravity.CENTER);
+            android.graphics.drawable.GradientDrawable gCircle = new android.graphics.drawable.GradientDrawable();
+            gCircle.setShape(android.graphics.drawable.GradientDrawable.OVAL);
+            gCircle.setColor(Color.parseColor("#4285F4"));
+            gBadge.setBackground(gCircle);
+            header.addView(gBadge, new LinearLayout.LayoutParams(dp(24), dp(24)));
+
+            TextView titleTv = new TextView(this);
+            titleTv.setText("Sign in with Google");
+            titleTv.setTextColor(Color.WHITE);
+            titleTv.setTextSize(13.5f);
+            titleTv.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
+            LinearLayout.LayoutParams tLp = new LinearLayout.LayoutParams(
                     0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
-            header.addView(titleView, titleLp);
+            tLp.setMargins(dp(10), 0, dp(8), 0);
+            header.addView(titleTv, tLp);
 
-            TextView continueBtn = new TextView(this);
-            continueBtn.setText("Continue");
-            continueBtn.setTextColor(Color.parseColor("#30D158"));
-            continueBtn.setTextSize(13f);
-            continueBtn.setPadding(dp(10), dp(4), dp(10), dp(4));
-            continueBtn.setOnClickListener(v -> extractGoogleAccountFromWebViewAndFinish(embeddedWebView, true));
-            header.addView(continueBtn);
-
-            TextView switchIdBtn = new TextView(this);
-            switchIdBtn.setText("Switch ID");
-            switchIdBtn.setTextColor(Color.parseColor("#0A84FF"));
-            switchIdBtn.setTextSize(13f);
-            switchIdBtn.setPadding(dp(10), dp(4), dp(10), dp(4));
-            switchIdBtn.setOnClickListener(v -> {
-                if (embeddedWebView != null) {
-                    WebViewCompat.clearAllWebLoginSessions(
-                            VirtualOAuthBridgeActivity.this, embeddedWebView);
-                    WebViewCompat.consumeForceFreshWebLogin();
-                    java.util.Map<String, String> headers = new java.util.HashMap<>();
-                    headers.put("X-Requested-With", "com.android.chrome");
-                    embeddedWebView.loadUrl(googleFreshLoginUrl, headers);
-                    android.widget.Toast.makeText(
-                            VirtualOAuthBridgeActivity.this,
-                            "Old Google Session Cleared! Sign in with your New Gmail ID.",
-                            android.widget.Toast.LENGTH_SHORT).show();
-                }
-            });
-            header.addView(switchIdBtn);
-
-            TextView closeBtn = new TextView(this);
-            closeBtn.setText("Close");
-            closeBtn.setTextColor(Color.WHITE);
-            closeBtn.setTextSize(13f);
-            closeBtn.setPadding(dp(10), dp(2), dp(4), dp(2));
-            closeBtn.setOnClickListener(v -> cancelEmbeddedWebView());
-            header.addView(closeBtn);
-
-            root.addView(header, new LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-
-            final ProgressBar progressBar = new ProgressBar(
-                    this, null, android.R.attr.progressBarStyleHorizontal);
-            progressBar.setMax(100);
-            root.addView(progressBar, new LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, dp(3)));
-
-            FrameLayout webContainer = new FrameLayout(this);
-            embeddedWebView = new WebView(this);
-            WebSettings settings = embeddedWebView.getSettings();
-            settings.setJavaScriptEnabled(true);
-            settings.setDomStorageEnabled(true);
-            settings.setDatabaseEnabled(true);
-            settings.setJavaScriptCanOpenWindowsAutomatically(true);
-            settings.setUseWideViewPort(true);
-            settings.setLoadWithOverviewMode(true);
-            settings.setMixedContentMode(WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE);
-            // Pure Chrome Mobile User-Agent so accounts.google.com never blocks with 403 disallowed_useragent
-            settings.setUserAgentString(
-                    "Mozilla/5.0 (Linux; Android 14; Pixel 8 Pro) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.6778.200 Mobile Safari/537.36");
-
-            CookieManager cm = CookieManager.getInstance();
-            if (cm != null) {
-                cm.setAcceptCookie(true);
-                cm.setAcceptThirdPartyCookies(embeddedWebView, true);
+            final java.util.List<com.featurestic.box.compat.auth.MicroGGoogleAuthEngine.AccountRecord> saved =
+                    com.featurestic.box.compat.auth.MicroGGoogleAuthEngine.getSavedAccounts(this);
+            if (saved != null && !saved.isEmpty()) {
+                TextView savedBtn = new TextView(this);
+                savedBtn.setText("Accounts");
+                savedBtn.setTextColor(Color.parseColor("#8AB4F8"));
+                savedBtn.setTextSize(12f);
+                savedBtn.setPadding(dp(8), dp(4), dp(8), dp(4));
+                savedBtn.setOnClickListener(v -> showMicroGAccountPicker(saved));
+                header.addView(savedBtn);
             }
 
-            embeddedWebView.addJavascriptInterface(new Object() {
+            TextView closeBtn = new TextView(this);
+            closeBtn.setText("✕");
+            closeBtn.setTextColor(Color.parseColor("#9AA0A6"));
+            closeBtn.setTextSize(16f);
+            closeBtn.setPadding(dp(8), dp(2), dp(4), dp(2));
+            closeBtn.setOnClickListener(v -> cancelEmbeddedWebView());
+            header.addView(closeBtn);
+            root.addView(header);
+
+            final android.widget.ProgressBar progressBar = new android.widget.ProgressBar(
+                    this, null, android.R.attr.progressBarStyleHorizontal);
+            progressBar.setIndeterminate(true);
+            progressBar.setLayoutParams(new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, dp(3)));
+            root.addView(progressBar);
+
+            if (embeddedWebView != null) {
+                try {
+                    embeddedWebView.destroy();
+                } catch (Throwable ignored) {
+                }
+            }
+            final WebView wv = new WebView(this);
+            embeddedWebView = wv;
+            wv.setFocusable(true);
+            wv.setFocusableInTouchMode(true);
+            wv.setLayoutParams(new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
+
+            WebSettings ws = wv.getSettings();
+            ws.setJavaScriptEnabled(true);
+            ws.setDomStorageEnabled(true);
+            ws.setDatabaseEnabled(false);
+            ws.setSupportMultipleWindows(false);
+            ws.setSaveFormData(false);
+            ws.setAllowFileAccess(false);
+            ws.setUseWideViewPort(false);
+            ws.setSupportZoom(false);
+            ws.setJavaScriptCanOpenWindowsAutomatically(false);
+            String baseUa = ws.getUserAgentString();
+            if (baseUa == null) {
+                baseUa = "Mozilla/5.0 (Linux; Android 14; Pixel 8 Pro) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.6778.200 Mobile Safari/537.36";
+            }
+            if (!baseUa.contains("MinuteMaid")) {
+                ws.setUserAgentString(baseUa + com.featurestic.box.compat.auth.MicroGGoogleAuthEngine.MAGIC_USER_AGENT_SUFFIX);
+            }
+
+            final android.webkit.CookieManager cm = android.webkit.CookieManager.getInstance();
+            if (cm != null) {
+                cm.setAcceptCookie(true);
+                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.LOLLIPOP) {
+                    cm.setAcceptThirdPartyCookies(wv, true);
+                }
+            }
+
+            final boolean[] exchanging = new boolean[]{false};
+            final Runnable[] completeFromCookiesRef = new Runnable[1];
+            completeFromCookiesRef[0] = () -> {
+                if (exchanging[0] || callbackDispatched) return;
+                String oauthToken = extractOAuthTokenCookie(cm);
+                if (oauthToken == null || oauthToken.isEmpty()) {
+                    return;
+                }
+                exchanging[0] = true;
+                mainHandler.post(() -> {
+                    showMicroGLoadingView("Authorizing with Google...", "Fetching official token for BGMI");
+                    new Thread(() -> {
+                        try {
+                            com.featurestic.box.compat.auth.MicroGGoogleAuthEngine.AccountRecord rec =
+                                    com.featurestic.box.compat.auth.MicroGGoogleAuthEngine
+                                            .exchangeOAuthCookieForMasterToken(getApplicationContext(), oauthToken);
+                            com.featurestic.box.compat.auth.MicroGGoogleAuthEngine.TokenBundle bundle =
+                                    com.featurestic.box.compat.auth.MicroGGoogleAuthEngine.performAppSignIn(
+                                            getApplicationContext(),
+                                            rec,
+                                            virtualPackage,
+                                            serverClientId,
+                                            googleScopes);
+                            mainHandler.post(() -> {
+                                if (isFinishing() || isDestroyed() || callbackDispatched) return;
+                                if (bundle != null && bundle.idToken != null && bundle.idToken.contains(".")) {
+                                    deliverMicroGSuccessResult(bundle);
+                                } else {
+                                    String err = bundle != null && bundle.error != null
+                                            ? bundle.error : "Google did not return an ID token";
+                                    showMicroGErrorView(err, () -> launchMicroGEmbeddedSetupWebView(rec.email));
+                                }
+                            });
+                        } catch (final Throwable t) {
+                            mainHandler.post(() -> {
+                                if (isFinishing() || isDestroyed() || callbackDispatched) return;
+                                showMicroGErrorView(
+                                        "Google auth error: " + t.getMessage(),
+                                        () -> launchMicroGEmbeddedSetupWebView(reAuthEmail));
+                            });
+                        }
+                    }, "Featurestic-MicroGMasterExchange").start();
+                });
+            };
+
+            wv.addJavascriptInterface(new Object() {
                 @android.webkit.JavascriptInterface
-                public void onGoogleProfileExtracted(String email, String name) {
-                    if (callbackDispatched) return;
-                    if (email != null && email.contains("@")) {
-                        callbackDispatched = true;
-                        mainHandler.post(() -> finishGoogleWebSignInWithProfile(email.trim(), name));
+                public void closeView() {
+                    mainHandler.post(completeFromCookiesRef[0]);
+                }
+
+                @android.webkit.JavascriptInterface
+                public void showView() {
+                    mainHandler.post(() -> {
+                        progressBar.setVisibility(View.GONE);
+                        wv.setVisibility(View.VISIBLE);
+                    });
+                }
+
+                @android.webkit.JavascriptInterface
+                public void skipLogin() {
+                    mainHandler.post(() -> cancelEmbeddedWebView());
+                }
+
+                @android.webkit.JavascriptInterface
+                public String getAccounts() {
+                    org.json.JSONArray arr = new org.json.JSONArray();
+                    try {
+                        for (com.featurestic.box.compat.auth.MicroGGoogleAuthEngine.AccountRecord r :
+                                com.featurestic.box.compat.auth.MicroGGoogleAuthEngine.getSavedAccounts(VirtualOAuthBridgeActivity.this)) {
+                            arr.put(r.email);
+                        }
+                    } catch (Throwable ignored) {
                     }
+                    return arr.toString();
                 }
-            }, "FeaturesticGoogleBridge");
 
-            embeddedWebView.setWebChromeClient(new WebChromeClient() {
-                @Override
-                public void onProgressChanged(WebView view, int newProgress) {
-                    progressBar.setProgress(newProgress);
-                    progressBar.setVisibility(newProgress >= 100
-                            ? android.view.View.GONE : android.view.View.VISIBLE);
+                @android.webkit.JavascriptInterface
+                public String getAllowedDomains() {
+                    return "[]";
                 }
-            });
 
-            embeddedWebView.setWebViewClient(new WebViewClient() {
+                @android.webkit.JavascriptInterface
+                public String getAndroidId() {
+                    return com.featurestic.box.compat.auth.MicroGGoogleAuthEngine
+                            .resolveAndroidIdHex(VirtualOAuthBridgeActivity.this);
+                }
+
+                @android.webkit.JavascriptInterface
+                public int getAuthModuleVersionCode() {
+                    return com.featurestic.box.compat.auth.MicroGGoogleAuthEngine.GMS_VERSION_CODE;
+                }
+
+                @android.webkit.JavascriptInterface
+                public int getPlayServicesVersionCode() {
+                    return com.featurestic.box.compat.auth.MicroGGoogleAuthEngine.GMS_VERSION_CODE;
+                }
+
+                @android.webkit.JavascriptInterface
+                public int getBuildVersionSdk() {
+                    return android.os.Build.VERSION.SDK_INT;
+                }
+
+                @android.webkit.JavascriptInterface
+                public int getDeviceContactsCount() {
+                    return -1;
+                }
+
+                @android.webkit.JavascriptInterface
+                public int getDeviceDataVersionInfo() {
+                    return 1;
+                }
+
+                @android.webkit.JavascriptInterface
+                public String getFactoryResetChallenges() {
+                    return "[]";
+                }
+
+                @android.webkit.JavascriptInterface
+                public String getPhoneNumber() {
+                    return null;
+                }
+
+                @android.webkit.JavascriptInterface
+                public String getSimSerial() {
+                    return null;
+                }
+
+                @android.webkit.JavascriptInterface
+                public int getSimState() {
+                    return 0;
+                }
+
+                @android.webkit.JavascriptInterface
+                public boolean hasPhoneNumber() {
+                    return false;
+                }
+
+                @android.webkit.JavascriptInterface
+                public boolean hasTelephony() {
+                    return false;
+                }
+
+                @android.webkit.JavascriptInterface
+                public boolean isUserOwner() {
+                    return true;
+                }
+
+                @android.webkit.JavascriptInterface
+                public String fetchVerifiedPhoneNumber() {
+                    return null;
+                }
+
+                @android.webkit.JavascriptInterface
+                public void getDroidGuardResult(String s) {
+                }
+
+                @android.webkit.JavascriptInterface
+                public void addAccount(String json) {
+                }
+
+                @android.webkit.JavascriptInterface
+                public void attemptLogin(String accountName, String password) {
+                }
+
+                @android.webkit.JavascriptInterface
+                public void backupSyncOptIn(String accountName) {
+                }
+
+                @android.webkit.JavascriptInterface
+                public void clearOldLoginAttempts() {
+                }
+
+                @android.webkit.JavascriptInterface
+                public void fetchIIDToken(String entity) {
+                }
+
+                @android.webkit.JavascriptInterface
+                public void goBack() {
+                }
+
+                @android.webkit.JavascriptInterface
+                public void hideKeyboard() {
+                    mainHandler.post(() -> {
+                        try {
+                            android.view.inputmethod.InputMethodManager imm =
+                                    (android.view.inputmethod.InputMethodManager) getSystemService(INPUT_METHOD_SERVICE);
+                            if (imm != null) imm.hideSoftInputFromWindow(wv.getWindowToken(), 0);
+                        } catch (Throwable ignored) {
+                        }
+                    });
+                }
+
+                @android.webkit.JavascriptInterface
+                public void showKeyboard() {
+                    mainHandler.post(() -> {
+                        try {
+                            android.view.inputmethod.InputMethodManager imm =
+                                    (android.view.inputmethod.InputMethodManager) getSystemService(INPUT_METHOD_SERVICE);
+                            if (imm != null) {
+                                imm.showSoftInput(wv, android.view.inputmethod.InputMethodManager.SHOW_IMPLICIT);
+                            }
+                        } catch (Throwable ignored) {
+                        }
+                    });
+                }
+
+                @android.webkit.JavascriptInterface
+                public void launchEmergencyDialer() {
+                }
+
+                @android.webkit.JavascriptInterface
+                public void log(String s) {
+                }
+
+                @android.webkit.JavascriptInterface
+                public void notifyOnTermsOfServiceAccepted() {
+                }
+
+                @android.webkit.JavascriptInterface
+                public void setAccountIdentifier(String accountName) {
+                }
+
+                @android.webkit.JavascriptInterface
+                public void setAllActionsEnabled(boolean z) {
+                }
+
+                @android.webkit.JavascriptInterface
+                public void setBackButtonEnabled(boolean z) {
+                }
+
+                @android.webkit.JavascriptInterface
+                public void setNewAccountCreated() {
+                }
+
+                @android.webkit.JavascriptInterface
+                public void setPrimaryActionEnabled(boolean z) {
+                }
+
+                @android.webkit.JavascriptInterface
+                public void setPrimaryActionLabel(String str, int i) {
+                }
+
+                @android.webkit.JavascriptInterface
+                public void setSecondaryActionEnabled(boolean z) {
+                }
+
+                @android.webkit.JavascriptInterface
+                public void setSecondaryActionLabel(String str, int i) {
+                }
+
+                @android.webkit.JavascriptInterface
+                public void startAfw() {
+                }
+
+                @android.webkit.JavascriptInterface
+                public void startFido2SignRequest(String request) {
+                }
+
+                @android.webkit.JavascriptInterface
+                public void cancelFido2SignRequest() {
+                }
+
+                @android.webkit.JavascriptInterface
+                public void sendFido2SkUiEvent(String event) {
+                }
+            }, "mm");
+
+            wv.setWebChromeClient(new android.webkit.WebChromeClient());
+            wv.setWebViewClient(new WebViewClient() {
                 @Override
                 public void onPageFinished(WebView view, String url) {
                     super.onPageFinished(view, url);
-                    if (url == null || callbackDispatched) return;
-                    String lowerUrl = url.toLowerCase(Locale.US);
-                    // Once Google login finishes and redirects to myaccount.google.com (or google.com/account),
-                    // extract the signed-in Gmail address & Display Name and return RESULT_OK to the game!
-                    if (lowerUrl.startsWith("https://myaccount.google.com")
-                            || lowerUrl.startsWith("https://www.google.com/settings")
-                            || lowerUrl.contains("myaccount.google.com/?utm_source=")) {
-                        extractGoogleAccountFromWebViewAndFinish(view, true);
+                    progressBar.setVisibility(View.GONE);
+                    if (url == null || exchanging[0] || callbackDispatched) return;
+                    try {
+                        Uri uri = Uri.parse(url);
+                        if ("close".equals(uri.getFragment())
+                                || url.startsWith(com.featurestic.box.compat.auth.MicroGGoogleAuthEngine.GOOGLE_SUITE_URL)
+                                || url.startsWith(com.featurestic.box.compat.auth.MicroGGoogleAuthEngine.PROGRAMMATIC_AUTH_URL)) {
+                            completeFromCookiesRef[0].run();
+                            return;
+                        }
+                    } catch (Throwable ignored) {
+                    }
+                    if (extractOAuthTokenCookie(cm) != null) {
+                        completeFromCookiesRef[0].run();
                     }
                 }
             });
 
-            webContainer.addView(embeddedWebView, new FrameLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
-            root.addView(webContainer, new LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
-
+            root.addView(wv);
             setContentView(root);
 
-            String startUrl = googleLoginUrl;
-            if (WebViewCompat.consumeForceFreshWebLogin()) {
-                WebViewCompat.clearAllWebLoginSessions(this, embeddedWebView);
-                WebViewCompat.consumeForceFreshWebLogin();
-                startUrl = googleFreshLoginUrl;
+            final String setupUrl = com.featurestic.box.compat.auth.MicroGGoogleAuthEngine
+                    .buildEmbeddedSetupUrl(Locale.getDefault(), reAuthEmail);
+            if (cm != null && android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.LOLLIPOP) {
+                cm.removeAllCookies(value -> wv.loadUrl(setupUrl));
+            } else {
+                wv.loadUrl(setupUrl);
             }
-            java.util.Map<String, String> extraHeaders = new java.util.HashMap<>();
-            extraHeaders.put("X-Requested-With", "com.android.chrome");
-            embeddedWebView.loadUrl(startUrl, extraHeaders);
-        } catch (Throwable ignored) {
-            cancelEmbeddedWebView();
+        } catch (Throwable t) {
+            showMicroGErrorView("WebView error: " + t.getMessage(), null);
         }
     }
 
-    private void extractGoogleAccountFromWebViewAndFinish(final WebView view, final boolean allowFallbackOnComplete) {
-        if (view == null || callbackDispatched) return;
-        try {
-            String js = "(function(){"
-                    + "try{"
-                    + "var bodyText = document.body ? document.body.innerText : '';"
-                    + "var htmlText = document.documentElement ? document.documentElement.innerHTML : '';"
-                    + "var match = bodyText.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+[.][a-zA-Z]{2,}/);"
-                    + "if(!match) match = htmlText.match(/[a-zA-Z0-9._%+-]+@gmail[.]com/);"
-                    + "var email = match ? match[0] : '';"
-                    + "var name = document.title ? document.title.replace(' - Google Account','').trim() : '';"
-                    + "if(email){ FeaturesticGoogleBridge.onGoogleProfileExtracted(email, name); return email; }"
-                    + "}catch(e){} return '';"
-                    + "})();";
-            view.evaluateJavascript(js, value -> {
-                if (callbackDispatched) return;
-                String cleaned = value != null ? value.replace(String.valueOf((char) 34), "").trim() : "";
-                if (cleaned.contains("@")) {
-                    callbackDispatched = true;
-                    finishGoogleWebSignInWithProfile(cleaned, cleaned.split("@")[0]);
-                } else if (allowFallbackOnComplete) {
-                    String currentUrl = view.getUrl();
-                    if (currentUrl != null && currentUrl.toLowerCase(Locale.US).contains("myaccount.google.com")) {
-                        callbackDispatched = true;
-                        finishGoogleWebSignInWithProfile("google.web.player@gmail.com", "Google Player");
+    private String extractOAuthTokenCookie(android.webkit.CookieManager cm) {
+        if (cm == null) return null;
+        String[] urls = new String[]{
+                com.featurestic.box.compat.auth.MicroGGoogleAuthEngine.EMBEDDED_SETUP_URL,
+                com.featurestic.box.compat.auth.MicroGGoogleAuthEngine.PROGRAMMATIC_AUTH_URL,
+                com.featurestic.box.compat.auth.MicroGGoogleAuthEngine.EMBEDDED_RE_AUTH_URL,
+                "https://accounts.google.com"
+        };
+        for (String u : urls) {
+            try {
+                String cookies = cm.getCookie(u);
+                if (cookies == null || cookies.isEmpty()) continue;
+                String[] parts = cookies.split(";");
+                for (String p : parts) {
+                    String trimmed = p.trim();
+                    if (trimmed.startsWith("oauth_token=")) {
+                        String val = trimmed.substring("oauth_token=".length()).trim();
+                        if (!val.isEmpty()) return val;
                     }
                 }
-            });
-        } catch (Throwable ignored) {
+            } catch (Throwable ignored) {
+            }
+        }
+        return null;
+    }
+
+    private void deliverMicroGSuccessResult(
+            com.featurestic.box.compat.auth.MicroGGoogleAuthEngine.TokenBundle bundle) {
+        if (callbackDispatched) return;
+        callbackDispatched = true;
+        try {
+            Intent resultIntent = new Intent();
+            resultIntent.putExtra(com.featurestic.box.compat.auth.GoogleSignInTokenHelper.EXTRA_WEB_EMAIL, bundle.email);
+            if (bundle.displayName != null) {
+                resultIntent.putExtra(com.featurestic.box.compat.auth.GoogleSignInTokenHelper.EXTRA_WEB_NAME, bundle.displayName);
+            }
+            if (bundle.googleUserId != null) {
+                resultIntent.putExtra(com.featurestic.box.compat.auth.GoogleSignInTokenHelper.EXTRA_WEB_SUB, bundle.googleUserId);
+            }
+            if (bundle.idToken != null) {
+                resultIntent.putExtra(com.featurestic.box.compat.auth.GoogleSignInTokenHelper.EXTRA_WEB_ID_TOKEN, bundle.idToken);
+            }
+            if (bundle.serverAuthCode != null) {
+                resultIntent.putExtra(com.featurestic.box.compat.auth.GoogleSignInTokenHelper.EXTRA_WEB_AUTH_CODE, bundle.serverAuthCode);
+            }
+            if (bundle.givenName != null) {
+                resultIntent.putExtra(com.featurestic.box.compat.auth.GoogleSignInTokenHelper.EXTRA_WEB_GIVEN_NAME, bundle.givenName);
+            }
+            if (bundle.familyName != null) {
+                resultIntent.putExtra(com.featurestic.box.compat.auth.GoogleSignInTokenHelper.EXTRA_WEB_FAMILY_NAME, bundle.familyName);
+            }
+            if (bundle.photoUrl != null) {
+                resultIntent.putExtra(com.featurestic.box.compat.auth.GoogleSignInTokenHelper.EXTRA_WEB_PHOTO_URL, bundle.photoUrl);
+            }
+            completeBridgeResult(RESULT_OK, resultIntent);
+        } catch (Throwable t) {
+            completeBridgeResult(RESULT_CANCELED, null);
         }
     }
 
     private void finishGoogleWebSignInWithProfile(String email, String displayName) {
-        try {
-            WebViewCompat.enableAndFlushCookiesIfActive();
-            final String safeEmail = (email != null && email.contains("@")) ? email.trim() : "player@gmail.com";
-            final String safeName = (displayName != null && !displayName.trim().isEmpty()
-                    && !displayName.contains("Google Account"))
-                    ? displayName.trim() : safeEmail.split("@")[0];
-            final String subId = String.valueOf(Math.abs((long) safeEmail.hashCode()) + 100000000000000000L);
-
-            new Thread(() -> {
-                String realToken = null;
-                try {
-                    Account acct = new Account(safeEmail, "com.google");
-                    String srvClientId = serverClientId != null && !serverClientId.isEmpty()
-                            ? serverClientId
-                            : com.featurestic.box.compat.auth.GoogleSignInTokenHelper.getLastServerClientId();
-                    String scope = (srvClientId != null && !srvClientId.isEmpty())
-                            ? "audience:server:client_id:" + srvClientId
-                            : "oauth2:email profile openid";
-                    Class<?> authUtil = Class.forName("com.google.android.gms.auth.GoogleAuthUtil");
-                    java.lang.reflect.Method getToken = authUtil.getMethod("getToken", android.content.Context.class, Account.class, String.class);
-                    Object res = getToken.invoke(null, getApplicationContext(), acct, scope);
-                    if (res instanceof String && !((String) res).isEmpty()) {
-                        realToken = (String) res;
-                    }
-                } catch (Throwable ignored) {
-                }
-                final String finalToken = realToken;
-                mainHandler.post(() -> {
-                    try {
-                        Intent resultIntent = new Intent();
-                        resultIntent.putExtra(com.featurestic.box.compat.auth.GoogleSignInTokenHelper.EXTRA_WEB_EMAIL, safeEmail);
-                        resultIntent.putExtra(com.featurestic.box.compat.auth.GoogleSignInTokenHelper.EXTRA_WEB_NAME, safeName);
-                        resultIntent.putExtra(com.featurestic.box.compat.auth.GoogleSignInTokenHelper.EXTRA_WEB_SUB, subId);
-                        if (finalToken != null) {
-                            resultIntent.putExtra(com.featurestic.box.compat.auth.GoogleSignInTokenHelper.EXTRA_WEB_ID_TOKEN, finalToken);
-                        }
-                        com.featurestic.box.compat.auth.GoogleSignInTokenHelper.enrichSignInResultIntent(resultIntent, true);
-                        completeBridgeResult(RESULT_OK, resultIntent);
-                    } catch (Throwable ignored) {
-                        completeBridgeResult(RESULT_CANCELED, null);
-                    }
-                });
-            }, "Featurestic-GoogleWebTokenFetch").start();
-        } catch (Throwable ignored) {
-            completeBridgeResult(RESULT_CANCELED, null);
-        }
+        launchMicroGEmbeddedSetupWebView(email);
     }
 
     @SuppressLint("SetJavaScriptEnabled")
