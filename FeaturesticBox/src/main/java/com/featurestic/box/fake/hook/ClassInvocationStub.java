@@ -142,9 +142,15 @@ public abstract class ClassInvocationStub implements InvocationHandler, IInjectH
             try {
                 return method.invoke(mBase, args);
             } catch (InvocationTargetException e) {
-                throw sanitizeStackTrace(e.getTargetException() != null ? e.getTargetException() : e);
+                Throwable cause = e.getTargetException() != null ? e.getTargetException() : e;
+                // Swallow exceptions from base method calls so they never become
+                // pending JNI exceptions that crash cloned games with SIGABRT.
+                sanitizeStackTrace(cause).printStackTrace();
+                return null;
             } catch (Throwable e) {
-                throw sanitizeStackTrace(e.getCause() != null ? e.getCause() : e);
+                Throwable cause = e.getCause() != null ? e.getCause() : e;
+                sanitizeStackTrace(cause).printStackTrace();
+                return null;
             }
         }
 
@@ -157,9 +163,16 @@ public abstract class ClassInvocationStub implements InvocationHandler, IInjectH
             result = methodHook.afterHook(result);
             return result;
         } catch (InvocationTargetException e) {
-            throw sanitizeStackTrace(e.getTargetException() != null ? e.getTargetException() : e);
+            Throwable cause = e.getTargetException() != null ? e.getTargetException() : e;
+            // Swallow exceptions from hook methods so they never become pending
+            // JNI exceptions that crash cloned games with SIGABRT. Hooks are an
+            // interception layer; a failing hook must not abort the target app.
+            sanitizeStackTrace(cause).printStackTrace();
+            return null;
         } catch (Throwable e) {
-            throw sanitizeStackTrace(e);
+            Throwable cause = e.getCause() != null ? e.getCause() : e;
+            sanitizeStackTrace(cause).printStackTrace();
+            return null;
         }
     }
 }

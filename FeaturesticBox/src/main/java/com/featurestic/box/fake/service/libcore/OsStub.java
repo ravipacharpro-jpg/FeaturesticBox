@@ -64,12 +64,11 @@ public class OsStub extends ClassInvocationStub {
         Object result;
         try {
             result = super.invoke(proxy, method, args);
-        } catch (android.system.ErrnoException e) {
-            throw e;
         } catch (Throwable e) {
             // Prevent exceptions from Os methods (e.g. ErrnoException when a
             // native library file is not found) from becoming pending JNI
             // exceptions that cause SIGABRT in cloned games.
+            e.printStackTrace();
             return null;
         }
         if ("socket".equals(mName) && result instanceof java.io.FileDescriptor) {
