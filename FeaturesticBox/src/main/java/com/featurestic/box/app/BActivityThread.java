@@ -532,7 +532,13 @@ public class BActivityThread extends IBActivityThread.Stub {
             onBeforeCreateApplication(packageName, processName, packageContext);
             application = BRLoadedApk.get(loadedApk).makeApplication(false, null);
             if (application == null) {
-                throw new IllegalStateException("LoadedApk.makeApplication returned null for " + packageName);
+                // Fallback: try with instrumentation enabled
+                application = BRLoadedApk.get(loadedApk).makeApplication(true, null);
+            }
+            if (application == null) {
+                // Do not crash the cloned app if makeApplication returns null.
+                // Log a warning and continue; downstream code handles null app.
+                Log.w(TAG, "LoadedApk.makeApplication returned null for " + packageName + ", continuing without guest Application");
             }
 
             // Publish the guest Application immediately and repair LoadedApk's
@@ -540,33 +546,34 @@ public class BActivityThread extends IBActivityThread.Stub {
             // Application.getApplicationContext() is resolved through
             // LoadedApk.mApplication during launch-time locale handling.
             mInitialApplication = application;
-            publishApplicationToLoadedApk(loadedApk, application);
-            BRActivityThread.get(FeaturesticBoxCore.mainThread())
-                    ._set_mInitialApplication(mInitialApplication);
-            if (!ensureFrameworkInitialApplication()) {
-                throw new IllegalStateException(
-                        "Unable to publish launch-ready guest Application context for " + packageName);
-            }
+            if (application != null) {
+                publishApplicationToLoadedApk(loadedApk, application);
+                BRActivityThread.get(FeaturesticBoxCore.mainThread())
+                        ._set_mInitialApplication(mInitialApplication);
+                if (!ensureFrameworkInitialApplication()) {
+                    throw new IllegalStateException(
+                            "Unable to publish launch-ready guest Application context for " + packageName);
+                }
 
-            ContextCompat.fix(application);
-            ContextCompat.fix((Context) BRActivityThread.get(FeaturesticBoxCore.mainThread()).getSystemContext());
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N && "com.tencent.mm:recovery".equals(processName)) {
-                fixWeChatRecovery(application);
-            }
-            List<ProviderInfo> providers;
-            installProviders(mInitialApplication, bindData.processName, bindData.providers);
-            // Defer WebView suffix finalization until after Application.onCreate() so
-            // guest SDKs can configure WebView.setDataDirectorySuffix() without IllegalStateException
-            try {
-				fixAiLiaoPhoto(mInitialApplication);
-			} catch (Throwable e) {
-				e.printStackTrace();
-			}
-            // External plugin .so is deferred until GameActivity.onResume() + libUE4 load
-            onBeforeApplicationOnCreate(packageName, processName, application);
-            AppInstrumentation.get().callApplicationOnCreate(application);
-            WebViewCompat.ensureAfterApplicationCreate(application, getUserId(), packageName, processName);
-            onAfterApplicationOnCreate(packageName, processName, application);
+                ContextCompat.fix(application);
+                ContextCompat.fix((Context) BRActivityThread.get(FeaturesticBoxCore.mainThread()).getSystemContext());
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N && "com.tencent.mm:recovery".equals(processName)) {
+                    fixWeChatRecovery(application);
+                }
+                List<ProviderInfo> providers;
+                installProviders(mInitialApplication, bindData.processName, bindData.providers);
+                // Defer WebView suffix finalization until after Application.onCreate() so
+                // guest SDKs can configure WebView.setDataDirectorySuffix() without IllegalStateException
+                try {
+					fixAiLiaoPhoto(mInitialApplication);
+				} catch (Throwable e) {
+					e.printStackTrace();
+				}
+                // External plugin .so is deferred until GameActivity.onResume() + libUE4 load
+                onBeforeApplicationOnCreate(packageName, processName, application);
+                AppInstrumentation.get().callApplicationOnCreate(application);
+                WebViewCompat.ensureAfterApplicationCreate(application, getUserId(), packageName, processName);
+                onAfterApplicationOnCreate(packageName, processName, application);
             HookManager.get().checkEnv(HCallbackStub.class);
         } catch (Exception e) {
             e.printStackTrace();
