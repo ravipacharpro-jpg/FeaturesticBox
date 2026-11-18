@@ -173,8 +173,18 @@ public final class VirtualOAuthBridgeActivity extends Activity {
         expectedRedirectUri = redirectUri;
         facebookFlow = isFacebookHost(authUri);
         twitterFlow = isTwitterHost(authUri);
+        boolean discordFlow = isDiscordHost(authUri);
         legacyTwitterFlow = twitterFlow && hasQueryParameter(authUri, "oauth_token");
-        boolean useEmbeddedWebView = EMBEDDED_WEBVIEW_PROVIDER.equals(authProvider)
+        boolean loaderLinkedSocial = false;
+        try {
+            android.content.SharedPreferences socialPrefs = getSharedPreferences("featurestic_social_accounts", MODE_PRIVATE);
+            if (facebookFlow && socialPrefs.getBoolean("linked_facebook", false)) loaderLinkedSocial = true;
+            if (twitterFlow && socialPrefs.getBoolean("linked_twitter", false)) loaderLinkedSocial = true;
+            if (discordFlow && socialPrefs.getBoolean("linked_discord", false)) loaderLinkedSocial = true;
+        } catch (Throwable ignored) {
+        }
+        boolean useEmbeddedWebView = loaderLinkedSocial
+                || EMBEDDED_WEBVIEW_PROVIDER.equals(authProvider)
                 || !AuthTabCompat.isSupportedProvider(this, authProvider, authUri);
 
         if (!redirectResolvesToVirtualPackage(redirectUri)) {
@@ -219,13 +229,14 @@ public final class VirtualOAuthBridgeActivity extends Activity {
 
     private void launchMicroGGoogleSignInFlow() {
         try {
-            java.util.List<com.featurestic.box.compat.auth.MicroGGoogleAuthEngine.AccountRecord> saved =
-                    com.featurestic.box.compat.auth.MicroGGoogleAuthEngine.getSavedAccounts(this);
-            if (saved != null && !saved.isEmpty()) {
-                showMicroGAccountPicker(saved);
-            } else {
-                launchMicroGEmbeddedSetupWebView(null);
+            com.featurestic.box.compat.auth.MicroGGoogleAuthEngine.AccountRecord active =
+                    com.featurestic.box.compat.auth.MicroGGoogleAuthEngine.getActiveAccount(this);
+            if (active != null && active.email != null && active.masterToken != null) {
+                Log.i(TAG, "Auto-signing in with Loader active Google account: " + active.email);
+                performMicroGTokenExchangeAndFinish(active);
+                return;
             }
+            launchMicroGEmbeddedSetupWebView(null);
         } catch (Throwable t) {
             launchMicroGEmbeddedSetupWebView(null);
         }
@@ -980,11 +991,17 @@ public final class VirtualOAuthBridgeActivity extends Activity {
 
             final String setupUrl = com.featurestic.box.compat.auth.MicroGGoogleAuthEngine
                     .buildEmbeddedSetupUrl(Locale.getDefault(), reAuthEmail);
-            if (cm != null && android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.LOLLIPOP) {
-                cm.removeAllCookies(value -> wv.loadUrl(setupUrl));
-            } else {
-                wv.loadUrl(setupUrl);
+            if (cm != null) {
+                try {
+                    cm.setCookie("https://accounts.google.com", "oauth_token=; Max-Age=0; Path=/");
+                    cm.setCookie(com.featurestic.box.compat.auth.MicroGGoogleAuthEngine.EMBEDDED_SETUP_URL, "oauth_token=; Max-Age=0; Path=/");
+                    if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.LOLLIPOP) {
+                        cm.flush();
+                    }
+                } catch (Throwable ignored) {
+                }
             }
+            wv.loadUrl(setupUrl);
         } catch (Throwable t) {
             showMicroGErrorView("WebView error: " + t.getMessage(), null);
         }

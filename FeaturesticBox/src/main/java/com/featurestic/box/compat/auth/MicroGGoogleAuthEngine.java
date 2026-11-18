@@ -68,6 +68,7 @@ public final class MicroGGoogleAuthEngine {
 
     private static final String PREFS_NAME = "featurestic_microg_accounts";
     private static final String KEY_ACCOUNTS_JSON = "accounts_v1";
+    private static final String KEY_ACTIVE_EMAIL = "active_email_v1";
 
     private MicroGGoogleAuthEngine() {
     }
@@ -169,6 +170,39 @@ public final class MicroGGoogleAuthEngine {
         return list;
     }
 
+    public static AccountRecord getActiveAccount(Context context) {
+        if (context == null) return null;
+        List<AccountRecord> saved = getSavedAccounts(context);
+        if (saved.isEmpty()) return null;
+        try {
+            SharedPreferences sp = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
+            String activeEmail = sp.getString(KEY_ACTIVE_EMAIL, null);
+            if (activeEmail != null && !activeEmail.trim().isEmpty()) {
+                for (AccountRecord r : saved) {
+                    if (r.email != null && r.email.equalsIgnoreCase(activeEmail.trim())) {
+                        return r;
+                    }
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        return saved.get(0);
+    }
+
+    public static void setActiveAccount(Context context, String email) {
+        if (context == null) return;
+        try {
+            SharedPreferences.Editor ed = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit();
+            if (email == null || email.trim().isEmpty()) {
+                ed.remove(KEY_ACTIVE_EMAIL);
+            } else {
+                ed.putString(KEY_ACTIVE_EMAIL, email.trim());
+            }
+            ed.apply();
+        } catch (Throwable ignored) {
+        }
+    }
+
     public static void saveAccount(Context context, AccountRecord record) {
         if (context == null || record == null || record.email == null || record.masterToken == null) {
             return;
@@ -189,6 +223,7 @@ public final class MicroGGoogleAuthEngine {
             context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
                     .edit()
                     .putString(KEY_ACCOUNTS_JSON, arr.toString())
+                    .putString(KEY_ACTIVE_EMAIL, record.email.trim())
                     .apply();
         } catch (Throwable t) {
             Log.w(TAG, "saveAccount error: " + t.getMessage());
@@ -200,15 +235,21 @@ public final class MicroGGoogleAuthEngine {
         try {
             List<AccountRecord> existing = getSavedAccounts(context);
             JSONArray arr = new JSONArray();
+            String nextActive = null;
             for (AccountRecord r : existing) {
                 if (r.email != null && !r.email.equalsIgnoreCase(email)) {
                     arr.put(r.toJson());
+                    if (nextActive == null) nextActive = r.email;
                 }
             }
-            context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-                    .edit()
-                    .putString(KEY_ACCOUNTS_JSON, arr.toString())
-                    .apply();
+            SharedPreferences sp = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
+            String curActive = sp.getString(KEY_ACTIVE_EMAIL, null);
+            SharedPreferences.Editor ed = sp.edit().putString(KEY_ACCOUNTS_JSON, arr.toString());
+            if (curActive != null && curActive.equalsIgnoreCase(email)) {
+                if (nextActive != null) ed.putString(KEY_ACTIVE_EMAIL, nextActive);
+                else ed.remove(KEY_ACTIVE_EMAIL);
+            }
+            ed.apply();
         } catch (Throwable t) {
             Log.w(TAG, "removeAccount error: " + t.getMessage());
         }
