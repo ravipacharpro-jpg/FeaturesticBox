@@ -7,6 +7,7 @@ import android.content.pm.PackageManager;
 import android.os.Process;
 import android.text.TextUtils;
 import java.io.File;
+import java.nio.charset.StandardCharsets;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -39,7 +40,17 @@ public class RCore {
         mRedirectMap.put(origPath, redirectPath);
         File redirectFile = new File(redirectPath);
         if (!redirectFile.exists()) {
-            FileUtils.mkdirs(redirectPath);
+            // Never call mkdirs(redirectPath) on file targets such as /proc/.../cmdline or .apk/.so/.conf!
+            if (origPath.endsWith("/cmdline") || redirectPath.endsWith("/cmdline")
+                    || origPath.endsWith(".apk") || redirectPath.endsWith(".apk")
+                    || origPath.endsWith(".so") || redirectPath.endsWith(".so")) {
+                File parent = redirectFile.getParentFile();
+                if (parent != null && !parent.exists()) {
+                    FileUtils.mkdirs(parent);
+                }
+            } else {
+                FileUtils.mkdirs(redirectPath);
+            }
         }
         RNative.addIORule(origPath, redirectPath);
     }
@@ -62,15 +73,24 @@ public class RCore {
                 || path.contains("/files/user_de/")) {
             return path;
         }
-        if (path.startsWith("/proc/") && path.endsWith("/cmdline") && !path.startsWith("/proc/self/")) {
+        if (path.startsWith("/proc/") && path.endsWith("/cmdline")) {
+            // VirtualRuntime.setupRuntime already sets Process.setArgV0(processName),
+            // so the real kernel /proc/self/cmdline and /proc/<myPid>/cmdline already
+            // contain the guest process name. Only redirect /proc/<otherPid>/cmdline
+            // when a valid non-empty regular file exists for that PID.
+            String myPidCmd = "/proc/" + Process.myPid() + "/cmdline";
+            if ("/proc/self/cmdline".equals(path) || myPidCmd.equals(path)) {
+                return path;
+            }
             int secondSlash = path.indexOf('/', 6);
             if (secondSlash > 6) {
                 String pidSegment = path.substring(6, secondSlash);
                 File fakeCmd = new File(BEnvironment.getProcDir(), pidSegment + "/cmdline");
-                if (fakeCmd.isFile()) {
+                if (fakeCmd.isFile() && fakeCmd.length() > 0) {
                     return fakeCmd.getAbsolutePath();
                 }
             }
+            return path;
         }
         String search = sBlackTree.search(path);
         if (!TextUtils.isEmpty(search))
@@ -231,22 +251,49 @@ public class RCore {
         rule.put("/data/adb/modules", "/data/adb/modules-fake");
     }
 
+    private static void ensureCmdlineFile(File cmdlineFile, byte[] procBytes) {
+        if (cmdlineFile == null || procBytes == null) return;
+        try {
+            if (cmdlineFile.isDirectory()) {
+                FileUtils.deleteDir(cmdlineFile);
+            }
+            File parent = cmdlineFile.getParentFile();
+            if (parent != null && !parent.exists()) {
+                FileUtils.mkdirs(parent);
+            }
+            if (!cmdlineFile.isFile() || cmdlineFile.length() == 0) {
+                FileUtils.writeToFile(procBytes, cmdlineFile);
+            }
+        } catch (Throwable ignored) {
+        }
+    }
+
     private void proc(Map<String, String> rule) {
         int appPid = BActivityThread.getAppPid();
         int pid = Process.myPid();
-        String selfProc = "/proc/self/";
-        String proc = "/proc/" + pid + "/";
+        String procName = BActivityThread.getAppProcessName();
+        if (TextUtils.isEmpty(procName)) {
+            procName = BActivityThread.getAppPackageName();
+        }
+        if (!TextUtils.isEmpty(procName)) {
+            byte[] procBytes = (procName + "\0").getBytes(StandardCharsets.UTF_8);
+            ensureCmdlineFile(new File(BEnvironment.getProcDir(appPid), "cmdline"), procBytes);
+            ensureCmdlineFile(new File(BEnvironment.getProcDir(pid), "cmdline"), procBytes);
+        }
 
-        String cmdline = new File(BEnvironment.getProcDir(appPid), "cmdline").getAbsolutePath();
-        rule.put(proc + "cmdline", cmdline);
-        rule.put(selfProc + "cmdline", cmdline);
+        // Do NOT redirect /proc/self/cmdline or /proc/<myPid>/cmdline because
+        // VirtualRuntime.setupRuntime already called Process.setArgV0(processName),
+        // so the kernel /proc/self/cmdline and /proc/<myPid>/cmdline are already
+        // clean and redirecting them can fail with ENOENT if BProcessManagerService
+        // cleans /files/proc. Only redirect other virtual PIDs if their fake cmdline file exists.
         File procRoot = BEnvironment.getProcDir();
         File[] procDirs = procRoot != null ? procRoot.listFiles() : null;
         if (procDirs != null) {
+            String myPidStr = String.valueOf(pid);
             for (File dir : procDirs) {
-                if (dir != null && dir.isDirectory()) {
+                if (dir != null && dir.isDirectory() && !myPidStr.equals(dir.getName())) {
                     File subCmd = new File(dir, "cmdline");
-                    if (subCmd.isFile()) {
+                    if (subCmd.isFile() && subCmd.length() > 0) {
                         rule.put("/proc/" + dir.getName() + "/cmdline", subCmd.getAbsolutePath());
                     }
                 }

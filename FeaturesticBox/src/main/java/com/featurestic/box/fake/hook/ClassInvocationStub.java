@@ -6,7 +6,9 @@ import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 import com.featurestic.box.utils.MethodParameterUtils;
@@ -96,6 +98,43 @@ public abstract class ClassInvocationStub implements InvocationHandler, IInjectH
         mMethodHookMap.put(name, methodHook);
     }
 
+    public static Throwable sanitizeStackTrace(Throwable t) {
+        if (t == null) return null;
+        try {
+            Throwable cur = t;
+            int depth = 0;
+            while (cur != null && depth < 8) {
+                StackTraceElement[] orig = cur.getStackTrace();
+                if (orig != null && orig.length > 0) {
+                    List<StackTraceElement> cleaned = new ArrayList<>(orig.length);
+                    boolean modified = false;
+                    for (StackTraceElement el : orig) {
+                        if (el == null) continue;
+                        String cls = el.getClassName();
+                        if (cls != null && (cls.startsWith("com.featurestic.")
+                                || cls.startsWith("top.niunaijun.")
+                                || cls.startsWith("com.vcore.")
+                                || cls.startsWith("net_62v.")
+                                || cls.startsWith("black.")
+                                || cls.startsWith("$Proxy")
+                                || cls.startsWith("java.lang.reflect.Proxy"))) {
+                            modified = true;
+                            continue;
+                        }
+                        cleaned.add(el);
+                    }
+                    if (modified) {
+                        cur.setStackTrace(cleaned.toArray(new StackTraceElement[0]));
+                    }
+                }
+                cur = cur.getCause();
+                depth++;
+            }
+        } catch (Throwable ignored) {
+        }
+        return t;
+    }
+
     @Override
     public Object invoke(Object proxy, Method method, Object[] args) throws Throwable {
         MethodHook methodHook = mMethodHookMap.get(method.getName());
@@ -103,9 +142,9 @@ public abstract class ClassInvocationStub implements InvocationHandler, IInjectH
             try {
                 return method.invoke(mBase, args);
             } catch (InvocationTargetException e) {
-                throw e.getTargetException() != null ? e.getTargetException() : e;
+                throw sanitizeStackTrace(e.getTargetException() != null ? e.getTargetException() : e);
             } catch (Throwable e) {
-                throw e.getCause() != null ? e.getCause() : e;
+                throw sanitizeStackTrace(e.getCause() != null ? e.getCause() : e);
             }
         }
 
@@ -118,7 +157,9 @@ public abstract class ClassInvocationStub implements InvocationHandler, IInjectH
             result = methodHook.afterHook(result);
             return result;
         } catch (InvocationTargetException e) {
-            throw e.getTargetException() != null ? e.getTargetException() : e;
+            throw sanitizeStackTrace(e.getTargetException() != null ? e.getTargetException() : e);
+        } catch (Throwable e) {
+            throw sanitizeStackTrace(e);
         }
     }
 }

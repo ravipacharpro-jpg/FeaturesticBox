@@ -10,11 +10,13 @@
 #include <Hook/DexFileHook.h>
 #include <Hook/RuntimeHook.h>
 #include <Hook/LinuxHook.h>
+#include <Hook/And64InlineHook/And64InlineHook.hpp>
 #include "SdkIdentityGuard.h"
 #include <algorithm>
 #include <atomic>
 #include <mutex>
 #include <cstdint>
+#include <cstdlib>
 #include <string>
 #include <fstream>
 #include <dirent.h>
@@ -22,19 +24,426 @@
 #include <cstring>
 #include <signal.h>
 #include <sys/mman.h>
+#include <sys/prctl.h>
+#include <time.h>
 #include <elf.h>
+#include <link.h>
 #include <dlfcn.h>
 #include <unwind.h>
 
 namespace {
-static struct sigaction sOldSigsegvAction;
-static struct sigaction sOldSigbusAction;
-static struct sigaction sOldSigabrtAction;
+static struct sigaction sOldSigsegvAction{};
+static struct sigaction sOldSigbusAction{};
+static struct sigaction sOldSigabrtAction{};
 static bool sSignalGuardInstalled = false;
+static std::atomic<int> sGameLibLoadedCount{0};
 
 static std::atomic<int> sCachedHostUid{-1};
 static std::atomic<int> sCachedCallingBUid{-1};
 static std::atomic<int> sCachedAppMode{0}; // 0 = normal virtual app, 1 = gms (ROOT_UID), 2 = webview (myUid)
+
+// ============================================================================
+// Jemalloc Double-Free / Invalid-Free Guard & Android RefBase::decStrong Guard
+// ============================================================================
+// On Android 16 (API 36) non-root devices using Bionic jemalloc (4KB pages,
+// 2MB arena chunks aligned to 0x200000), a concurrent teardown or ACE punishment
+// at ~1.2s after AndroidThunkJava_GetTransmissionRawJsonContent passes an
+// already-freed 5-page (20KB, 0x5000-byte) extent (mapbits: 0x5ff0, where
+// bit 0 CHUNK_MAP_ALLOCATED == 0) to free() on one background thread while
+// another background thread simultaneously calls RefBase::decStrong() on an
+// object whose strong count is already 0 (or whose page is already freed).
+//
+// Calibrating the exact jemalloc chunk map_bits offset at startup lets us check
+// mapbits in 3 instructions before je_free or RefBase::decStrong can call abort()!
+static std::recursive_mutex sHeapSafetyMutex;
+static void (*sOrigFree)(void *) = nullptr;
+static void (*sOrigRefBaseDecStrong)(void *, const void *) = nullptr;
+static void (*sOrigWeakrefDecWeak)(void *, const void *) = nullptr;
+
+#if defined(__LP64__)
+static int sJemallocMapbitsBaseIdx = -1;
+static bool sJemallocCalibrated = false;
+static std::atomic<int> sSuppressedFreeCount{0};
+static std::atomic<int> sSuppressedRefBaseCount{0};
+
+static inline uintptr_t untagPtr(const void *p) {
+    return reinterpret_cast<uintptr_t>(p) & UINT64_C(0x00FFFFFFFFFFFFFF);
+}
+
+static bool isPageMappedSafe(uintptr_t addr) {
+    if (addr < 0x10000ULL || addr >= UINT64_C(0x0001000000000000)) {
+        return false;
+    }
+    uintptr_t pageBase = addr & ~uintptr_t(0xFFF);
+    unsigned char vec = 0;
+    return mincore(reinterpret_cast<void *>(pageBase), 4096, &vec) == 0;
+}
+
+static void calibrateJemallocChunkLayout() {
+    if (sJemallocCalibrated) return;
+    // Allocate a 5-page (0x5000 = 20480 bytes) large extent and a 6-page (0x6000 = 24576 bytes) large extent.
+    // In Bionic jemalloc (4KB page, 2MB chunk), a 5-page allocated large extent has mapbits:
+    //   size (0x5000) | BININD_INVALID (0xff0) | CHUNK_MAP_LARGE (0x2) | CHUNK_MAP_ALLOCATED (0x1) = 0x5ff3.
+    // A 6-page allocated large extent has mapbits = 0x6ff3.
+    void *p5 = malloc(5 * 4096);
+    void *p6 = malloc(6 * 4096);
+    if (p5 != nullptr && p6 != nullptr) {
+        uintptr_t u5 = untagPtr(p5);
+        uintptr_t u6 = untagPtr(p6);
+        uintptr_t chunk5 = u5 & ~uintptr_t(0x1FFFFF);
+        uintptr_t chunk6 = u6 & ~uintptr_t(0x1FFFFF);
+        size_t pageind5 = (u5 - chunk5) >> 12;
+        size_t pageind6 = (u6 - chunk6) >> 12;
+        if (pageind5 >= 1 && pageind5 < 512 && pageind6 >= 1 && pageind6 < 512
+                && isPageMappedSafe(chunk5) && isPageMappedSafe(chunk6)) {
+            const auto *words5 = reinterpret_cast<const size_t *>(chunk5);
+            const auto *words6 = reinterpret_cast<const size_t *>(chunk6);
+            for (int k = 0; k < 512; ++k) {
+                if ((words5[k] & 0xFFF3ULL) == 0x5FF3ULL) {
+                    int candidateBase = k - static_cast<int>(pageind5);
+                    int idx6 = candidateBase + static_cast<int>(pageind6);
+                    if (idx6 >= 0 && idx6 < 512 && (words6[idx6] & 0xFFF3ULL) == 0x6FF3ULL) {
+                        sJemallocMapbitsBaseIdx = candidateBase;
+                        sJemallocCalibrated = true;
+                        ALOGD("JemallocGuard calibrated: mapbitsBaseIdx=%d (pageind5=%zu, pageind6=%zu)",
+                              sJemallocMapbitsBaseIdx, pageind5, pageind6);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    if (p5 != nullptr) free(p5);
+    if (p6 != nullptr) free(p6);
+}
+
+// Returns true if ptr definitely resides in a jemalloc arena chunk page whose
+// mapbits indicate it is UNALLOCATED ((mapbits & 1) == 0, e.g. mapbits == 0x5ff0)
+// or is an invalid interior pointer into a large allocation.
+static bool isJemallocPtrInvalidOrUnallocated(uintptr_t uptr, size_t *outMapbits = nullptr) {
+    if (!sJemallocCalibrated || sJemallocMapbitsBaseIdx < -64 || sJemallocMapbitsBaseIdx > 64) {
+        return false;
+    }
+    uintptr_t chunk = uptr & ~uintptr_t(0x1FFFFF);
+    size_t pageind = (uptr - chunk) >> 12;
+    // In 4KB-page Bionic jemalloc, pages 0..12 (0x0000..0xcfff) are the chunk header (map_bias = 13).
+    if (pageind < 13 || pageind >= 512) {
+        return false;
+    }
+    int wordIdx = sJemallocMapbitsBaseIdx + static_cast<int>(pageind);
+    if (wordIdx < 0 || wordIdx >= 512) {
+        return false;
+    }
+    if (!isPageMappedSafe(chunk)) {
+        return true;
+    }
+    const auto *chunkWords = reinterpret_cast<const volatile size_t *>(chunk);
+    size_t mapbits = chunkWords[wordIdx];
+    if (outMapbits != nullptr) {
+        *outMapbits = mapbits;
+    }
+    // Sanity check that chunk header looks like a genuine jemalloc arena chunk:
+    // chunkWords[0] is arena_t* (a valid mapped pointer in user space).
+    uintptr_t arenaPtr = untagPtr(reinterpret_cast<const void *>(chunkWords[0]));
+    if (arenaPtr < 0x10000ULL || arenaPtr >= UINT64_C(0x0001000000000000) || (arenaPtr & 0x7ULL) != 0) {
+        return false;
+    }
+    // 1. CHUNK_MAP_ALLOCATED (bit 0) == 0 -> value not allocated (e.g. mapbits == 0x5ff0)!
+    if ((mapbits & 0x1ULL) == 0) {
+        return true;
+    }
+    // 2. CHUNK_MAP_LARGE (bit 1) != 0 -> large allocation MUST be 4KB page-aligned!
+    if ((mapbits & 0x2ULL) != 0 && (uptr & 0xFFFULL) != 0) {
+        return true;
+    }
+    // 3. Small allocation ((mapbits & 2) == 0) with BININD_INVALID (0xff) -> corrupted mapbits!
+    if ((mapbits & 0x2ULL) == 0 && ((mapbits >> 4) & 0xFFULL) == 0xFFULL) {
+        return true;
+    }
+    return false;
+}
+#endif
+
+static void safe_free(void *ptr) {
+    if (ptr == nullptr) return;
+#if defined(__LP64__)
+    uintptr_t uptr = untagPtr(ptr);
+    if (uptr < 0x10000ULL) {
+        return;
+    }
+    // Serialize page-aligned frees (all large extents like 0x5000 mapbits:5ff0 and run heads)
+    // and check jemalloc mapbits before calling libc free().
+    if ((uptr & 0xFFFULL) == 0) {
+        std::lock_guard<std::recursive_mutex> lock(sHeapSafetyMutex);
+        size_t mapbits = 0;
+        if (!isPageMappedSafe(uptr) || isJemallocPtrInvalidOrUnallocated(uptr, &mapbits)) {
+            int cnt = ++sSuppressedFreeCount;
+            if (cnt <= 16) {
+                ALOGW("JemallocGuard: suppressed invalid/double free(%p) mapbits=0x%zx (count=%d, tid=%d)",
+                      ptr, mapbits, cnt, static_cast<int>(gettid()));
+            }
+            return;
+        }
+        if (sOrigFree != nullptr) {
+            sOrigFree(ptr);
+        }
+        return;
+    } else if (sJemallocCalibrated) {
+        size_t mapbits = 0;
+        if (isJemallocPtrInvalidOrUnallocated(uptr, &mapbits)) {
+            int cnt = ++sSuppressedFreeCount;
+            if (cnt <= 16) {
+                ALOGW("JemallocGuard: suppressed unallocated small free(%p) mapbits=0x%zx (count=%d, tid=%d)",
+                      ptr, mapbits, cnt, static_cast<int>(gettid()));
+            }
+            return;
+        }
+    }
+#endif
+    if (sOrigFree != nullptr) {
+        sOrigFree(ptr);
+    }
+}
+
+static void safe_delete_sized(void *ptr, size_t /*size*/) {
+    safe_free(ptr);
+}
+
+static void safe_RefBase_decStrong(void *self, const void *id) {
+    if (self == nullptr || sOrigRefBaseDecStrong == nullptr) return;
+#if defined(__LP64__)
+    uintptr_t uSelf = untagPtr(self);
+    if (uSelf < 0x10000ULL || (uSelf & 0x7ULL) != 0) {
+        return;
+    }
+    std::lock_guard<std::recursive_mutex> lock(sHeapSafetyMutex);
+    if (!isPageMappedSafe(uSelf) || isJemallocPtrInvalidOrUnallocated(uSelf)) {
+        int cnt = ++sSuppressedRefBaseCount;
+        if (cnt <= 16) {
+            ALOGW("RefBaseGuard: suppressed decStrong(%p) on unallocated/unmapped object (count=%d, tid=%d)",
+                  self, cnt, static_cast<int>(gettid()));
+        }
+        return;
+    }
+    // In 64-bit Android libutils RefBase:
+    //   offset 0: vptr (8 bytes)
+    //   offset 8: weakref_impl* mRefs (8 bytes)
+    // In weakref_impl:
+    //   offset 0: std::atomic<int32_t> mStrong (4 bytes)
+    //   offset 4: std::atomic<int32_t> mWeak (4 bytes)
+    //   offset 8: RefBase* mBase (8 bytes, must equal self)
+    uintptr_t vptr = untagPtr(*reinterpret_cast<void *const *>(uSelf));
+    void *refs = *reinterpret_cast<void *const *>(uSelf + sizeof(void *));
+    uintptr_t uRefs = untagPtr(refs);
+    if (vptr < 0x10000ULL || refs == nullptr || uRefs < 0x10000ULL || (uRefs & 0x7ULL) != 0
+            || !isPageMappedSafe(uRefs) || isJemallocPtrInvalidOrUnallocated(uRefs)) {
+        int cnt = ++sSuppressedRefBaseCount;
+        if (cnt <= 16) {
+            ALOGW("RefBaseGuard: suppressed decStrong(%p) with invalid mRefs=%p (count=%d, tid=%d)",
+                  self, refs, cnt, static_cast<int>(gettid()));
+        }
+        return;
+    }
+    void *mBase = *reinterpret_cast<void *const *>(uRefs + 8);
+    if (untagPtr(mBase) != uSelf) {
+        int cnt = ++sSuppressedRefBaseCount;
+        if (cnt <= 16) {
+            ALOGW("RefBaseGuard: suppressed decStrong(%p) with mismatched mBase=%p (count=%d, tid=%d)",
+                  self, mBase, cnt, static_cast<int>(gettid()));
+        }
+        return;
+    }
+    auto *strongAtomic = reinterpret_cast<std::atomic<int32_t> *>(uRefs);
+    int32_t curStrong = strongAtomic->load(std::memory_order_acquire);
+    if (curStrong < 1) {
+        int cnt = ++sSuppressedRefBaseCount;
+        if (cnt <= 16) {
+            ALOGW("RefBaseGuard: suppressed duplicate decStrong(%p) with mStrong=%d (count=%d, tid=%d)",
+                  self, curStrong, cnt, static_cast<int>(gettid()));
+        }
+        return;
+    }
+    sOrigRefBaseDecStrong(self, id);
+#else
+    sOrigRefBaseDecStrong(self, id);
+#endif
+}
+
+static void safe_weakref_decWeak(void *refs, const void *id) {
+    if (refs == nullptr || sOrigWeakrefDecWeak == nullptr) return;
+#if defined(__LP64__)
+    uintptr_t uRefs = untagPtr(refs);
+    if (uRefs < 0x10000ULL || (uRefs & 0x7ULL) != 0) {
+        return;
+    }
+    std::lock_guard<std::recursive_mutex> lock(sHeapSafetyMutex);
+    if (!isPageMappedSafe(uRefs) || isJemallocPtrInvalidOrUnallocated(uRefs)) {
+        return;
+    }
+    auto *weakAtomic = reinterpret_cast<std::atomic<int32_t> *>(uRefs + 4);
+    int32_t curWeak = weakAtomic->load(std::memory_order_acquire);
+    if (curWeak < 1) {
+        int cnt = ++sSuppressedRefBaseCount;
+        if (cnt <= 16) {
+            ALOGW("RefBaseGuard: suppressed duplicate decWeak(%p) with mWeak=%d (count=%d, tid=%d)",
+                  refs, curWeak, cnt, static_cast<int>(gettid()));
+        }
+        return;
+    }
+    sOrigWeakrefDecWeak(refs, id);
+#else
+    sOrigWeakrefDecWeak(refs, id);
+#endif
+}
+
+#if defined(__LP64__)
+static void patchGotSlotSafe(void **slot, void *replacement) {
+    if (slot == nullptr || replacement == nullptr || *slot == replacement) return;
+    uintptr_t pageStart = reinterpret_cast<uintptr_t>(slot) & ~uintptr_t(0xFFF);
+    // Temporarily make the GOT / RELRO page writable, update the 8-byte pointer,
+    // and leave it readable+writable (standard .got.plt) without ever touching .text/--xp!
+    if (mprotect(reinterpret_cast<void *>(pageStart), 4096, PROT_READ | PROT_WRITE) == 0) {
+        *slot = replacement;
+    }
+}
+
+static void processElfRelaTable(uintptr_t baseAddr,
+                                const Elf64_Rela *rela,
+                                size_t relaCount,
+                                const Elf64_Sym *symtab,
+                                const char *strtab) {
+    if (!rela || !symtab || !strtab) return;
+    for (size_t i = 0; i < relaCount; ++i) {
+        uint32_t symIdx = ELF64_R_SYM(rela[i].r_info);
+        if (symIdx == 0) continue;
+        const char *symName = strtab + symtab[symIdx].st_name;
+        if (!symName || symName[0] == '\0') continue;
+
+        void **gotSlot = reinterpret_cast<void **>(baseAddr + rela[i].r_offset);
+        if (strcmp(symName, "free") == 0
+                || strcmp(symName, "_ZdlPv") == 0
+                || strcmp(symName, "_ZdaPv") == 0) {
+            patchGotSlotSafe(gotSlot, reinterpret_cast<void *>(safe_free));
+        } else if (strcmp(symName, "_ZdlPvm") == 0
+                || strcmp(symName, "_ZdaPvm") == 0) {
+            patchGotSlotSafe(gotSlot, reinterpret_cast<void *>(safe_delete_sized));
+        } else if (strcmp(symName, "_ZN7android7RefBase9decStrongEPKv") == 0) {
+            patchGotSlotSafe(gotSlot, reinterpret_cast<void *>(safe_RefBase_decStrong));
+        } else if (strcmp(symName, "_ZN7android7RefBase12weakref_type7decWeakEPKv") == 0) {
+            patchGotSlotSafe(gotSlot, reinterpret_cast<void *>(safe_weakref_decWeak));
+        }
+    }
+}
+
+static int gotHookPhdrCallback(struct dl_phdr_info *info, size_t /*size*/, void * /*data*/) {
+    if (!info || !info->dlpi_name || info->dlpi_name[0] == '\0' || !info->dlpi_phdr) {
+        return 0;
+    }
+    // Never patch our own library or Bionic libc/linker/art internals
+    if (strstr(info->dlpi_name, "libFeaturesticCore.so") != nullptr
+            || strstr(info->dlpi_name, "/libc.so") != nullptr
+            || strstr(info->dlpi_name, "/ld-android.so") != nullptr
+            || strstr(info->dlpi_name, "linker64") != nullptr
+            || strstr(info->dlpi_name, "/libart.so") != nullptr) {
+        return 0;
+    }
+
+    const Elf64_Dyn *dyn = nullptr;
+    for (int i = 0; i < info->dlpi_phnum; ++i) {
+        if (info->dlpi_phdr[i].p_type == PT_DYNAMIC) {
+            dyn = reinterpret_cast<const Elf64_Dyn *>(info->dlpi_addr + info->dlpi_phdr[i].p_vaddr);
+            break;
+        }
+    }
+    if (!dyn) return 0;
+
+    const Elf64_Sym *symtab = nullptr;
+    const char *strtab = nullptr;
+    const Elf64_Rela *jmprel = nullptr;
+    size_t jmprelSize = 0;
+    const Elf64_Rela *rela = nullptr;
+    size_t relaSize = 0;
+
+    for (const Elf64_Dyn *d = dyn; d->d_tag != DT_NULL; ++d) {
+        switch (d->d_tag) {
+            case DT_SYMTAB:
+                symtab = reinterpret_cast<const Elf64_Sym *>(
+                        d->d_un.d_ptr > info->dlpi_addr ? d->d_un.d_ptr : (info->dlpi_addr + d->d_un.d_ptr));
+                break;
+            case DT_STRTAB:
+                strtab = reinterpret_cast<const char *>(
+                        d->d_un.d_ptr > info->dlpi_addr ? d->d_un.d_ptr : (info->dlpi_addr + d->d_un.d_ptr));
+                break;
+            case DT_JMPREL:
+                jmprel = reinterpret_cast<const Elf64_Rela *>(
+                        d->d_un.d_ptr > info->dlpi_addr ? d->d_un.d_ptr : (info->dlpi_addr + d->d_un.d_ptr));
+                break;
+            case DT_PLTRELSZ:
+                jmprelSize = d->d_un.d_val;
+                break;
+            case DT_RELA:
+                rela = reinterpret_cast<const Elf64_Rela *>(
+                        d->d_un.d_ptr > info->dlpi_addr ? d->d_un.d_ptr : (info->dlpi_addr + d->d_un.d_ptr));
+                break;
+            case DT_RELASZ:
+                relaSize = d->d_un.d_val;
+                break;
+            default:
+                break;
+        }
+    }
+
+    if (symtab && strtab) {
+        if (jmprel && jmprelSize >= sizeof(Elf64_Rela)) {
+            processElfRelaTable(info->dlpi_addr, jmprel, jmprelSize / sizeof(Elf64_Rela), symtab, strtab);
+        }
+        if (rela && relaSize >= sizeof(Elf64_Rela)) {
+            processElfRelaTable(info->dlpi_addr, rela, relaSize / sizeof(Elf64_Rela), symtab, strtab);
+        }
+    }
+    return 0;
+}
+#endif
+
+static void installHeapAndRefBaseSafetyGuards() {
+    static bool sGuardsInitialized = false;
+    if (!sGuardsInitialized) {
+        sGuardsInitialized = true;
+        sOrigFree = reinterpret_cast<void (*)(void *)>(dlsym(RTLD_DEFAULT, "free"));
+        void *libutils = dlopen("libutils.so", RTLD_NOW | RTLD_NOLOAD);
+        if (!libutils) {
+            libutils = dlopen("libutils.so", RTLD_NOW);
+        }
+        if (libutils) {
+            void *decStrongSym = dlsym(libutils, "_ZN7android7RefBase9decStrongEPKv");
+            void *decWeakSym = dlsym(libutils, "_ZN7android7RefBase12weakref_type7decWeakEPKv");
+#if defined(__aarch64__)
+            if (decStrongSym) {
+                A64HookFunction(decStrongSym,
+                                reinterpret_cast<void *>(safe_RefBase_decStrong),
+                                reinterpret_cast<void **>(&sOrigRefBaseDecStrong));
+            }
+            if (decWeakSym) {
+                A64HookFunction(decWeakSym,
+                                reinterpret_cast<void *>(safe_weakref_decWeak),
+                                reinterpret_cast<void **>(&sOrigWeakrefDecWeak));
+            }
+#endif
+            if (!sOrigRefBaseDecStrong && decStrongSym) {
+                sOrigRefBaseDecStrong = reinterpret_cast<void (*)(void *, const void *)>(decStrongSym);
+            }
+            if (!sOrigWeakrefDecWeak && decWeakSym) {
+                sOrigWeakrefDecWeak = reinterpret_cast<void (*)(void *, const void *)>(decWeakSym);
+            }
+        }
+#if defined(__LP64__)
+        calibrateJemallocChunkLayout();
+#endif
+    }
+#if defined(__LP64__)
+    dl_iterate_phdr(gotHookPhdrCallback, nullptr);
+#endif
+}
 
 struct UnwindBacktraceState {
     int depth;
@@ -91,9 +500,13 @@ static void recordNativeCrashOffsetLog(int sig, uintptr_t faultAddr, void *ucont
     uintptr_t lrOffset = (lrInfo.dli_fbase != nullptr && lrAddr >= reinterpret_cast<uintptr_t>(lrInfo.dli_fbase))
             ? (lrAddr - reinterpret_cast<uintptr_t>(lrInfo.dli_fbase)) : lrAddr;
 
-    ALOGE("FEATURESTIC CRASH CATCHER: Signal=%d, TID=%d, Fault=0x%llX, X0=0x%llX | PC=%s+0x%llX | LR=%s+0x%llX",
+    char tname[32] = {0};
+    prctl(PR_GET_NAME, reinterpret_cast<unsigned long>(tname), 0, 0, 0);
+
+    ALOGE("FEATURESTIC CRASH CATCHER: Signal=%d, TID=%d (%s), Fault=0x%llX, X0=0x%llX | PC=%s+0x%llX | LR=%s+0x%llX",
           sig,
           static_cast<int>(gettid()),
+          tname[0] ? tname : "?",
           static_cast<unsigned long long>(faultAddr),
           static_cast<unsigned long long>(x0Addr),
           pcInfo.dli_fname ? pcInfo.dli_fname : "unknown",
@@ -105,11 +518,29 @@ static void recordNativeCrashOffsetLog(int sig, uintptr_t faultAddr, void *ucont
     _Unwind_Backtrace(crashUnwindCallback, &btState);
 }
 
+static bool isCriticalGameOrMainThread() {
+    if (gettid() == getpid()) return true;
+    char tname[32] = {0};
+    if (prctl(PR_GET_NAME, reinterpret_cast<unsigned long>(tname), 0, 0, 0) == 0 && tname[0] != '\0') {
+        if (strstr(tname, "MainThread") != nullptr
+                || strstr(tname, "GameThread") != nullptr
+                || strstr(tname, "RenderThread") != nullptr
+                || strstr(tname, "RHIThread") != nullptr
+                || strstr(tname, "Binder:") != nullptr
+                || strstr(tname, "RenderEngine") != nullptr
+                || strstr(tname, "hwui") != nullptr) {
+            return true;
+        }
+    }
+    return false;
+}
+
 static void chainPreviousSignal(int sig, siginfo_t *info, void *ucontext) {
     struct sigaction *prev = (sig == SIGSEGV) ? &sOldSigsegvAction
             : ((sig == SIGBUS) ? &sOldSigbusAction : &sOldSigabrtAction);
     if (prev->sa_flags & SA_SIGINFO) {
-        if (prev->sa_sigaction != nullptr) {
+        if (prev->sa_sigaction != nullptr
+                && reinterpret_cast<void *>(prev->sa_sigaction) != reinterpret_cast<void *>(&chainPreviousSignal)) {
             prev->sa_sigaction(sig, info, ucontext);
             return;
         }
@@ -122,25 +553,59 @@ static void chainPreviousSignal(int sig, siginfo_t *info, void *ucontext) {
 }
 
 static void passiveNativeCrashDiagnosticsHandler(int sig, siginfo_t *info, void *ucontext) {
-    // IMPORTANT: Never call mprotect(..., PROT_READ | PROT_WRITE | PROT_EXEC) on libanogs.so
-    // or libUE4.so pages when SEGV_ACCERR occurs! libanogs.so uses intentional SEGV_ACCERR
-    // traps to verify read-only/XOM page protections and signal handling; unlocking pages to
-    // rwxp corrupts libanogs.so read-only tables and triggers ACE's delayed crash punishment.
+    // 1. Always forward intentional SEGV_ACCERR probes immediately without logging spam
+    //    so libanogs.so's XOM / page-permission self-checks work transparently.
+    if (sig == SIGSEGV && info != nullptr && info->si_code == SEGV_ACCERR) {
+        chainPreviousSignal(sig, info, ucontext);
+        return;
+    }
+
     uintptr_t fAddr = (info != nullptr) ? reinterpret_cast<uintptr_t>(info->si_addr) : 0;
     recordNativeCrashOffsetLog(sig, fAddr, ucontext);
+
+    // 2. If a non-essential background worker thread (not main thread, not UE4/Render/Binder)
+    //    raises SIGABRT / SIGBUS / unmapped SIGSEGV after game libraries are loaded,
+    //    park that single faulting background thread instead of chaining to libanort.so's
+    //    SIGABRT->SIGBUS process killer.
+    if (sGameLibLoadedCount.load(std::memory_order_relaxed) > 0 && !isCriticalGameOrMainThread()) {
+        ALOGW("FEATURESTIC CRASH SHIELD: Isolating faulting background thread TID=%d on signal=%d",
+              static_cast<int>(gettid()), sig);
+        struct timespec ts{};
+        ts.tv_sec = 3600;
+        ts.tv_nsec = 0;
+        while (true) {
+            nanosleep(&ts, nullptr);
+        }
+    }
+
     chainPreviousSignal(sig, info, ucontext);
 }
 
-static void installPassiveNativeCrashDiagnostics() {
-    if (sSignalGuardInstalled) return;
-    sSignalGuardInstalled = true;
+static void installOrReassertPassiveNativeCrashDiagnostics() {
     struct sigaction sa{};
     sa.sa_sigaction = passiveNativeCrashDiagnosticsHandler;
     sigemptyset(&sa.sa_mask);
     sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
-    sigaction(SIGSEGV, &sa, &sOldSigsegvAction);
-    sigaction(SIGBUS, &sa, &sOldSigbusAction);
-    sigaction(SIGABRT, &sa, &sOldSigabrtAction);
+
+    struct sigaction prevSegv{};
+    if (sigaction(SIGSEGV, &sa, &prevSegv) == 0) {
+        if (prevSegv.sa_sigaction != passiveNativeCrashDiagnosticsHandler) {
+            sOldSigsegvAction = prevSegv;
+        }
+    }
+    struct sigaction prevBus{};
+    if (sigaction(SIGBUS, &sa, &prevBus) == 0) {
+        if (prevBus.sa_sigaction != passiveNativeCrashDiagnosticsHandler) {
+            sOldSigbusAction = prevBus;
+        }
+    }
+    struct sigaction prevAbrt{};
+    if (sigaction(SIGABRT, &sa, &prevAbrt) == 0) {
+        if (prevAbrt.sa_sigaction != passiveNativeCrashDiagnosticsHandler) {
+            sOldSigabrtAction = prevAbrt;
+        }
+    }
+    sSignalGuardInstalled = true;
 }
 }
 
@@ -374,6 +839,20 @@ JNIEnv *getEnv() {
     return env;
 }
 
+void BoxCore::onNativeLibraryLoaded(const char *libPath) {
+    if (libPath != nullptr) {
+        if (strstr(libPath, "libanort.so") != nullptr
+                || strstr(libPath, "libanogs.so") != nullptr
+                || strstr(libPath, "libhdmpve") != nullptr
+                || strstr(libPath, "libUE4.so") != nullptr
+                || strstr(libPath, "libCrashKit.so") != nullptr) {
+            sGameLibLoadedCount.fetch_add(1, std::memory_order_relaxed);
+        }
+    }
+    installHeapAndRefBaseSafetyGuards();
+    installOrReassertPassiveNativeCrashDiagnostics();
+}
+
 void BoxCore::updateUidConfig(int hostUid, int callingBUid, int appMode) {
     if (hostUid > 0) sCachedHostUid.store(hostUid, std::memory_order_relaxed);
     if (callingBUid > 0) sCachedCallingBUid.store(callingBUid, std::memory_order_relaxed);
@@ -453,6 +932,7 @@ void nativeHook(JNIEnv *env) {
     LinuxHook::init(env);
     BinderHook::init(env);
     DexFileHook::init(env);
+    installHeapAndRefBaseSafetyGuards();
 }
 
 void hideXposed(JNIEnv *env, jclass clazz) {
@@ -539,7 +1019,8 @@ void init(JNIEnv *env, jobject clazz, jint api_level) {
         sCachedCallingBUid.store(initialBUid, std::memory_order_relaxed);
     }
 
-    installPassiveNativeCrashDiagnostics();
+    installHeapAndRefBaseSafetyGuards();
+    installOrReassertPassiveNativeCrashDiagnostics();
     JniHook::InitJniHook(env, api_level);
 
     VMEnv.initialized = true;
@@ -591,10 +1072,6 @@ void enableIO(JNIEnv *env, jclass clazz) {
         ALOGE("FeaturesticAntiCrackVault: Native Launch Gate locked or signature mismatch!");
         return;
     }
-    // IMPORTANT: Do NOT call scrubFeaturesticCoreElfHeaderOnly()!
-    // Zeroing \x7fELF on a file-backed .so that is plainly visible in /proc/self/maps creates
-    // a Private_Dirty page with 00 00 00 00 at offset 0, which libanogs.so (ACE) flags as a
-    // header-erased cheat library during its t+25s module scan.
     IO::init(env);
     nativeHook(env);
 }

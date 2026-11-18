@@ -39,6 +39,7 @@ static void notifyLibraryLoadedIfNeeded(JNIEnv *env, jstring targetName) {
     // BGMI v4.7.0 (libanogs.so) verifies its --xp segments in /proc/self/maps and performs
     // an XOM self-read check ~7-8s after noticesList: []. Stripping --xp triggers ACE's
     // delayed background thread crash.
+    BoxCore::onNativeLibraryLoaded(nameC);
     void *sym = dlsym(RTLD_DEFAULT, "FeaturesticBox_OnLibraryLoaded");
     if (sym) {
         FeaturesticBoxLibLoadedCallback_t cb = reinterpret_cast<FeaturesticBoxLibLoadedCallback_t>(sym);
@@ -90,9 +91,25 @@ HOOK_JNI(jstring, nativeLoad2, JNIEnv *env, jobject obj, jstring name, jobject c
 
 void RuntimeHook::init(JNIEnv *env) {
     const char *className = "java/lang/Runtime";
-    if (BoxCore::getApiLevel() >= __ANDROID_API_Q__) {
-        JniHook::HookJniFun(env, className, "nativeLoad","(Ljava/lang/String;Ljava/lang/ClassLoader;Ljava/lang/Class;)Ljava/lang/String;",(void *) new_nativeLoad2,(void **) (&orig_nativeLoad2), true);
-    } else {
-        JniHook::HookJniFun(env, className, "nativeLoad","(Ljava/lang/String;Ljava/lang/ClassLoader;)Ljava/lang/String;",(void *) new_nativeLoad,(void **) (&orig_nativeLoad), true);
+    // On Android 11-16 (API 30-36), Runtime.nativeLoad(String, ClassLoader) is the actual
+    // native method while the 3-arg overload is a regular Java method.
+    // On Android 10 (API 29), the 3-arg overload was native. Try 2-arg first, then fallback to 3-arg.
+    bool hooked = JniHook::HookJniFun(
+        env,
+        className,
+        "nativeLoad",
+        "(Ljava/lang/String;Ljava/lang/ClassLoader;)Ljava/lang/String;",
+        (void *) new_nativeLoad,
+        (void **) (&orig_nativeLoad),
+        true);
+    if (!hooked) {
+        JniHook::HookJniFun(
+            env,
+            className,
+            "nativeLoad",
+            "(Ljava/lang/String;Ljava/lang/ClassLoader;Ljava/lang/Class;)Ljava/lang/String;",
+            (void *) new_nativeLoad2,
+            (void **) (&orig_nativeLoad2),
+            true);
     }
 }

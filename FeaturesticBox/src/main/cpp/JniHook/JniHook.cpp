@@ -124,30 +124,30 @@ bool CheckFlags(void *artMethod) {
     if (!artMethod) return false;
     char *method = static_cast<char *>(artMethod);
     if (!HasAccessFlag(method, kAccNative)) {
-        ALOGE("not native method");
         return false;
     }
     ClearFastNativeFlag(method);
     return true;
 }
 
-void JniHook::HookJniFun(JNIEnv *env, jobject java_method, void *new_fun, void **orig_fun, bool is_static) {
+bool JniHook::HookJniFun(JNIEnv *env, jobject java_method, void *new_fun, void **orig_fun, bool is_static) {
     std::string class_name = GetJavaStaticString(env, HookEnv.get_method_declaring_class_id, java_method);
     std::string method_name = GetJavaStaticString(env, HookEnv.get_method_name_id, java_method);
     std::string sign = GetJavaStaticString(env, HookEnv.get_method_desc_id, java_method);
     if (!class_name.empty() && !method_name.empty() && !sign.empty()) {
-        HookJniFun(env, class_name.c_str(), method_name.c_str(), sign.c_str(), new_fun, orig_fun, is_static);
+        return HookJniFun(env, class_name.c_str(), method_name.c_str(), sign.c_str(), new_fun, orig_fun, is_static);
     }
+    return false;
 }
 
-void JniHook::HookJniFun(JNIEnv *env, const char *class_name, const char *method_name, const char *sign, void *new_fun, void **orig_fun, bool is_static) {
+bool JniHook::HookJniFun(JNIEnv *env, const char *class_name, const char *method_name, const char *sign, void *new_fun, void **orig_fun, bool is_static) {
     if (!env || !class_name || !method_name || !sign || HookEnv.art_method_native_offset == 0) {
-        return;
+        return false;
     }
     jclass clazz = env->FindClass(class_name);
     if (!clazz) {
         env->ExceptionClear();
-        return;
+        return false;
     }
     jmethodID method = nullptr;
     if (is_static) {
@@ -158,7 +158,7 @@ void JniHook::HookJniFun(JNIEnv *env, const char *class_name, const char *method
     if (!method) {
         env->ExceptionClear();
         env->DeleteLocalRef(clazz);
-        return;
+        return false;
     }
     JNINativeMethod gMethods[] = {
             {method_name, sign, (void *) new_fun},
@@ -167,18 +167,19 @@ void JniHook::HookJniFun(JNIEnv *env, const char *class_name, const char *method
     auto artMethod = reinterpret_cast<uintptr_t *>(GetArtMethod(env, clazz, method, is_static));
     if (!artMethod || !CheckFlags(artMethod)) {
         env->DeleteLocalRef(clazz);
-        return;
+        return false;
     }
     *orig_fun = reinterpret_cast<void *>(artMethod[HookEnv.art_method_native_offset]);
     if (env->RegisterNatives(clazz, gMethods, 1) < 0) {
         env->ExceptionClear();
         env->DeleteLocalRef(clazz);
-        return;
+        return false;
     }
     if (HookEnv.api_level == __ANDROID_API_O__ || HookEnv.api_level == __ANDROID_API_O_MR1__) {
         AddAccessFlag((char *) artMethod, kAccFastNative);
     }
     env->DeleteLocalRef(clazz);
+    return true;
 }
 
 __attribute__((section (".mytext"))) JNICALL void native_offset(JNIEnv *env, jclass obj) {
@@ -318,10 +319,12 @@ void JniHook::InitJniHook(JNIEnv *env, int api_level) {
 
     jclass localMethodUtils = env->FindClass("com/featurestic/box/jnihook/MethodUtils");
     if (localMethodUtils) {
-        HookEnv.method_utils_class = (jclass) env->NewGlobalRef(localMethodUtils);
+        HookEnv.method_utils_class = reinterpret_cast<jclass>(env->NewGlobalRef(localMethodUtils));
         HookEnv.get_method_desc_id = env->GetStaticMethodID(HookEnv.method_utils_class, "getDesc", "(Ljava/lang/reflect/Method;)Ljava/lang/String;");
         HookEnv.get_method_declaring_class_id = env->GetStaticMethodID(HookEnv.method_utils_class, "getDeclaringClass", "(Ljava/lang/reflect/Method;)Ljava/lang/String;");
         HookEnv.get_method_name_id = env->GetStaticMethodID(HookEnv.method_utils_class, "getMethodName", "(Ljava/lang/reflect/Method;)Ljava/lang/String;");
         env->DeleteLocalRef(localMethodUtils);
+    } else if (env->ExceptionCheck()) {
+        env->ExceptionClear();
     }
 }
