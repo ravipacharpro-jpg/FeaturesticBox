@@ -7,7 +7,7 @@
 
 jmethodID getAbsolutePathMethodId;
 list<IO::RelocateInfo> relocate_rule;
-static std::mutex relocate_rule_mutex;
+static std::recursive_mutex relocate_rule_mutex;
 
 const char *IO::redirectPath(const char *__path) {
     if (!__path || __path[0] == '\0') return __path;

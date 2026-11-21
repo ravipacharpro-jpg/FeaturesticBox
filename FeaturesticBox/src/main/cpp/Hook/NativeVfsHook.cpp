@@ -142,6 +142,43 @@ static inline bool isProcStat(const char *path) {
     return isProcSelfOrPid(path, "stat");
 }
 
+#if defined(__aarch64__)
+static inline long raw_real_syscall(long number, long a0 = 0, long a1 = 0, long a2 = 0, long a3 = 0, long a4 = 0, long a5 = 0x5afe5afe) {
+    register long x8 __asm__("x8") = number;
+    register long x0 __asm__("x0") = a0;
+    register long x1 __asm__("x1") = a1;
+    register long x2 __asm__("x2") = a2;
+    register long x3 __asm__("x3") = a3;
+    register long x4 __asm__("x4") = a4;
+    register long x5 __asm__("x5") = a5;
+    __asm__ __volatile__(
+        "svc #0\n"
+        : "+r"(x0)
+        : "r"(x8), "r"(x1), "r"(x2), "r"(x3), "r"(x4), "r"(x5)
+        : "memory"
+    );
+    return x0;
+}
+
+static inline int raw_openat(int dirfd, const char *path, int flags, mode_t mode = 0) {
+    return static_cast<int>(raw_real_syscall(56, dirfd, reinterpret_cast<long>(path), flags, mode, 0, 0x5afe5afe));
+}
+
+static inline ssize_t raw_readlinkat(int dirfd, const char *path, char *buf, size_t bufsiz) {
+    return static_cast<ssize_t>(raw_real_syscall(78, dirfd, reinterpret_cast<long>(path), reinterpret_cast<long>(buf), bufsiz, 0, 0x5afe5afe));
+}
+#else
+static inline long raw_real_syscall(long number, long a0 = 0, long a1 = 0, long a2 = 0, long a3 = 0, long a4 = 0, long a5 = 0) {
+    return syscall(number, a0, a1, a2, a3, a4, a5);
+}
+static inline int raw_openat(int dirfd, const char *path, int flags, mode_t mode = 0) {
+    return openat(dirfd, path, flags, mode);
+}
+static inline ssize_t raw_readlinkat(int dirfd, const char *path, char *buf, size_t bufsiz) {
+    return readlinkat(dirfd, path, buf, bufsiz);
+}
+#endif
+
 static inline bool isBlockedDevPath(const char *path) {
     if (!path) return false;
     if (strstr(path, "dev/pts") != nullptr || strstr(path, "dev/ptmx") != nullptr
@@ -168,8 +205,7 @@ static inline bool isDirFdBlocked(int dirfd, const char *pathname) {
     char fdPath[64];
     snprintf(fdPath, sizeof(fdPath), "/proc/self/fd/%d", dirfd);
     char targetPath[PATH_MAX];
-    ssize_t len = sOrigReadlink ? sOrigReadlink(fdPath, targetPath, sizeof(targetPath) - 1)
-                                : readlink(fdPath, targetPath, sizeof(targetPath) - 1);
+    ssize_t len = raw_readlinkat(AT_FDCWD, fdPath, targetPath, sizeof(targetPath) - 1);
     if (len > 0) {
         targetPath[len] = '\0';
         if (isBlockedDevPath(targetPath)) {
@@ -241,12 +277,7 @@ static int createVirtualProcMapsFd() {
     if (sInVfsBypass) return -1;
     sInVfsBypass = true;
 
-    int realFd = -1;
-    if (sOrigOpenat != nullptr) {
-        realFd = sOrigOpenat(AT_FDCWD, "/proc/self/maps", O_RDONLY | O_CLOEXEC, 0);
-    } else if (sOrigOpen != nullptr) {
-        realFd = sOrigOpen("/proc/self/maps", O_RDONLY | O_CLOEXEC, 0);
-    }
+    int realFd = raw_openat(AT_FDCWD, "/proc/self/maps", O_RDONLY | O_CLOEXEC);
     if (realFd < 0) {
         sInVfsBypass = false;
         return -1;
@@ -364,12 +395,7 @@ static int createVirtualProcStatusFd() {
     if (sInVfsBypass) return -1;
     sInVfsBypass = true;
 
-    int realFd = -1;
-    if (sOrigOpenat != nullptr) {
-        realFd = sOrigOpenat(AT_FDCWD, "/proc/self/status", O_RDONLY | O_CLOEXEC, 0);
-    } else if (sOrigOpen != nullptr) {
-        realFd = sOrigOpen("/proc/self/status", O_RDONLY | O_CLOEXEC, 0);
-    }
+    int realFd = raw_openat(AT_FDCWD, "/proc/self/status", O_RDONLY | O_CLOEXEC);
     if (realFd < 0) {
         sInVfsBypass = false;
         return -1;
@@ -429,12 +455,7 @@ static int createVirtualProcStatFd() {
     if (sInVfsBypass) return -1;
     sInVfsBypass = true;
 
-    int realFd = -1;
-    if (sOrigOpenat != nullptr) {
-        realFd = sOrigOpenat(AT_FDCWD, "/proc/self/stat", O_RDONLY | O_CLOEXEC, 0);
-    } else if (sOrigOpen != nullptr) {
-        realFd = sOrigOpen("/proc/self/stat", O_RDONLY | O_CLOEXEC, 0);
-    }
+    int realFd = raw_openat(AT_FDCWD, "/proc/self/stat", O_RDONLY | O_CLOEXEC);
     if (realFd < 0) {
         sInVfsBypass = false;
         return -1;
@@ -490,12 +511,7 @@ static int createVirtualProcMountsFd() {
     if (sInVfsBypass) return -1;
     sInVfsBypass = true;
 
-    int realFd = -1;
-    if (sOrigOpenat != nullptr) {
-        realFd = sOrigOpenat(AT_FDCWD, "/proc/self/mounts", O_RDONLY | O_CLOEXEC, 0);
-    } else if (sOrigOpen != nullptr) {
-        realFd = sOrigOpen("/proc/self/mounts", O_RDONLY | O_CLOEXEC, 0);
-    }
+    int realFd = raw_openat(AT_FDCWD, "/proc/self/mounts", O_RDONLY | O_CLOEXEC);
     if (realFd < 0) {
         sInVfsBypass = false;
         return -1;
@@ -951,24 +967,6 @@ static long safe_syscall(long number, long arg1, long arg2, long arg3, long arg4
     return sOrigSyscall ? sOrigSyscall(number, arg1, arg2, arg3, arg4, arg5, arg6) : -1;
 }
 
-#if defined(__aarch64__)
-static inline long raw_real_syscall(long number, long a0 = 0, long a1 = 0, long a2 = 0, long a3 = 0, long a4 = 0, long a5 = 0x5afe5afe) {
-    register long x8 __asm__("x8") = number;
-    register long x0 __asm__("x0") = a0;
-    register long x1 __asm__("x1") = a1;
-    register long x2 __asm__("x2") = a2;
-    register long x3 __asm__("x3") = a3;
-    register long x4 __asm__("x4") = a4;
-    register long x5 __asm__("x5") = a5;
-    __asm__ __volatile__(
-        "svc #0\n"
-        : "+r"(x0)
-        : "r"(x8), "r"(x1), "r"(x2), "r"(x3), "r"(x4), "r"(x5)
-        : "memory"
-    );
-    return x0;
-}
-
 static bool isReadableUserPointer(const void *p, size_t len = 1) {
     if (!p) return false;
     uintptr_t addr = reinterpret_cast<uintptr_t>(p);
@@ -1002,9 +1000,6 @@ static void sigsys_handler(int /*sig*/, siginfo_t *info, void *ucontext) {
     long a2 = static_cast<long>(uc->uc_mcontext.regs[2]);
     long a3 = static_cast<long>(uc->uc_mcontext.regs[3]);
     long a4 = static_cast<long>(uc->uc_mcontext.regs[4]);
-
-    ALOGI("FEATURESTIC SECCOMP: Trapped raw syscall nr=%ld, pc=%p, tid=%d",
-          nr, reinterpret_cast<void *>(uc->uc_mcontext.pc), static_cast<int>(gettid()));
 
     switch (nr) {
         case 79: // __NR_newfstatat / __NR_fstatat64
