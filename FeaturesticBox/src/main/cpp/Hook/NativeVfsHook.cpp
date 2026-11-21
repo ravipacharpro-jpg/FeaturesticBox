@@ -967,6 +967,7 @@ static long safe_syscall(long number, long arg1, long arg2, long arg3, long arg4
     return sOrigSyscall ? sOrigSyscall(number, arg1, arg2, arg3, arg4, arg5, arg6) : -1;
 }
 
+#if defined(__aarch64__)
 static bool isReadableUserPointer(const void *p, size_t len = 1) {
     if (!p) return false;
     uintptr_t addr = reinterpret_cast<uintptr_t>(p);
@@ -1172,6 +1173,11 @@ static bool installSeccompVfsFilter() {
     ALOGI("NativeVfsHook: SECCOMP-BPF Raw Syscall Trap successfully active");
     return true;
 }
+#else
+static bool installSeccompVfsFilter() {
+    return false;
+}
+#endif
 
 } // anonymous namespace
 
