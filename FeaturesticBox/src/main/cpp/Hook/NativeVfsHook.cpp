@@ -154,6 +154,11 @@ static inline bool isBlockedDevPath(const char *path) {
     if (strstr(path, "qemu") != nullptr || strstr(path, "goldfish") != nullptr || strstr(path, "vport") != nullptr) {
         return true;
     }
+    if (strstr(path, "/bin/su") != nullptr || strstr(path, "/xbin/su") != nullptr
+            || strstr(path, "/sbin/su") != nullptr || strstr(path, "magisk") != nullptr
+            || strstr(path, "daemonsu") != nullptr) {
+        return true;
+    }
     return false;
 }
 
@@ -1013,44 +1018,36 @@ static void sigsys_handler(int /*sig*/, siginfo_t *info, void *ucontext) {
                 if (isBlockedDevPath(pathname) || isDirFdBlocked(static_cast<int>(a0), pathname)) {
                     // Suppress kernel SELinux audit denial completely
                     uc->uc_mcontext.regs[0] = static_cast<unsigned long>(-ENOENT);
-                    uc->uc_mcontext.pc += 4;
                     return;
                 }
                 if (nr == 56) {
                     if (isProcMaps(pathname)) {
                         int fd = createVirtualProcMapsFd();
                         uc->uc_mcontext.regs[0] = static_cast<unsigned long>((fd >= 0) ? fd : -ENOENT);
-                        uc->uc_mcontext.pc += 4;
                         return;
                     } else if (isProcCmdline(pathname)) {
                         int fd = createVirtualProcCmdlineFd();
                         uc->uc_mcontext.regs[0] = static_cast<unsigned long>((fd >= 0) ? fd : -ENOENT);
-                        uc->uc_mcontext.pc += 4;
                         return;
                     } else if (isProcStatus(pathname)) {
                         int fd = createVirtualProcStatusFd();
                         uc->uc_mcontext.regs[0] = static_cast<unsigned long>((fd >= 0) ? fd : -ENOENT);
-                        uc->uc_mcontext.pc += 4;
                         return;
                     } else if (isProcComm(pathname)) {
                         int fd = createVirtualProcCommFd();
                         uc->uc_mcontext.regs[0] = static_cast<unsigned long>((fd >= 0) ? fd : -ENOENT);
-                        uc->uc_mcontext.pc += 4;
                         return;
                     } else if (isProcStat(pathname)) {
                         int fd = createVirtualProcStatFd();
                         uc->uc_mcontext.regs[0] = static_cast<unsigned long>((fd >= 0) ? fd : -ENOENT);
-                        uc->uc_mcontext.pc += 4;
                         return;
                     } else if (isProcNetTcp(pathname)) {
                         int fd = createVirtualProcNetTcpFd();
                         uc->uc_mcontext.regs[0] = static_cast<unsigned long>((fd >= 0) ? fd : -ENOENT);
-                        uc->uc_mcontext.pc += 4;
                         return;
                     } else if (isProcMounts(pathname)) {
                         int fd = createVirtualProcMountsFd();
                         uc->uc_mcontext.regs[0] = static_cast<unsigned long>((fd >= 0) ? fd : -ENOENT);
-                        uc->uc_mcontext.pc += 4;
                         return;
                     }
                 }
@@ -1059,7 +1056,6 @@ static void sigsys_handler(int /*sig*/, siginfo_t *info, void *ucontext) {
             long realA1 = (redirected != nullptr) ? reinterpret_cast<long>(redirected) : a1;
             long res = raw_real_syscall(nr, a0, realA1, a2, a3, a4, 0x5afe5afe);
             uc->uc_mcontext.regs[0] = static_cast<unsigned long>(res);
-            uc->uc_mcontext.pc += 4;
             return;
         }
 
@@ -1090,7 +1086,6 @@ static void sigsys_handler(int /*sig*/, siginfo_t *info, void *ucontext) {
                     ALOGW("FEATURESTIC SECCOMP: Suppressed raw suicide signal %d from worker thread (tid=%d, name=%s)",
                           sigVal, static_cast<int>(gettid()), tname[0] ? tname : "?");
                     uc->uc_mcontext.regs[0] = 0;
-                    uc->uc_mcontext.pc += 4;
                     return;
                 }
             }
@@ -1103,21 +1098,23 @@ static void sigsys_handler(int /*sig*/, siginfo_t *info, void *ucontext) {
 
     long res = raw_real_syscall(nr, a0, a1, a2, a3, a4, 0x5afe5afe);
     uc->uc_mcontext.regs[0] = static_cast<unsigned long>(res);
-    uc->uc_mcontext.pc += 4;
 }
 
 static bool installSeccompVfsFilter() {
+    static bool sFilterInstalled = false;
+    if (sFilterInstalled) {
+        return true;
+    }
+
     static const uint32_t kMagicCanary = 0x5afe5afe;
 
     struct sigaction sa{};
     sa.sa_sigaction = sigsys_handler;
     sigemptyset(&sa.sa_mask);
     sa.sa_flags = SA_SIGINFO;
-    if (syscall(__NR_rt_sigaction, SIGSYS, &sa, nullptr, sizeof(sigset_t)) != 0) {
-        if (sigaction(SIGSYS, &sa, nullptr) != 0) {
-            ALOGE("NativeVfsHook: Failed to install SIGSYS handler: %s", strerror(errno));
-            return false;
-        }
+    if (sigaction(SIGSYS, &sa, nullptr) != 0) {
+        ALOGE("NativeVfsHook: Failed to install SIGSYS handler: %s", strerror(errno));
+        return false;
     }
 
     struct sock_filter filter[] = {
@@ -1176,6 +1173,7 @@ static bool installSeccompVfsFilter() {
         return false;
     }
 
+    sFilterInstalled = true;
     ALOGI("NativeVfsHook: SECCOMP-BPF Raw Syscall Trap successfully active");
     return true;
 }
