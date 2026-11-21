@@ -69,56 +69,66 @@ public class IStorageManagerProxy extends BinderInvocationStub {
 
     @ProxyMethod("getVolumeList")
     public static class GetVolumeList extends MethodHook {
+        private static final ThreadLocal<Boolean> sInGetVolumeList = new ThreadLocal<>();
+
         @Override
         protected Object hook(Object who, Method method, Object[] args) throws Throwable {
-            Object[] callArgs = args != null ? args.clone() : null;
-            if (callArgs != null) {
-                if (callArgs.length >= 2 && callArgs[0] instanceof Integer && callArgs[1] instanceof String) {
-                    // Android 13-16 (API 33+): getVolumeList(int userId, String callingPackage, int flags)
-                    // Android 6-12 (API 23-32): getVolumeList(int uid, String packageName, int flags)
-                    callArgs[0] = Build.VERSION.SDK_INT >= 33
-                            ? FeaturesticBoxCore.getHostUserId()
-                            : FeaturesticBoxCore.getHostUid();
-                    callArgs[1] = FeaturesticBoxCore.getHostPkg();
-                } else {
-                    MethodParameterUtils.replaceAllAppPkg(callArgs);
-                    MethodParameterUtils.replaceFirstUid(callArgs);
-                }
+            if (Boolean.TRUE.equals(sInGetVolumeList.get())) {
+                return method.invoke(who, args);
             }
-            Object raw;
+            sInGetVolumeList.set(Boolean.TRUE);
             try {
-                raw = method.invoke(who, callArgs);
-            } catch (InvocationTargetException e) {
-                // Fallback: try opposite first-arg convention (uid vs userId) if OEM signature differs
-                if (callArgs != null && callArgs.length >= 2 && callArgs[0] instanceof Integer) {
-                    callArgs[0] = Build.VERSION.SDK_INT >= 33
-                            ? FeaturesticBoxCore.getHostUid()
-                            : FeaturesticBoxCore.getHostUserId();
-                    raw = method.invoke(who, callArgs);
-                } else {
-                    throw e.getTargetException() != null ? e.getTargetException() : e;
-                }
-            }
-            if (raw instanceof StorageVolume[]) {
-                StorageVolume[] volumes = (StorageVolume[]) raw;
-                File virtualExt = BEnvironment.getExternalStorageDirectory();
-                FileUtils.mkdirs(virtualExt);
-                for (StorageVolume volume : volumes) {
-                    if (volume == null) continue;
-                    try {
-                        BRStorageVolume.get(volume)._set_mPath(virtualExt);
-                    } catch (Throwable ignored) {
+                Object[] callArgs = args != null ? args.clone() : null;
+                if (callArgs != null) {
+                    if (callArgs.length >= 2 && callArgs[0] instanceof Integer && callArgs[1] instanceof String) {
+                        // Android 13-16 (API 33+): getVolumeList(int userId, String callingPackage, int flags)
+                        // Android 6-12 (API 23-32): getVolumeList(int uid, String packageName, int flags)
+                        callArgs[0] = Build.VERSION.SDK_INT >= 33
+                                ? FeaturesticBoxCore.getHostUserId()
+                                : FeaturesticBoxCore.getHostUid();
+                        callArgs[1] = FeaturesticBoxCore.getHostPkg();
+                    } else {
+                        MethodParameterUtils.replaceAllAppPkg(callArgs);
+                        MethodParameterUtils.replaceFirstUid(callArgs);
                     }
-                    if (BuildCompat.isPie()) {
+                }
+                Object raw;
+                try {
+                    raw = method.invoke(who, callArgs);
+                } catch (InvocationTargetException e) {
+                    // Fallback: try opposite first-arg convention (uid vs userId) if OEM signature differs
+                    if (callArgs != null && callArgs.length >= 2 && callArgs[0] instanceof Integer) {
+                        callArgs[0] = Build.VERSION.SDK_INT >= 33
+                                ? FeaturesticBoxCore.getHostUid()
+                                : FeaturesticBoxCore.getHostUserId();
+                        raw = method.invoke(who, callArgs);
+                    } else {
+                        throw e.getTargetException() != null ? e.getTargetException() : e;
+                    }
+                }
+                if (raw instanceof StorageVolume[]) {
+                    StorageVolume[] volumes = (StorageVolume[]) raw;
+                    File virtualExt = BEnvironment.getExternalStorageDirectory();
+                    FileUtils.mkdirs(virtualExt);
+                    for (StorageVolume volume : volumes) {
+                        if (volume == null) continue;
                         try {
-                            BRStorageVolume.get(volume)._set_mInternalPath(virtualExt);
+                            BRStorageVolume.get(volume)._set_mPath(virtualExt);
                         } catch (Throwable ignored) {
                         }
+                        if (BuildCompat.isPie()) {
+                            try {
+                                BRStorageVolume.get(volume)._set_mInternalPath(virtualExt);
+                            } catch (Throwable ignored) {
+                            }
+                        }
                     }
+                    return volumes;
                 }
-                return volumes;
+                return raw;
+            } finally {
+                sInGetVolumeList.remove();
             }
-            return raw;
         }
     }
 

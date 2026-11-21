@@ -196,6 +196,13 @@ static int createAnonymousMemFd(const char *name) {
     int fd = static_cast<int>(syscall(__NR_memfd_create, name ? name : "vproc", MFD_CLOEXEC));
     if (fd >= 0) return fd;
 #endif
+    char tmpPath[128];
+    snprintf(tmpPath, sizeof(tmpPath), "/data/data/com.featurestic.loader/cache/.%s_XXXXXX", name ? name : "vm");
+    int tmpFd = mkstemp(tmpPath);
+    if (tmpFd >= 0) {
+        unlink(tmpPath);
+        return tmpFd;
+    }
     return -1;
 }
 
@@ -203,8 +210,10 @@ static bool shouldFilterMapsLine(const char *line) {
     if (!line) return false;
     if (strstr(line, "libFeaturesticCore.so") != nullptr) return true;
     if (strstr(line, "libFeaturesticPlugin.so") != nullptr) return true;
+    if (strstr(line, "libboxcore.so") != nullptr) return true;
     if (strstr(line, "libloader.so") != nullptr) return true;
     if (strstr(line, "FeaturesticBox") != nullptr) return true;
+    if (strstr(line, "featurestic") != nullptr) return true;
     if (strstr(line, "libdobby.so") != nullptr) return true;
     if (strstr(line, "libSandHook.so") != nullptr) return true;
     if (strstr(line, "sandhook") != nullptr) return true;
@@ -214,6 +223,12 @@ static bool shouldFilterMapsLine(const char *line) {
     if (strstr(line, "edxp") != nullptr) return true;
     if (strstr(line, "lspd") != nullptr) return true;
     if (strstr(line, "magisk") != nullptr) return true;
+    if (strstr(line, "zygisk") != nullptr) return true;
+    if (strstr(line, "shamiko") != nullptr) return true;
+    if (strstr(line, "riru") != nullptr) return true;
+    if (strstr(line, "kernelsu") != nullptr) return true;
+    if (strstr(line, "apatch") != nullptr) return true;
+    if (strstr(line, "dev/pts") != nullptr) return true;
     return false;
 }
 

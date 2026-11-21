@@ -167,29 +167,41 @@ public class BEnvironment {
         return new File(getAppDir(packageName), "package.conf");
     }
 
+    private static volatile File sExternalStorageDir;
+
     public static File getExternalStorageDirectory() {
-        File legacySdCard = new File(resolveExternalVBoxRoot(), "SdCard");
-        try {
-            if (legacySdCard.isDirectory() && legacySdCard.canWrite()) {
-                return legacySdCard;
-            }
-            if (legacySdCard.mkdirs() && legacySdCard.canWrite()) {
-                return legacySdCard;
-            }
-        } catch (Throwable ignored) {
+        if (sExternalStorageDir != null) {
+            return sExternalStorageDir;
         }
-        try {
-            Context ctx = FeaturesticBoxCore.getContext();
-            if (ctx != null) {
-                File appExt = ctx.getExternalFilesDir("SdCard");
-                if (appExt != null) {
+        synchronized (BEnvironment.class) {
+            if (sExternalStorageDir != null) {
+                return sExternalStorageDir;
+            }
+            File legacySdCard = new File(resolveExternalVBoxRoot(), "SdCard");
+            try {
+                if (legacySdCard.isDirectory() && legacySdCard.canWrite()) {
+                    sExternalStorageDir = legacySdCard;
+                    return legacySdCard;
+                }
+                if (legacySdCard.mkdirs() && legacySdCard.canWrite()) {
+                    sExternalStorageDir = legacySdCard;
+                    return legacySdCard;
+                }
+            } catch (Throwable ignored) {
+            }
+            try {
+                String hostPkg = FeaturesticBoxCore.getHostPkg();
+                if (hostPkg != null && !hostPkg.isEmpty()) {
+                    File appExt = new File("/storage/emulated/0/Android/data/" + hostPkg + "/files/SdCard");
                     FileUtils.mkdirs(appExt);
+                    sExternalStorageDir = appExt;
                     return appExt;
                 }
+            } catch (Throwable ignored) {
             }
-        } catch (Throwable ignored) {
+            sExternalStorageDir = legacySdCard;
+            return legacySdCard;
         }
-        return legacySdCard;
     }
 
     public static File getHostExternalDataDir(String packageName) {
