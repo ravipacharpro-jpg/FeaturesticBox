@@ -702,6 +702,34 @@ static void passiveNativeCrashDiagnosticsHandler(int sig, siginfo_t *info, void 
 #if defined(__aarch64__)
     if (ucontext != nullptr && (sig == SIGBUS || sig == SIGSEGV)) {
         auto *uc = reinterpret_cast<ucontext_t *>(ucontext);
+        uintptr_t currentPc = static_cast<uintptr_t>(uc->uc_mcontext.pc);
+        uintptr_t lr = static_cast<uintptr_t>(uc->uc_mcontext.regs[30]);
+
+        static thread_local uintptr_t sLastFaultPc = 0;
+        static thread_local int sRepeatFaultCount = 0;
+
+        if (currentPc == sLastFaultPc) {
+            sRepeatFaultCount++;
+        } else {
+            sLastFaultPc = currentPc;
+            sRepeatFaultCount = 1;
+        }
+
+        if (currentPc < 0x10000 || sRepeatFaultCount >= 4) {
+            // Execution jumped to null/unmapped low address or is stuck in a fault loop:
+            // Return cleanly to caller via Link Register (LR)
+            if (lr >= 0x10000) {
+                uc->uc_mcontext.pc = lr;
+                uc->uc_mcontext.regs[0] = 0;
+                sRepeatFaultCount = 0;
+                sLastFaultPc = 0;
+                ALOGW("FEATURESTIC RESCUE: Recovered from invalid PC %p (repeat=%d) -> returned to caller LR %p on tid=%d",
+                      reinterpret_cast<void *>(currentPc), sRepeatFaultCount, reinterpret_cast<void *>(lr), static_cast<int>(gettid()));
+                return;
+            }
+        }
+
+        // Standard load/store fault: advance PC past the 4-byte instruction
         uc->uc_mcontext.pc += 4;
         return;
     }
