@@ -179,6 +179,25 @@ static inline ssize_t raw_readlinkat(int dirfd, const char *path, char *buf, siz
 }
 #endif
 
+static inline bool isRootBinary(const char *path) {
+    if (!path) return false;
+    const char *lastSlash = strrchr(path, '/');
+    const char *fileName = lastSlash ? lastSlash + 1 : path;
+    if (strcmp(fileName, "su") == 0 || strcmp(fileName, "daemonsu") == 0
+            || strcmp(fileName, "supersu") == 0 || strcmp(fileName, "superuser") == 0
+            || strcmp(fileName, "busybox") == 0 || strcmp(fileName, "magisk") == 0
+            || strcmp(fileName, "magiskinit") == 0 || strcmp(fileName, "ksu") == 0
+            || strcmp(fileName, "apatch") == 0) {
+        return true;
+    }
+    if (strstr(path, "/magisk") != nullptr || strstr(path, "/kernelsu") != nullptr
+            || strstr(path, "/data/adb/ksu") != nullptr || strstr(path, "/data/adb/ap") != nullptr
+            || strstr(path, "/data/adb/magisk") != nullptr) {
+        return true;
+    }
+    return false;
+}
+
 static inline bool isBlockedDevPath(const char *path) {
     if (!path) return false;
     if (strstr(path, "dev/pts") != nullptr || strstr(path, "dev/ptmx") != nullptr
@@ -191,10 +210,7 @@ static inline bool isBlockedDevPath(const char *path) {
     if (strstr(path, "qemu") != nullptr || strstr(path, "goldfish") != nullptr || strstr(path, "vport") != nullptr) {
         return true;
     }
-    if (strstr(path, "su") != nullptr || strstr(path, "magisk") != nullptr || strstr(path, "daemonsu") != nullptr
-            || strstr(path, "supersu") != nullptr || strstr(path, "superuser") != nullptr
-            || strstr(path, "busybox") != nullptr || strstr(path, "kernelsu") != nullptr
-            || strstr(path, "ksu") != nullptr || strstr(path, "apatch") != nullptr) {
+    if (isRootBinary(path)) {
         return true;
     }
     if (strstr(path, "termux") != nullptr || strstr(path, "antigem") != nullptr
@@ -1083,17 +1099,18 @@ static void sigsys_handler(int /*sig*/, siginfo_t *info, void *ucontext) {
         }
 
         case 94: { // __NR_exit_group
-            if (!isCriticalGameOrMainThreadHelper()) {
-                char tname[32] = {0};
-                prctl(PR_GET_NAME, reinterpret_cast<unsigned long>(tname), 0, 0, 0);
-                ALOGW("FEATURESTIC SECCOMP: Suppressed raw exit_group() from worker thread (tid=%d, name=%s) -> isolating thread",
-                      static_cast<int>(gettid()), tname[0] ? tname : "?");
+            char tname[32] = {0};
+            prctl(PR_GET_NAME, reinterpret_cast<unsigned long>(tname), 0, 0, 0);
+            ALOGW("FEATURESTIC SECCOMP: Suppressed raw exit_group(%ld) from tid=%d (%s)",
+                  static_cast<long>(a0), static_cast<int>(gettid()), tname[0] ? tname : "?");
+            if (gettid() != getpid()) {
                 struct timespec ts{3600, 0};
                 while (true) {
                     nanosleep(&ts, nullptr);
                 }
             }
-            break;
+            uc->uc_mcontext.regs[0] = 0;
+            return;
         }
 
         case 129: // __NR_kill

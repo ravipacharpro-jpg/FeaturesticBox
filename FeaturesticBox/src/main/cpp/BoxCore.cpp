@@ -647,18 +647,40 @@ static int safe_raise(int sig) {
     return sOrigRaise ? sOrigRaise(sig) : -1;
 }
 
-static void safe_abort(void) {
-    if (!isCriticalGameOrMainThread()) {
-        char tname[32] = {0};
-        prctl(PR_GET_NAME, reinterpret_cast<unsigned long>(tname), 0, 0, 0);
-        ALOGW("FEATURESTIC GUARD: Suppressed abort() from worker thread (tid=%d, name=%s) -> isolating thread",
-              static_cast<int>(gettid()), tname[0] ? tname : "?");
-        struct timespec ts{3600, 0};
-        while (true) {
-            nanosleep(&ts, nullptr);
-        }
+static void (*sOrigExit)(int) = nullptr;
+static void (*sOrig_Exit)(int) = nullptr;
+
+static void safe_exit(int code) {
+    char tname[32] = {0};
+    prctl(PR_GET_NAME, reinterpret_cast<unsigned long>(tname), 0, 0, 0);
+    ALOGW("FEATURESTIC GUARD: Suppressed exit(%d) from tid=%d (name=%s)",
+          code, static_cast<int>(gettid()), tname[0] ? tname : "?");
+    struct timespec ts{3600, 0};
+    while (true) {
+        nanosleep(&ts, nullptr);
     }
-    if (sOrigAbort) sOrigAbort();
+}
+
+static void safe__exit(int code) {
+    char tname[32] = {0};
+    prctl(PR_GET_NAME, reinterpret_cast<unsigned long>(tname), 0, 0, 0);
+    ALOGW("FEATURESTIC GUARD: Suppressed _exit(%d) from tid=%d (name=%s)",
+          code, static_cast<int>(gettid()), tname[0] ? tname : "?");
+    struct timespec ts{3600, 0};
+    while (true) {
+        nanosleep(&ts, nullptr);
+    }
+}
+
+static void safe_abort(void) {
+    char tname[32] = {0};
+    prctl(PR_GET_NAME, reinterpret_cast<unsigned long>(tname), 0, 0, 0);
+    ALOGW("FEATURESTIC GUARD: Suppressed abort() from tid=%d (name=%s)",
+          static_cast<int>(gettid()), tname[0] ? tname : "?");
+    struct timespec ts{3600, 0};
+    while (true) {
+        nanosleep(&ts, nullptr);
+    }
 }
 
 static void passiveNativeCrashDiagnosticsHandler(int sig, siginfo_t *info, void *ucontext) {
@@ -671,24 +693,11 @@ static void passiveNativeCrashDiagnosticsHandler(int sig, siginfo_t *info, void 
     }
 #endif
 
-    // 1. Worker thread check FIRST:
-    // If a background worker or security thread faults (SEGV/BUS/ABRT), terminate ONLY that
-    // thread immediately via pthread_exit so it never crashes the game process.
-    if (!isCriticalGameOrMainThread()) {
-        char tname[32] = {0};
-        prctl(PR_GET_NAME, reinterpret_cast<unsigned long>(tname), 0, 0, 0);
-        ALOGW("FEATURESTIC GUARD: Suppressed signal %d (code=%d, addr=%p, pc=%p) on worker thread (tid=%d, name=%s) -> exiting thread cleanly via pthread_exit to keep game running",
-              sig, siCode, reinterpret_cast<void *>(fAddr), reinterpret_cast<void *>(pcAddr),
-              static_cast<int>(gettid()), tname[0] ? tname : "?");
-        pthread_exit(nullptr);
-        return;
-    }
-
-    // 2. Critical main/game/render threads:
-    // Intercept hardware SIGBUS or SIGSEGV on critical threads and advance PC past the faulting
-    // load/store instruction instead of suiciding the process.
-    ALOGW("FEATURESTIC RESCUE: Intercepted signal %d (code=%d, addr=%p, pc=%p) on critical thread (tid=%d)",
-          sig, siCode, reinterpret_cast<void *>(fAddr), reinterpret_cast<void *>(pcAddr), static_cast<int>(gettid()));
+    char tname[32] = {0};
+    prctl(PR_GET_NAME, reinterpret_cast<unsigned long>(tname), 0, 0, 0);
+    ALOGW("FEATURESTIC RESCUE: Intercepted signal %d (code=%d, addr=%p, pc=%p) on tid=%d (%s) -> advancing PC",
+          sig, siCode, reinterpret_cast<void *>(fAddr), reinterpret_cast<void *>(pcAddr),
+          static_cast<int>(gettid()), tname[0] ? tname : "?");
 
 #if defined(__aarch64__)
     if (ucontext != nullptr && (sig == SIGBUS || sig == SIGSEGV)) {
@@ -697,6 +706,14 @@ static void passiveNativeCrashDiagnosticsHandler(int sig, siginfo_t *info, void 
         return;
     }
 #endif
+
+    if (gettid() != getpid()) {
+        struct timespec ts{3600, 0};
+        while (true) {
+            nanosleep(&ts, nullptr);
+        }
+        return;
+    }
 
     chainPreviousSignal(sig, info, ucontext);
 }
@@ -808,6 +825,9 @@ static void installHeapAndRefBaseSafetyGuards() {
         void *tgkillSym = dlsym(RTLD_DEFAULT, "tgkill");
         void *raiseSym = dlsym(RTLD_DEFAULT, "raise");
         void *abortSym = dlsym(RTLD_DEFAULT, "abort");
+        void *exitSym = dlsym(RTLD_DEFAULT, "exit");
+        void *_exitSym = dlsym(RTLD_DEFAULT, "_exit");
+        void *_ExitSym = dlsym(RTLD_DEFAULT, "_Exit");
 #if defined(__aarch64__)
         if (freeSym) {
             A64HookFunction(freeSym,
@@ -843,6 +863,21 @@ static void installHeapAndRefBaseSafetyGuards() {
             A64HookFunction(abortSym,
                             reinterpret_cast<void *>(safe_abort),
                             reinterpret_cast<void **>(&sOrigAbort));
+        }
+        if (exitSym) {
+            A64HookFunction(exitSym,
+                            reinterpret_cast<void *>(safe_exit),
+                            reinterpret_cast<void **>(&sOrigExit));
+        }
+        if (_exitSym) {
+            A64HookFunction(_exitSym,
+                            reinterpret_cast<void *>(safe__exit),
+                            reinterpret_cast<void **>(&sOrig_Exit));
+        }
+        if (_ExitSym && _ExitSym != _exitSym) {
+            A64HookFunction(_ExitSym,
+                            reinterpret_cast<void *>(safe__exit),
+                            nullptr);
         }
 #endif
         if (!sOrigFree && freeSym) {
