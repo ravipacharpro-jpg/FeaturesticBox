@@ -333,6 +333,10 @@ static void safe_free(void *ptr) {
                 ALOGE("JemallocGuard: SUPPRESSED unallocated page free(%p) mapbits=0x%zx (count=%d, tid=%d [%s])",
                       ptr, mapbits, cnt, static_cast<int>(gettid()), tname[0] ? tname : "?");
             }
+            if (!isCriticalGameOrMainThread()) {
+                ALOGW("JemallocGuard: Terminating corrupted worker thread (tid=%d) via pthread_exit to prevent subsequent SIGBUS fault", static_cast<int>(gettid()));
+                pthread_exit(nullptr);
+            }
             return;
         }
     } else if (sJemallocCalibrated) {
@@ -343,6 +347,10 @@ static void safe_free(void *ptr) {
             if (cnt <= 32) {
                 ALOGE("JemallocGuard: SUPPRESSED unallocated small free(%p) mapbits=0x%zx (count=%d, tid=%d)",
                       ptr, mapbits, cnt, static_cast<int>(gettid()));
+            }
+            if (!isCriticalGameOrMainThread()) {
+                ALOGW("JemallocGuard: Terminating corrupted worker thread (tid=%d) via pthread_exit to prevent subsequent SIGBUS fault", static_cast<int>(gettid()));
+                pthread_exit(nullptr);
             }
             return;
         }
