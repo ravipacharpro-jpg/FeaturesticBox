@@ -740,6 +740,13 @@ static int safe_sigaction_common(int sig,
                                  const struct sigaction *act,
                                  struct sigaction *oldact,
                                  int (*origFn)(int, const struct sigaction *, struct sigaction *)) {
+    if (sig == SIGSYS) {
+        if (oldact != nullptr && origFn != nullptr) {
+            origFn(sig, nullptr, oldact);
+        }
+        // Protect SECCOMP-BPF trap handler: never allow third-party libs to strip our SIGSYS handler
+        return 0;
+    }
     if (sig == SIGSEGV || sig == SIGBUS || sig == SIGABRT) {
         struct sigaction *savedSlot = (sig == SIGSEGV) ? &sOldSigsegvAction
                 : ((sig == SIGBUS) ? &sOldSigbusAction : &sOldSigabrtAction);

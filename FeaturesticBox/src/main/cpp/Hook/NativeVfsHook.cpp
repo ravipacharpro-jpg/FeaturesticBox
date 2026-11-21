@@ -929,6 +929,9 @@ static long safe_syscall(long number, long arg1, long arg2, long arg3, long arg4
         }
         case 134: { // __NR_rt_sigaction
             int sig = static_cast<int>(arg1);
+            if (sig == SIGSYS) {
+                return 0; // Never allow overriding SECCOMP SIGSYS handler
+            }
             if (sig == SIGSEGV || sig == SIGBUS || sig == SIGABRT) {
                 const auto *act = reinterpret_cast<const struct sigaction *>(arg2);
                 if (act != nullptr && (act->sa_handler == SIG_DFL || act->sa_handler == SIG_IGN || act->sa_handler == nullptr)) {
@@ -976,15 +979,27 @@ static bool isReadableUserPointer(const void *p, size_t len = 1) {
     return true;
 }
 
-static void sigsys_handler(int /*sig*/, siginfo_t * /*info*/, void *ucontext) {
+static void sigsys_handler(int /*sig*/, siginfo_t *info, void *ucontext) {
     if (!ucontext) return;
+    struct RecursionGuard {
+        bool &flag;
+        explicit RecursionGuard(bool &f) : flag(f) { flag = true; }
+        ~RecursionGuard() { flag = false; }
+    };
+    static thread_local bool sInSigsys = false;
+    if (sInSigsys) return;
+    RecursionGuard guard(sInSigsys);
+
     auto *uc = reinterpret_cast<ucontext_t *>(ucontext);
-    long nr = static_cast<long>(uc->uc_mcontext.regs[8]);
+    long nr = (info && info->si_syscall != 0) ? info->si_syscall : static_cast<long>(uc->uc_mcontext.regs[8]);
     long a0 = static_cast<long>(uc->uc_mcontext.regs[0]);
     long a1 = static_cast<long>(uc->uc_mcontext.regs[1]);
     long a2 = static_cast<long>(uc->uc_mcontext.regs[2]);
     long a3 = static_cast<long>(uc->uc_mcontext.regs[3]);
     long a4 = static_cast<long>(uc->uc_mcontext.regs[4]);
+
+    ALOGI("FEATURESTIC SECCOMP: Trapped raw syscall nr=%ld, pc=%p, tid=%d",
+          nr, reinterpret_cast<void *>(uc->uc_mcontext.pc), static_cast<int>(gettid()));
 
     switch (nr) {
         case 79: // __NR_newfstatat / __NR_fstatat64
