@@ -1114,13 +1114,13 @@ static bool installSeccompVfsFilter() {
         // 11: jeq 78 (__NR_readlinkat) -> jt=5 (idx 17), jf=0 (idx 12)
         BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 78, 5, 0),
         // 12: jeq 94 (__NR_exit_group) -> jt=4 (idx 17), jf=0 (idx 13)
-        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 4, 0, 94),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 94, 4, 0),
         // 13: jeq 129 (__NR_kill) -> jt=3 (idx 17), jf=0 (idx 14)
-        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 3, 0, 129),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 129, 3, 0),
         // 14: jeq 130 (__NR_tkill) -> jt=2 (idx 17), jf=0 (idx 15)
-        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 2, 0, 130),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 130, 2, 0),
         // 15: jeq 131 (__NR_tgkill) -> jt=1 (idx 17), jf=0 (idx 16)
-        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 1, 0, 131),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 131, 1, 0),
         // 16: ret ALLOW
         BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
         // 17: ret TRAP
