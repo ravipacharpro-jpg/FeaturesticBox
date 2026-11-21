@@ -626,6 +626,65 @@ static void chainPreviousSignal(int sig, siginfo_t *info, void *ucontext) {
 
 static __thread int tThreadSegvAccerrCount = 0;
 
+static int (*sOrigKill)(pid_t, int) = nullptr;
+static int (*sOrigTgkill)(pid_t, pid_t, int) = nullptr;
+static int (*sOrigRaise)(int) = nullptr;
+static void (*sOrigAbort)(void) = nullptr;
+
+static int safe_kill(pid_t pid, int sig) {
+    if ((sig == SIGSEGV || sig == SIGBUS || sig == SIGABRT || sig == SIGKILL) && (pid == getpid() || pid == 0 || pid == -1)) {
+        if (!isCriticalGameOrMainThread()) {
+            char tname[32] = {0};
+            prctl(PR_GET_NAME, reinterpret_cast<unsigned long>(tname), 0, 0, 0);
+            ALOGW("FEATURESTIC GUARD: Suppressed kill(pid=%d, sig=%d) from worker thread (tid=%d, name=%s) -> exiting thread cleanly",
+                  static_cast<int>(pid), sig, static_cast<int>(gettid()), tname[0] ? tname : "?");
+            pthread_exit(nullptr);
+            return 0;
+        }
+    }
+    return sOrigKill ? sOrigKill(pid, sig) : -1;
+}
+
+static int safe_tgkill(pid_t tgid, pid_t tid, int sig) {
+    if ((sig == SIGSEGV || sig == SIGBUS || sig == SIGABRT || sig == SIGKILL) && (tgid == getpid() || tgid == 0 || tgid == -1)) {
+        if (!isCriticalGameOrMainThread()) {
+            char tname[32] = {0};
+            prctl(PR_GET_NAME, reinterpret_cast<unsigned long>(tname), 0, 0, 0);
+            ALOGW("FEATURESTIC GUARD: Suppressed tgkill(tgid=%d, tid=%d, sig=%d) from worker thread (tid=%d, name=%s) -> exiting thread cleanly",
+                  static_cast<int>(tgid), static_cast<int>(tid), sig, static_cast<int>(gettid()), tname[0] ? tname : "?");
+            pthread_exit(nullptr);
+            return 0;
+        }
+    }
+    return sOrigTgkill ? sOrigTgkill(tgid, tid, sig) : -1;
+}
+
+static int safe_raise(int sig) {
+    if (sig == SIGSEGV || sig == SIGBUS || sig == SIGABRT) {
+        if (!isCriticalGameOrMainThread()) {
+            char tname[32] = {0};
+            prctl(PR_GET_NAME, reinterpret_cast<unsigned long>(tname), 0, 0, 0);
+            ALOGW("FEATURESTIC GUARD: Suppressed raise(sig=%d) from worker thread (tid=%d, name=%s) -> exiting thread cleanly",
+                  sig, static_cast<int>(gettid()), tname[0] ? tname : "?");
+            pthread_exit(nullptr);
+            return 0;
+        }
+    }
+    return sOrigRaise ? sOrigRaise(sig) : -1;
+}
+
+static void safe_abort(void) {
+    if (!isCriticalGameOrMainThread()) {
+        char tname[32] = {0};
+        prctl(PR_GET_NAME, reinterpret_cast<unsigned long>(tname), 0, 0, 0);
+        ALOGW("FEATURESTIC GUARD: Suppressed abort() from worker thread (tid=%d, name=%s) -> exiting thread cleanly",
+              static_cast<int>(gettid()), tname[0] ? tname : "?");
+        pthread_exit(nullptr);
+        return;
+    }
+    if (sOrigAbort) sOrigAbort();
+}
+
 static void passiveNativeCrashDiagnosticsHandler(int sig, siginfo_t *info, void *ucontext) {
     int siCode = (info != nullptr) ? info->si_code : 0;
     uintptr_t fAddr = (info != nullptr) ? reinterpret_cast<uintptr_t>(info->si_addr) : 0;
@@ -636,31 +695,24 @@ static void passiveNativeCrashDiagnosticsHandler(int sig, siginfo_t *info, void 
     }
 #endif
 
-    // Always log the first 8 signals of any type (including SEGV_ACCERR) so we have
-    // full visibility in logcat.
+    // 1. Worker thread check FIRST:
+    // If a background worker or security thread faults (SEGV/BUS/ABRT), terminate ONLY that
+    // thread immediately via pthread_exit so it never crashes the game process.
+    if (!isCriticalGameOrMainThread()) {
+        char tname[32] = {0};
+        prctl(PR_GET_NAME, reinterpret_cast<unsigned long>(tname), 0, 0, 0);
+        ALOGW("FEATURESTIC GUARD: Suppressed signal %d (code=%d, addr=%p, pc=%p) on worker thread (tid=%d, name=%s) -> exiting thread cleanly via pthread_exit to keep game running",
+              sig, siCode, reinterpret_cast<void *>(fAddr), reinterpret_cast<void *>(pcAddr),
+              static_cast<int>(gettid()), tname[0] ? tname : "?");
+        pthread_exit(nullptr);
+        return;
+    }
+
+    // 2. Critical main/game/render threads only:
     static std::atomic<int> sTotalLoggedSignals{0};
     int logNum = ++sTotalLoggedSignals;
     if (logNum <= 8) {
         recordNativeCrashOffsetLog(sig, siCode, fAddr, ucontext);
-    }
-
-    // For SEGV_ACCERR on a valid mapped data/code address (where PC != faultAddr),
-    // allow the first probe on a thread to chain to libanogs.so's own SIGSEGV handler
-    // in case it is an XOM self-check. If the same thread faults repeatedly or if
-    // libanort.so converts it into SIGBUS/SIGABRT, just return gracefully instead of
-    // re-raising the signal which would kill the process.
-    if (sig == SIGSEGV && siCode == SEGV_ACCERR && pcAddr != fAddr && fAddr >= 0x10000ULL) {
-        tThreadSegvAccerrCount++;
-        if (tThreadSegvAccerrCount <= 1) {
-            chainPreviousSignal(sig, info, ucontext);
-            return;
-        }
-    }
-
-    if (!isCriticalGameOrMainThread()) {
-        ALOGW("FEATURESTIC: Signal %d (si_code=%d, addr=%p) caught on worker thread (tid=%d), exiting thread cleanly",
-              sig, siCode, reinterpret_cast<void *>(fAddr), static_cast<int>(gettid()));
-        pthread_exit(nullptr);
     }
 
     chainPreviousSignal(sig, info, ucontext);
@@ -751,6 +803,10 @@ static void installHeapAndRefBaseSafetyGuards() {
         void *freeSym = dlsym(RTLD_DEFAULT, "free");
         void *sigactionSym = dlsym(RTLD_DEFAULT, "sigaction");
         void *sigaction64Sym = dlsym(RTLD_DEFAULT, "sigaction64");
+        void *killSym = dlsym(RTLD_DEFAULT, "kill");
+        void *tgkillSym = dlsym(RTLD_DEFAULT, "tgkill");
+        void *raiseSym = dlsym(RTLD_DEFAULT, "raise");
+        void *abortSym = dlsym(RTLD_DEFAULT, "abort");
 #if defined(__aarch64__)
         if (freeSym) {
             A64HookFunction(freeSym,
@@ -767,6 +823,26 @@ static void installHeapAndRefBaseSafetyGuards() {
                             reinterpret_cast<void *>(safe_sigaction64),
                             reinterpret_cast<void **>(&sOrigSigaction64));
         }
+        if (killSym) {
+            A64HookFunction(killSym,
+                            reinterpret_cast<void *>(safe_kill),
+                            reinterpret_cast<void **>(&sOrigKill));
+        }
+        if (tgkillSym) {
+            A64HookFunction(tgkillSym,
+                            reinterpret_cast<void *>(safe_tgkill),
+                            reinterpret_cast<void **>(&sOrigTgkill));
+        }
+        if (raiseSym) {
+            A64HookFunction(raiseSym,
+                            reinterpret_cast<void *>(safe_raise),
+                            reinterpret_cast<void **>(&sOrigRaise));
+        }
+        if (abortSym) {
+            A64HookFunction(abortSym,
+                            reinterpret_cast<void *>(safe_abort),
+                            reinterpret_cast<void **>(&sOrigAbort));
+        }
 #endif
         if (!sOrigFree && freeSym) {
             sOrigFree = reinterpret_cast<void (*)(void *)>(freeSym);
@@ -774,6 +850,10 @@ static void installHeapAndRefBaseSafetyGuards() {
         if (!sOrigSigaction && sigactionSym) {
             sOrigSigaction = reinterpret_cast<int (*)(int, const struct sigaction *, struct sigaction *)>(sigactionSym);
         }
+        if (!sOrigKill && killSym) sOrigKill = reinterpret_cast<int (*)(pid_t, int)>(killSym);
+        if (!sOrigTgkill && tgkillSym) sOrigTgkill = reinterpret_cast<int (*)(pid_t, pid_t, int)>(tgkillSym);
+        if (!sOrigRaise && raiseSym) sOrigRaise = reinterpret_cast<int (*)(int)>(raiseSym);
+        if (!sOrigAbort && abortSym) sOrigAbort = reinterpret_cast<void (*)(void)>(abortSym);
     }
 }
 

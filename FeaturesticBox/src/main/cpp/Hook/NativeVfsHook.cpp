@@ -94,6 +94,31 @@ static inline bool isProcStat(const char *path) {
     return isProcSelfOrPid(path, "stat");
 }
 
+static inline bool isBlockedDevPath(const char *path) {
+    if (!path) return false;
+    if (strncmp(path, "/dev/pts/", 9) == 0 || strcmp(path, "/dev/pts") == 0 || strcmp(path, "/dev/ptmx") == 0) {
+        return true;
+    }
+    return false;
+}
+
+static inline bool isProcNetTcp(const char *path) {
+    if (!path) return false;
+    if (strcmp(path, "/proc/net/tcp") == 0 || strcmp(path, "/proc/net/tcp6") == 0
+            || isProcSelfOrPid(path, "net/tcp") || isProcSelfOrPid(path, "net/tcp6")) {
+        return true;
+    }
+    return false;
+}
+
+static inline bool isProcMounts(const char *path) {
+    if (!path) return false;
+    if (strcmp(path, "/proc/mounts") == 0 || isProcSelfOrPid(path, "mounts")) {
+        return true;
+    }
+    return false;
+}
+
 static int createAnonymousMemFd(const char *name) {
 #if defined(__NR_memfd_create)
     int fd = static_cast<int>(syscall(__NR_memfd_create, name ? name : "vproc", MFD_CLOEXEC));
@@ -360,6 +385,75 @@ static int createVirtualProcStatFd() {
     return outFd;
 }
 
+static int createVirtualProcNetTcpFd() {
+    int outFd = createAnonymousMemFd("v_tcp");
+    if (outFd < 0) return -1;
+    const char *header = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n";
+    write(outFd, header, strlen(header));
+    lseek(outFd, 0, SEEK_SET);
+    return outFd;
+}
+
+static int createVirtualProcMountsFd() {
+    if (sInVfsBypass) return -1;
+    sInVfsBypass = true;
+
+    int realFd = -1;
+    if (sOrigOpenat != nullptr) {
+        realFd = sOrigOpenat(AT_FDCWD, "/proc/self/mounts", O_RDONLY | O_CLOEXEC, 0);
+    } else if (sOrigOpen != nullptr) {
+        realFd = sOrigOpen("/proc/self/mounts", O_RDONLY | O_CLOEXEC, 0);
+    }
+    if (realFd < 0) {
+        sInVfsBypass = false;
+        return -1;
+    }
+
+    int outFd = createAnonymousMemFd("v_mounts");
+    if (outFd < 0) {
+        close(realFd);
+        sInVfsBypass = false;
+        return -1;
+    }
+
+    char inBuf[4096];
+    char lineBuf[1024];
+    size_t linePos = 0;
+    ssize_t bytesRead = 0;
+
+    while ((bytesRead = read(realFd, inBuf, sizeof(inBuf))) > 0) {
+        for (ssize_t i = 0; i < bytesRead; ++i) {
+            char c = inBuf[i];
+            if (linePos < sizeof(lineBuf) - 1) {
+                lineBuf[linePos++] = c;
+            }
+            if (c == '\n') {
+                lineBuf[linePos] = '\0';
+                if (strstr(lineBuf, "antigravity") == nullptr
+                        && strstr(lineBuf, "termux") == nullptr
+                        && strstr(lineBuf, "magisk") == nullptr
+                        && strstr(lineBuf, "daemonsu") == nullptr
+                        && strstr(lineBuf, "xposed") == nullptr
+                        && strstr(lineBuf, "sandhook") == nullptr
+                        && strstr(lineBuf, "featurestic") == nullptr
+                        && strstr(lineBuf, "blackbox") == nullptr) {
+                    write(outFd, lineBuf, linePos);
+                }
+                linePos = 0;
+            }
+        }
+    }
+    if (linePos > 0) {
+        lineBuf[linePos] = '\0';
+        write(outFd, lineBuf, linePos);
+    }
+
+    close(realFd);
+    lseek(outFd, 0, SEEK_SET);
+    sInVfsBypass = false;
+    return outFd;
+}
+
 // ==================== Hook Implementations ====================
 
 static int safe_openat(int dirfd, const char *pathname, int flags, ...) {
@@ -373,6 +467,11 @@ static int safe_openat(int dirfd, const char *pathname, int flags, ...) {
 
     if (!pathname || sInVfsBypass) {
         return sOrigOpenat ? sOrigOpenat(dirfd, pathname, flags, mode) : -1;
+    }
+
+    if (isBlockedDevPath(pathname)) {
+        errno = ENOENT;
+        return -1;
     }
 
     if (isProcMaps(pathname)) {
@@ -389,6 +488,12 @@ static int safe_openat(int dirfd, const char *pathname, int flags, ...) {
         if (fd >= 0) return fd;
     } else if (isProcStat(pathname)) {
         int fd = createVirtualProcStatFd();
+        if (fd >= 0) return fd;
+    } else if (isProcNetTcp(pathname)) {
+        int fd = createVirtualProcNetTcpFd();
+        if (fd >= 0) return fd;
+    } else if (isProcMounts(pathname)) {
+        int fd = createVirtualProcMountsFd();
         if (fd >= 0) return fd;
     }
 
@@ -409,6 +514,11 @@ static int safe_openat64(int dirfd, const char *pathname, int flags, ...) {
         return sOrigOpenat64 ? sOrigOpenat64(dirfd, pathname, flags, mode) : -1;
     }
 
+    if (isBlockedDevPath(pathname)) {
+        errno = ENOENT;
+        return -1;
+    }
+
     if (isProcMaps(pathname)) {
         int fd = createVirtualProcMapsFd();
         if (fd >= 0) return fd;
@@ -423,6 +533,12 @@ static int safe_openat64(int dirfd, const char *pathname, int flags, ...) {
         if (fd >= 0) return fd;
     } else if (isProcStat(pathname)) {
         int fd = createVirtualProcStatFd();
+        if (fd >= 0) return fd;
+    } else if (isProcNetTcp(pathname)) {
+        int fd = createVirtualProcNetTcpFd();
+        if (fd >= 0) return fd;
+    } else if (isProcMounts(pathname)) {
+        int fd = createVirtualProcMountsFd();
         if (fd >= 0) return fd;
     }
 
@@ -443,6 +559,11 @@ static int safe_open(const char *pathname, int flags, ...) {
         return sOrigOpen ? sOrigOpen(pathname, flags, mode) : -1;
     }
 
+    if (isBlockedDevPath(pathname)) {
+        errno = ENOENT;
+        return -1;
+    }
+
     if (isProcMaps(pathname)) {
         int fd = createVirtualProcMapsFd();
         if (fd >= 0) return fd;
@@ -458,6 +579,12 @@ static int safe_open(const char *pathname, int flags, ...) {
     } else if (isProcStat(pathname)) {
         int fd = createVirtualProcStatFd();
         if (fd >= 0) return fd;
+    } else if (isProcNetTcp(pathname)) {
+        int fd = createVirtualProcNetTcpFd();
+        if (fd >= 0) return fd;
+    } else if (isProcMounts(pathname)) {
+        int fd = createVirtualProcMountsFd();
+        if (fd >= 0) return fd;
     }
 
     const char *redirected = IO::redirectPath(pathname);
@@ -468,8 +595,12 @@ static int safe_faccessat(int dirfd, const char *pathname, int mode, int flags) 
     if (!pathname || sInVfsBypass) {
         return sOrigFaccessat ? sOrigFaccessat(dirfd, pathname, mode, flags) : -1;
     }
+    if (isBlockedDevPath(pathname)) {
+        errno = ENOENT;
+        return -1;
+    }
     if (isProcMaps(pathname) || isProcCmdline(pathname) || isProcStatus(pathname)
-            || isProcComm(pathname) || isProcStat(pathname)) {
+            || isProcComm(pathname) || isProcStat(pathname) || isProcNetTcp(pathname) || isProcMounts(pathname)) {
         if ((mode & W_OK) != 0) {
             errno = EACCES;
             return -1;
@@ -484,8 +615,12 @@ static int safe_access(const char *pathname, int mode) {
     if (!pathname || sInVfsBypass) {
         return sOrigAccess ? sOrigAccess(pathname, mode) : -1;
     }
+    if (isBlockedDevPath(pathname)) {
+        errno = ENOENT;
+        return -1;
+    }
     if (isProcMaps(pathname) || isProcCmdline(pathname) || isProcStatus(pathname)
-            || isProcComm(pathname) || isProcStat(pathname)) {
+            || isProcComm(pathname) || isProcStat(pathname) || isProcNetTcp(pathname) || isProcMounts(pathname)) {
         if ((mode & W_OK) != 0) {
             errno = EACCES;
             return -1;
@@ -499,6 +634,18 @@ static int safe_access(const char *pathname, int mode) {
 static int safe_fstatat(int dirfd, const char *pathname, struct stat *buf, int flags) {
     if (!pathname || sInVfsBypass) {
         return sOrigFstatat ? sOrigFstatat(dirfd, pathname, buf, flags) : -1;
+    }
+    if (isBlockedDevPath(pathname)) {
+        errno = ENOENT;
+        return -1;
+    }
+    if (isProcNetTcp(pathname)) {
+        if (buf) {
+            memset(buf, 0, sizeof(struct stat));
+            buf->st_mode = S_IFREG | 0444;
+            buf->st_size = 80;
+        }
+        return 0;
     }
     if (isProcCmdline(pathname)) {
         if (buf) {
@@ -526,6 +673,18 @@ static int safe_fstatat64(int dirfd, const char *pathname, struct stat *buf, int
     if (!pathname || sInVfsBypass) {
         return sOrigFstatat64 ? sOrigFstatat64(dirfd, pathname, buf, flags) : -1;
     }
+    if (isBlockedDevPath(pathname)) {
+        errno = ENOENT;
+        return -1;
+    }
+    if (isProcNetTcp(pathname)) {
+        if (buf) {
+            memset(buf, 0, sizeof(struct stat));
+            buf->st_mode = S_IFREG | 0444;
+            buf->st_size = 80;
+        }
+        return 0;
+    }
     const char *redirected = IO::redirectPath(pathname);
     return sOrigFstatat64 ? sOrigFstatat64(dirfd, redirected ? redirected : pathname, buf, flags) : -1;
 }
@@ -533,6 +692,10 @@ static int safe_fstatat64(int dirfd, const char *pathname, struct stat *buf, int
 static ssize_t safe_readlinkat(int dirfd, const char *pathname, char *buf, size_t bufsiz) {
     if (!pathname || sInVfsBypass) {
         return sOrigReadlinkat ? sOrigReadlinkat(dirfd, pathname, buf, bufsiz) : -1;
+    }
+    if (isBlockedDevPath(pathname)) {
+        errno = ENOENT;
+        return -1;
     }
     if (strcmp(pathname, "/proc/self/exe") == 0) {
         const char *fakeExe = "/system/bin/app_process64";
@@ -550,6 +713,10 @@ static ssize_t safe_readlinkat(int dirfd, const char *pathname, char *buf, size_
 static ssize_t safe_readlink(const char *pathname, char *buf, size_t bufsiz) {
     if (!pathname || sInVfsBypass) {
         return sOrigReadlink ? sOrigReadlink(pathname, buf, bufsiz) : -1;
+    }
+    if (isBlockedDevPath(pathname)) {
+        errno = ENOENT;
+        return -1;
     }
     if (strcmp(pathname, "/proc/self/exe") == 0) {
         const char *fakeExe = "/system/bin/app_process64";
