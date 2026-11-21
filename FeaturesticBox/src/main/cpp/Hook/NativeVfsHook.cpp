@@ -44,6 +44,8 @@ typedef int (*open_fn_t)(const char *pathname, int flags, mode_t mode);
 typedef int (*faccessat_fn_t)(int dirfd, const char *pathname, int mode, int flags);
 typedef int (*access_fn_t)(const char *pathname, int mode);
 typedef int (*fstatat_fn_t)(int dirfd, const char *pathname, struct stat *buf, int flags);
+typedef int (*stat_fn_t)(const char *pathname, struct stat *buf);
+typedef int (*lstat_fn_t)(const char *pathname, struct stat *buf);
 typedef ssize_t (*readlinkat_fn_t)(int dirfd, const char *pathname, char *buf, size_t bufsiz);
 typedef ssize_t (*readlink_fn_t)(const char *pathname, char *buf, size_t bufsiz);
 
@@ -54,6 +56,8 @@ static faccessat_fn_t sOrigFaccessat = nullptr;
 static access_fn_t sOrigAccess = nullptr;
 static fstatat_fn_t sOrigFstatat = nullptr;
 static fstatat_fn_t sOrigFstatat64 = nullptr;
+static stat_fn_t sOrigStat = nullptr;
+static lstat_fn_t sOrigLstat = nullptr;
 static readlinkat_fn_t sOrigReadlinkat = nullptr;
 static readlink_fn_t sOrigReadlink = nullptr;
 
@@ -97,6 +101,9 @@ static inline bool isProcStat(const char *path) {
 static inline bool isBlockedDevPath(const char *path) {
     if (!path) return false;
     if (strncmp(path, "/dev/pts/", 9) == 0 || strcmp(path, "/dev/pts") == 0 || strcmp(path, "/dev/ptmx") == 0) {
+        return true;
+    }
+    if (strstr(path, "qemu") != nullptr || strstr(path, "goldfish") != nullptr || strstr(path, "vport") != nullptr) {
         return true;
     }
     return false;
@@ -639,6 +646,14 @@ static int safe_fstatat(int dirfd, const char *pathname, struct stat *buf, int f
         errno = ENOENT;
         return -1;
     }
+    if (isProcMaps(pathname) || isProcStatus(pathname) || isProcStat(pathname) || isProcMounts(pathname)) {
+        if (buf) {
+            memset(buf, 0, sizeof(struct stat));
+            buf->st_mode = S_IFREG | 0444;
+            buf->st_size = 0;
+        }
+        return 0;
+    }
     if (isProcNetTcp(pathname)) {
         if (buf) {
             memset(buf, 0, sizeof(struct stat));
@@ -670,23 +685,15 @@ static int safe_fstatat(int dirfd, const char *pathname, struct stat *buf, int f
 }
 
 static int safe_fstatat64(int dirfd, const char *pathname, struct stat *buf, int flags) {
-    if (!pathname || sInVfsBypass) {
-        return sOrigFstatat64 ? sOrigFstatat64(dirfd, pathname, buf, flags) : -1;
-    }
-    if (isBlockedDevPath(pathname)) {
-        errno = ENOENT;
-        return -1;
-    }
-    if (isProcNetTcp(pathname)) {
-        if (buf) {
-            memset(buf, 0, sizeof(struct stat));
-            buf->st_mode = S_IFREG | 0444;
-            buf->st_size = 80;
-        }
-        return 0;
-    }
-    const char *redirected = IO::redirectPath(pathname);
-    return sOrigFstatat64 ? sOrigFstatat64(dirfd, redirected ? redirected : pathname, buf, flags) : -1;
+    return safe_fstatat(dirfd, pathname, buf, flags);
+}
+
+static int safe_stat(const char *pathname, struct stat *buf) {
+    return safe_fstatat(AT_FDCWD, pathname, buf, 0);
+}
+
+static int safe_lstat(const char *pathname, struct stat *buf) {
+    return safe_fstatat(AT_FDCWD, pathname, buf, AT_SYMLINK_NOFOLLOW);
 }
 
 static ssize_t safe_readlinkat(int dirfd, const char *pathname, char *buf, size_t bufsiz) {
@@ -697,7 +704,7 @@ static ssize_t safe_readlinkat(int dirfd, const char *pathname, char *buf, size_
         errno = ENOENT;
         return -1;
     }
-    if (strcmp(pathname, "/proc/self/exe") == 0) {
+    if (isProcSelfOrPid(pathname, "exe")) {
         const char *fakeExe = "/system/bin/app_process64";
         size_t len = strlen(fakeExe);
         if (len > bufsiz) len = bufsiz;
@@ -718,7 +725,7 @@ static ssize_t safe_readlink(const char *pathname, char *buf, size_t bufsiz) {
         errno = ENOENT;
         return -1;
     }
-    if (strcmp(pathname, "/proc/self/exe") == 0) {
+    if (isProcSelfOrPid(pathname, "exe")) {
         const char *fakeExe = "/system/bin/app_process64";
         size_t len = strlen(fakeExe);
         if (len > bufsiz) len = bufsiz;
@@ -760,6 +767,8 @@ void init() {
     void *accessSym = dlsym(RTLD_DEFAULT, "access");
     void *fstatatSym = dlsym(RTLD_DEFAULT, "fstatat");
     void *fstatat64Sym = dlsym(RTLD_DEFAULT, "fstatat64");
+    void *statSym = dlsym(RTLD_DEFAULT, "stat");
+    void *lstatSym = dlsym(RTLD_DEFAULT, "lstat");
     void *readlinkatSym = dlsym(RTLD_DEFAULT, "readlinkat");
     void *readlinkSym = dlsym(RTLD_DEFAULT, "readlink");
 
@@ -798,6 +807,16 @@ void init() {
                         reinterpret_cast<void *>(safe_fstatat64),
                         reinterpret_cast<void **>(&sOrigFstatat64));
     }
+    if (statSym) {
+        A64HookFunction(statSym,
+                        reinterpret_cast<void *>(safe_stat),
+                        reinterpret_cast<void **>(&sOrigStat));
+    }
+    if (lstatSym) {
+        A64HookFunction(lstatSym,
+                        reinterpret_cast<void *>(safe_lstat),
+                        reinterpret_cast<void **>(&sOrigLstat));
+    }
     if (readlinkatSym) {
         A64HookFunction(readlinkatSym,
                         reinterpret_cast<void *>(safe_readlinkat),
@@ -816,6 +835,8 @@ void init() {
     if (!sOrigAccess && accessSym) sOrigAccess = reinterpret_cast<access_fn_t>(accessSym);
     if (!sOrigFstatat && fstatatSym) sOrigFstatat = reinterpret_cast<fstatat_fn_t>(fstatatSym);
     if (!sOrigFstatat64 && fstatat64Sym) sOrigFstatat64 = reinterpret_cast<fstatat_fn_t>(fstatat64Sym);
+    if (!sOrigStat && statSym) sOrigStat = reinterpret_cast<stat_fn_t>(statSym);
+    if (!sOrigLstat && lstatSym) sOrigLstat = reinterpret_cast<lstat_fn_t>(lstatSym);
     if (!sOrigReadlinkat && readlinkatSym) sOrigReadlinkat = reinterpret_cast<readlinkat_fn_t>(readlinkatSym);
     if (!sOrigReadlink && readlinkSym) sOrigReadlink = reinterpret_cast<readlink_fn_t>(readlinkSym);
 #endif

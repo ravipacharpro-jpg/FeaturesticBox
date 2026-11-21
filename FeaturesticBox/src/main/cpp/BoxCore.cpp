@@ -322,38 +322,17 @@ static void safe_free(void *ptr) {
     if (uptr < 0x10000ULL) {
         return;
     }
-    // 1. Page-aligned free (large extents / run heads, including mapbits:0x5ff0 unallocated chunks)
-    if ((uptr & 0xFFFULL) == 0) {
-        size_t mapbits = 0;
-        if (!isPageMappedSafe(uptr) || isJemallocPtrInvalidOrUnallocated(uptr, &mapbits)) {
-            int cnt = ++sSuppressedFreeCount;
-            if (cnt <= 32) {
-                char tname[32] = {0};
-                prctl(PR_GET_NAME, reinterpret_cast<unsigned long>(tname), 0, 0, 0);
-                ALOGE("JemallocGuard: SUPPRESSED unallocated page free(%p) mapbits=0x%zx (count=%d, tid=%d [%s])",
-                      ptr, mapbits, cnt, static_cast<int>(gettid()), tname[0] ? tname : "?");
-            }
-            if (!isCriticalGameOrMainThread()) {
-                ALOGW("JemallocGuard: Terminating corrupted worker thread (tid=%d) via pthread_exit to prevent subsequent SIGBUS fault", static_cast<int>(gettid()));
-                pthread_exit(nullptr);
-            }
-            return;
+    // Only suppress if the memory address is genuinely unmapped in process address space.
+    // Never terminate valid worker threads on mapped addresses.
+    if (!isPageMappedSafe(uptr)) {
+        int cnt = ++sSuppressedFreeCount;
+        if (cnt <= 32) {
+            char tname[32] = {0};
+            prctl(PR_GET_NAME, reinterpret_cast<unsigned long>(tname), 0, 0, 0);
+            ALOGE("HeapGuard: SUPPRESSED unmapped free(%p) (count=%d, tid=%d [%s])",
+                  ptr, cnt, static_cast<int>(gettid()), tname[0] ? tname : "?");
         }
-    } else if (sJemallocCalibrated) {
-        // 2. Non-page-aligned small free: suppress if the chunk page has CHUNK_MAP_ALLOCATED == 0
-        size_t mapbits = 0;
-        if (isJemallocPtrInvalidOrUnallocated(uptr, &mapbits)) {
-            int cnt = ++sSuppressedFreeCount;
-            if (cnt <= 32) {
-                ALOGE("JemallocGuard: SUPPRESSED unallocated small free(%p) mapbits=0x%zx (count=%d, tid=%d)",
-                      ptr, mapbits, cnt, static_cast<int>(gettid()));
-            }
-            if (!isCriticalGameOrMainThread()) {
-                ALOGW("JemallocGuard: Terminating corrupted worker thread (tid=%d) via pthread_exit to prevent subsequent SIGBUS fault", static_cast<int>(gettid()));
-                pthread_exit(nullptr);
-            }
-            return;
-        }
+        return;
     }
 #endif
     if (sOrigFree != nullptr) {
@@ -373,17 +352,16 @@ static void safe_RefBase_decStrong(void *self, const void *id) {
         return;
     }
     bool invalidRefBase = false;
-    size_t mapbits = 0;
     {
         std::lock_guard<std::recursive_mutex> lock(sHeapSafetyMutex);
-        if (!isPageMappedSafe(uSelf) || isJemallocPtrInvalidOrUnallocated(uSelf, &mapbits)) {
+        if (!isPageMappedSafe(uSelf)) {
             invalidRefBase = true;
         } else {
             uintptr_t vptr = untagPtr(*reinterpret_cast<void *const *>(uSelf));
             void *refs = *reinterpret_cast<void *const *>(uSelf + sizeof(void *));
             uintptr_t uRefs = untagPtr(refs);
             if (vptr < 0x10000ULL || refs == nullptr || uRefs < 0x10000ULL || (uRefs & 0x7ULL) != 0
-                    || !isPageMappedSafe(uRefs) || isJemallocPtrInvalidOrUnallocated(uRefs, &mapbits)) {
+                    || !isPageMappedSafe(uRefs)) {
                 invalidRefBase = true;
             } else {
                 void *mBase = *reinterpret_cast<void *const *>(uRefs + 8);
@@ -405,14 +383,14 @@ static void safe_RefBase_decStrong(void *self, const void *id) {
     if (invalidRefBase) {
         int cnt = ++sSuppressedRefBaseCount;
         if (cnt <= 32) {
-            ALOGE("RefBaseGuard: SUPPRESSED invalid/duplicate decStrong(%p) mapbits=0x%zx (count=%d, tid=%d)",
-                  self, mapbits, cnt, static_cast<int>(gettid()));
+            ALOGE("RefBaseGuard: SUPPRESSED invalid/duplicate decStrong(%p) (count=%d, tid=%d)",
+                  self, cnt, static_cast<int>(gettid()));
             if (cnt <= 4) {
                 logCurrentThreadBacktrace();
             }
         }
         if (sGameLibLoadedCount.load(std::memory_order_relaxed) > 0 && !isCriticalGameOrMainThread()) {
-            ALOGW("FEATURESTIC: Suppressed invalid/duplicate decStrong(%p) mapbits=0x%zx (count=%d, tid=%d) - returning gracefully", self, mapbits, cnt, static_cast<int>(gettid()));
+            ALOGW("FEATURESTIC: Suppressed invalid/duplicate decStrong(%p) (count=%d, tid=%d) - returning gracefully", self, cnt, static_cast<int>(gettid()));
         }
         return;
     }
@@ -429,7 +407,7 @@ static void safe_weakref_decWeak(void *refs, const void *id) {
         return;
     }
     std::lock_guard<std::recursive_mutex> lock(sHeapSafetyMutex);
-    if (!isPageMappedSafe(uRefs) || isJemallocPtrInvalidOrUnallocated(uRefs)) {
+    if (!isPageMappedSafe(uRefs)) {
         return;
     }
     auto *weakAtomic = reinterpret_cast<std::atomic<int32_t> *>(uRefs + 4);
