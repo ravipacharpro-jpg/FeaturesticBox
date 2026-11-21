@@ -9,8 +9,17 @@
 #define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, __VA_ARGS__)
 
 static inline void releaseRedirectRef(JNIEnv *env, jstring orig, jstring redirected) {
-    if (env && redirected && redirected != orig && !env->IsSameObject(orig, redirected)) {
+    if (!env || !redirected || redirected == orig) return;
+    jthrowable pending = env->ExceptionOccurred();
+    if (pending) {
+        env->ExceptionClear();
+    }
+    if (!env->IsSameObject(orig, redirected)) {
         env->DeleteLocalRef(redirected);
+    }
+    if (pending) {
+        env->Throw(pending);
+        env->DeleteLocalRef(pending);
     }
 }
 
