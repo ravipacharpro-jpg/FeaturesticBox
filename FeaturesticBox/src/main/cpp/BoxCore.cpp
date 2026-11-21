@@ -736,6 +736,8 @@ static void installOrReassertPassiveNativeCrashDiagnostics() {
 
 // Intercept sigaction() so libanort.so / libCrashKit.so cannot strip our
 // passiveNativeCrashDiagnosticsHandler back to SIG_DFL before raising SIGBUS (signal 7).
+static void *sOurSigsysHandler = nullptr;
+
 static int safe_sigaction_common(int sig,
                                  const struct sigaction *act,
                                  struct sigaction *oldact,
@@ -743,6 +745,15 @@ static int safe_sigaction_common(int sig,
     if (sig == SIGSYS) {
         if (oldact != nullptr && origFn != nullptr) {
             origFn(sig, nullptr, oldact);
+        }
+        if (act != nullptr && (act->sa_flags & SA_SIGINFO) && act->sa_sigaction != nullptr) {
+            if (sOurSigsysHandler == nullptr) {
+                sOurSigsysHandler = reinterpret_cast<void *>(act->sa_sigaction);
+                return origFn ? origFn(sig, act, nullptr) : 0;
+            }
+            if (reinterpret_cast<void *>(act->sa_sigaction) == sOurSigsysHandler) {
+                return origFn ? origFn(sig, act, nullptr) : 0;
+            }
         }
         // Protect SECCOMP-BPF trap handler: never allow third-party libs to strip our SIGSYS handler
         return 0;

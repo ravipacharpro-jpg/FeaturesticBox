@@ -1113,9 +1113,11 @@ static bool installSeccompVfsFilter() {
     sa.sa_sigaction = sigsys_handler;
     sigemptyset(&sa.sa_mask);
     sa.sa_flags = SA_SIGINFO;
-    if (sigaction(SIGSYS, &sa, nullptr) != 0) {
-        ALOGE("NativeVfsHook: Failed to install SIGSYS handler: %s", strerror(errno));
-        return false;
+    if (syscall(__NR_rt_sigaction, SIGSYS, &sa, nullptr, sizeof(sigset_t)) != 0) {
+        if (sigaction(SIGSYS, &sa, nullptr) != 0) {
+            ALOGE("NativeVfsHook: Failed to install SIGSYS handler: %s", strerror(errno));
+            return false;
+        }
     }
 
     struct sock_filter filter[] = {
