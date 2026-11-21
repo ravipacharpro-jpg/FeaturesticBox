@@ -26,7 +26,7 @@ const char *IO::redirectPath(const char *__path) {
     thread_local char tls_bufs[4][PATH_MAX];
     thread_local int tls_idx = 0;
 
-    std::lock_guard<std::mutex> lock(relocate_rule_mutex);
+    std::lock_guard<std::recursive_mutex> lock(relocate_rule_mutex);
     for (auto iterator = relocate_rule.begin(); iterator != relocate_rule.end(); ++iterator) {
         const IO::RelocateInfo &info = *iterator;
         if (!info.targetPath || !info.relocatePath) continue;
@@ -61,7 +61,7 @@ jobject IO::redirectPath(JNIEnv *env, jobject path) {
 
 void IO::addRule(const char *targetPath, const char *relocatePath) {
     if (!targetPath || !relocatePath) return;
-    std::lock_guard<std::mutex> lock(relocate_rule_mutex);
+    std::lock_guard<std::recursive_mutex> lock(relocate_rule_mutex);
     for (auto it = relocate_rule.begin(); it != relocate_rule.end(); ++it) {
         if (it->targetPath && strcmp(it->targetPath, targetPath) == 0) {
             return;
