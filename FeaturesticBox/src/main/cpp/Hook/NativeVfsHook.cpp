@@ -21,6 +21,36 @@
 #include <atomic>
 #include <mutex>
 
+#include <linux/filter.h>
+#include <linux/seccomp.h>
+#include <linux/audit.h>
+#include <sys/mman.h>
+#include <ucontext.h>
+
+#ifndef PR_SET_NO_NEW_PRIVS
+#define PR_SET_NO_NEW_PRIVS 38
+#endif
+
+#ifndef PR_SET_SECCOMP
+#define PR_SET_SECCOMP 22
+#endif
+
+#ifndef SECCOMP_MODE_FILTER
+#define SECCOMP_MODE_FILTER 2
+#endif
+
+#ifndef SECCOMP_RET_ALLOW
+#define SECCOMP_RET_ALLOW 0x7fff0000
+#endif
+
+#ifndef SECCOMP_RET_TRAP
+#define SECCOMP_RET_TRAP 0x00030000
+#endif
+
+#ifndef AUDIT_ARCH_AARCH64
+#define AUDIT_ARCH_AARCH64 0xc00000b7
+#endif
+
 #ifndef MFD_CLOEXEC
 #define MFD_CLOEXEC 0x0001U
 #endif
@@ -48,6 +78,7 @@ typedef int (*faccessat_fn_t)(int dirfd, const char *pathname, int mode, int fla
 typedef int (*access_fn_t)(const char *pathname, int mode);
 typedef int (*fstatat_fn_t)(int dirfd, const char *pathname, struct stat *buf, int flags);
 typedef int (*stat_fn_t)(const char *pathname, struct stat *buf);
+typedef int (*fstat_fn_t)(int fd, struct stat *buf);
 typedef int (*lstat_fn_t)(const char *pathname, struct stat *buf);
 typedef int (*stat64_fn_t)(const char *pathname, struct stat *buf);
 typedef int (*lstat64_fn_t)(const char *pathname, struct stat *buf);
@@ -64,6 +95,8 @@ static access_fn_t sOrigAccess = nullptr;
 static fstatat_fn_t sOrigFstatat = nullptr;
 static fstatat_fn_t sOrigFstatat64 = nullptr;
 static stat_fn_t sOrigStat = nullptr;
+static fstat_fn_t sOrigFstat = nullptr;
+static fstat_fn_t sOrigFstat64 = nullptr;
 static lstat_fn_t sOrigLstat = nullptr;
 static stat64_fn_t sOrigStat64 = nullptr;
 static lstat64_fn_t sOrigLstat64 = nullptr;
@@ -736,6 +769,21 @@ static int safe_lstat64(const char *pathname, struct stat *buf) {
     return safe_fstatat(AT_FDCWD, pathname, buf, AT_SYMLINK_NOFOLLOW);
 }
 
+static int safe_fstat(int fd, struct stat *buf) {
+    if (fd < 0 || sInVfsBypass) {
+        return sOrigFstat ? sOrigFstat(fd, buf) : -1;
+    }
+    if (isDirFdBlocked(fd, nullptr)) {
+        errno = ENOENT;
+        return -1;
+    }
+    return sOrigFstat ? sOrigFstat(fd, buf) : -1;
+}
+
+static int safe_fstat64(int fd, struct stat *buf) {
+    return safe_fstat(fd, buf);
+}
+
 static int safe_statx(int dirfd, const char *pathname, int flags, unsigned int mask, void *statxbuf) {
     if (!pathname || sInVfsBypass) {
         return sOrigStatx ? sOrigStatx(dirfd, pathname, flags, mask, statxbuf) : -1;
@@ -880,6 +928,227 @@ static long safe_syscall(long number, long arg1, long arg2, long arg3, long arg4
     return sOrigSyscall ? sOrigSyscall(number, arg1, arg2, arg3, arg4, arg5, arg6) : -1;
 }
 
+#if defined(__aarch64__)
+static inline long raw_real_syscall(long number, long a0 = 0, long a1 = 0, long a2 = 0, long a3 = 0, long a4 = 0, long a5 = 0x5afe5afe) {
+    register long x8 __asm__("x8") = number;
+    register long x0 __asm__("x0") = a0;
+    register long x1 __asm__("x1") = a1;
+    register long x2 __asm__("x2") = a2;
+    register long x3 __asm__("x3") = a3;
+    register long x4 __asm__("x4") = a4;
+    register long x5 __asm__("x5") = a5;
+    __asm__ __volatile__(
+        "svc #0\n"
+        : "+r"(x0)
+        : "r"(x8), "r"(x1), "r"(x2), "r"(x3), "r"(x4), "r"(x5)
+        : "memory"
+    );
+    return x0;
+}
+
+static bool isReadableUserPointer(const void *p, size_t len = 1) {
+    if (!p) return false;
+    uintptr_t addr = reinterpret_cast<uintptr_t>(p);
+    if (addr < 0x10000ULL || addr >= UINT64_C(0x0001000000000000)) return false;
+    uintptr_t pageStart = addr & ~uintptr_t(0xFFF);
+    uintptr_t pageEnd = (addr + len) & ~uintptr_t(0xFFF);
+    for (uintptr_t page = pageStart; page <= pageEnd; page += 4096) {
+        unsigned char vec = 0;
+        if (mincore(reinterpret_cast<void *>(page), 4096, &vec) != 0) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static void sigsys_handler(int /*sig*/, siginfo_t * /*info*/, void *ucontext) {
+    if (!ucontext) return;
+    auto *uc = reinterpret_cast<ucontext_t *>(ucontext);
+    long nr = static_cast<long>(uc->uc_mcontext.regs[8]);
+    long a0 = static_cast<long>(uc->uc_mcontext.regs[0]);
+    long a1 = static_cast<long>(uc->uc_mcontext.regs[1]);
+    long a2 = static_cast<long>(uc->uc_mcontext.regs[2]);
+    long a3 = static_cast<long>(uc->uc_mcontext.regs[3]);
+    long a4 = static_cast<long>(uc->uc_mcontext.regs[4]);
+
+    switch (nr) {
+        case 79: // __NR_newfstatat / __NR_fstatat64
+        case 291: // __NR_statx
+        case 48: // __NR_faccessat
+        case 439: // __NR_faccessat2
+        case 56: // __NR_openat
+        case 78: { // __NR_readlinkat
+            const char *pathname = reinterpret_cast<const char *>(a1);
+            if (isReadableUserPointer(pathname)) {
+                if (isBlockedDevPath(pathname) || isDirFdBlocked(static_cast<int>(a0), pathname)) {
+                    // Suppress kernel SELinux audit denial completely
+                    uc->uc_mcontext.regs[0] = static_cast<unsigned long>(-ENOENT);
+                    uc->uc_mcontext.pc += 4;
+                    return;
+                }
+                if (nr == 56) {
+                    if (isProcMaps(pathname)) {
+                        int fd = createVirtualProcMapsFd();
+                        uc->uc_mcontext.regs[0] = static_cast<unsigned long>((fd >= 0) ? fd : -ENOENT);
+                        uc->uc_mcontext.pc += 4;
+                        return;
+                    } else if (isProcCmdline(pathname)) {
+                        int fd = createVirtualProcCmdlineFd();
+                        uc->uc_mcontext.regs[0] = static_cast<unsigned long>((fd >= 0) ? fd : -ENOENT);
+                        uc->uc_mcontext.pc += 4;
+                        return;
+                    } else if (isProcStatus(pathname)) {
+                        int fd = createVirtualProcStatusFd();
+                        uc->uc_mcontext.regs[0] = static_cast<unsigned long>((fd >= 0) ? fd : -ENOENT);
+                        uc->uc_mcontext.pc += 4;
+                        return;
+                    } else if (isProcComm(pathname)) {
+                        int fd = createVirtualProcCommFd();
+                        uc->uc_mcontext.regs[0] = static_cast<unsigned long>((fd >= 0) ? fd : -ENOENT);
+                        uc->uc_mcontext.pc += 4;
+                        return;
+                    } else if (isProcStat(pathname)) {
+                        int fd = createVirtualProcStatFd();
+                        uc->uc_mcontext.regs[0] = static_cast<unsigned long>((fd >= 0) ? fd : -ENOENT);
+                        uc->uc_mcontext.pc += 4;
+                        return;
+                    } else if (isProcNetTcp(pathname)) {
+                        int fd = createVirtualProcNetTcpFd();
+                        uc->uc_mcontext.regs[0] = static_cast<unsigned long>((fd >= 0) ? fd : -ENOENT);
+                        uc->uc_mcontext.pc += 4;
+                        return;
+                    } else if (isProcMounts(pathname)) {
+                        int fd = createVirtualProcMountsFd();
+                        uc->uc_mcontext.regs[0] = static_cast<unsigned long>((fd >= 0) ? fd : -ENOENT);
+                        uc->uc_mcontext.pc += 4;
+                        return;
+                    }
+                }
+            }
+            const char *redirected = (isReadableUserPointer(pathname)) ? IO::redirectPath(pathname) : nullptr;
+            long realA1 = (redirected != nullptr) ? reinterpret_cast<long>(redirected) : a1;
+            long res = raw_real_syscall(nr, a0, realA1, a2, a3, a4, 0x5afe5afe);
+            uc->uc_mcontext.regs[0] = static_cast<unsigned long>(res);
+            uc->uc_mcontext.pc += 4;
+            return;
+        }
+
+        case 94: { // __NR_exit_group
+            if (!isCriticalGameOrMainThreadHelper()) {
+                char tname[32] = {0};
+                prctl(PR_GET_NAME, reinterpret_cast<unsigned long>(tname), 0, 0, 0);
+                ALOGW("FEATURESTIC SECCOMP: Suppressed raw exit_group() from worker thread (tid=%d, name=%s) -> isolating thread",
+                      static_cast<int>(gettid()), tname[0] ? tname : "?");
+                struct timespec ts{3600, 0};
+                while (true) {
+                    nanosleep(&ts, nullptr);
+                }
+            }
+            break;
+        }
+
+        case 129: // __NR_kill
+        case 130: // __NR_tkill
+        case 131: { // __NR_tgkill
+            pid_t tgid = (nr == 131) ? static_cast<pid_t>(a0) : getpid();
+            int sigVal = (nr == 131) ? static_cast<int>(a2) : static_cast<int>(a1);
+            if ((sigVal == SIGSEGV || sigVal == SIGBUS || sigVal == SIGABRT || sigVal == SIGKILL)
+                    && (tgid == getpid() || tgid == 0 || tgid == -1)) {
+                if (!isCriticalGameOrMainThreadHelper()) {
+                    char tname[32] = {0};
+                    prctl(PR_GET_NAME, reinterpret_cast<unsigned long>(tname), 0, 0, 0);
+                    ALOGW("FEATURESTIC SECCOMP: Suppressed raw suicide signal %d from worker thread (tid=%d, name=%s)",
+                          sigVal, static_cast<int>(gettid()), tname[0] ? tname : "?");
+                    uc->uc_mcontext.regs[0] = 0;
+                    uc->uc_mcontext.pc += 4;
+                    return;
+                }
+            }
+            break;
+        }
+
+        default:
+            break;
+    }
+
+    long res = raw_real_syscall(nr, a0, a1, a2, a3, a4, 0x5afe5afe);
+    uc->uc_mcontext.regs[0] = static_cast<unsigned long>(res);
+    uc->uc_mcontext.pc += 4;
+}
+
+static bool installSeccompVfsFilter() {
+    static const uint32_t kMagicCanary = 0x5afe5afe;
+
+    struct sigaction sa{};
+    sa.sa_sigaction = sigsys_handler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = SA_SIGINFO;
+    if (sigaction(SIGSYS, &sa, nullptr) != 0) {
+        ALOGE("NativeVfsHook: Failed to install SIGSYS handler: %s", strerror(errno));
+        return false;
+    }
+
+    struct sock_filter filter[] = {
+        // 0: ld arch
+        BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, arch)),
+        // 1: jeq arch -> jt=1 (idx 3), jf=0 (idx 2)
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, AUDIT_ARCH_AARCH64, 1, 0),
+        // 2: ret ALLOW
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
+        // 3: ld args[5] (offset 56)
+        BPF_STMT(BPF_LD | BPF_W | BPF_ABS, 56),
+        // 4: jeq CANARY -> jt=13 (idx 18), jf=0 (idx 5)
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, kMagicCanary, 13, 0),
+        // 5: ld nr (offset 0)
+        BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, nr)),
+        // 6: jeq 79 (__NR_newfstatat) -> jt=10 (idx 17), jf=0 (idx 7)
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 79, 10, 0),
+        // 7: jeq 291 (__NR_statx) -> jt=9 (idx 17), jf=0 (idx 8)
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 291, 9, 0),
+        // 8: jeq 48 (__NR_faccessat) -> jt=8 (idx 17), jf=0 (idx 9)
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 48, 8, 0),
+        // 9: jeq 439 (__NR_faccessat2) -> jt=7 (idx 17), jf=0 (idx 10)
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 439, 7, 0),
+        // 10: jeq 56 (__NR_openat) -> jt=6 (idx 17), jf=0 (idx 11)
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 56, 6, 0),
+        // 11: jeq 78 (__NR_readlinkat) -> jt=5 (idx 17), jf=0 (idx 12)
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 78, 5, 0),
+        // 12: jeq 94 (__NR_exit_group) -> jt=4 (idx 17), jf=0 (idx 13)
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 4, 0, 94),
+        // 13: jeq 129 (__NR_kill) -> jt=3 (idx 17), jf=0 (idx 14)
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 3, 0, 129),
+        // 14: jeq 130 (__NR_tkill) -> jt=2 (idx 17), jf=0 (idx 15)
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 2, 0, 130),
+        // 15: jeq 131 (__NR_tgkill) -> jt=1 (idx 17), jf=0 (idx 16)
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 1, 0, 131),
+        // 16: ret ALLOW
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
+        // 17: ret TRAP
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_TRAP),
+        // 18: ret ALLOW
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
+    };
+
+    struct sock_fprog prog = {
+        .len = static_cast<unsigned short>(sizeof(filter) / sizeof(filter[0])),
+        .filter = filter,
+    };
+
+    if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0) {
+        ALOGE("NativeVfsHook: prctl(PR_SET_NO_NEW_PRIVS) failed: %s", strerror(errno));
+        return false;
+    }
+
+    if (prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &prog) != 0) {
+        ALOGE("NativeVfsHook: prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER) failed: %s", strerror(errno));
+        return false;
+    }
+
+    ALOGI("NativeVfsHook: SECCOMP-BPF Raw Syscall Trap successfully active");
+    return true;
+}
+#endif
+
 } // anonymous namespace
 
 namespace NativeVfsHook {
@@ -915,6 +1184,8 @@ void init() {
     void *lstat64Sym = dlsym(RTLD_DEFAULT, "lstat64");
     void *statxSym = dlsym(RTLD_DEFAULT, "statx");
     void *syscallSym = dlsym(RTLD_DEFAULT, "syscall");
+    void *fstatSym = dlsym(RTLD_DEFAULT, "fstat");
+    void *fstat64Sym = dlsym(RTLD_DEFAULT, "fstat64");
     void *readlinkatSym = dlsym(RTLD_DEFAULT, "readlinkat");
     void *readlinkSym = dlsym(RTLD_DEFAULT, "readlink");
 
@@ -983,6 +1254,16 @@ void init() {
                         reinterpret_cast<void *>(safe_syscall),
                         reinterpret_cast<void **>(&sOrigSyscall));
     }
+    if (fstatSym) {
+        A64HookFunction(fstatSym,
+                        reinterpret_cast<void *>(safe_fstat),
+                        reinterpret_cast<void **>(&sOrigFstat));
+    }
+    if (fstat64Sym && fstat64Sym != fstatSym) {
+        A64HookFunction(fstat64Sym,
+                        reinterpret_cast<void *>(safe_fstat64),
+                        reinterpret_cast<void **>(&sOrigFstat64));
+    }
     if (readlinkatSym) {
         A64HookFunction(readlinkatSym,
                         reinterpret_cast<void *>(safe_readlinkat),
@@ -1007,8 +1288,12 @@ void init() {
     if (!sOrigLstat64 && lstat64Sym) sOrigLstat64 = reinterpret_cast<lstat64_fn_t>(lstat64Sym);
     if (!sOrigStatx && statxSym) sOrigStatx = reinterpret_cast<statx_fn_t>(statxSym);
     if (!sOrigSyscall && syscallSym) sOrigSyscall = reinterpret_cast<syscall_fn_t>(syscallSym);
+    if (!sOrigFstat && fstatSym) sOrigFstat = reinterpret_cast<fstat_fn_t>(fstatSym);
+    if (!sOrigFstat64 && fstat64Sym) sOrigFstat64 = reinterpret_cast<fstat_fn_t>(fstat64Sym);
     if (!sOrigReadlinkat && readlinkatSym) sOrigReadlinkat = reinterpret_cast<readlinkat_fn_t>(readlinkatSym);
     if (!sOrigReadlink && readlinkSym) sOrigReadlink = reinterpret_cast<readlink_fn_t>(readlinkSym);
+
+    installSeccompVfsFilter();
 #endif
 
     ALOGI("NativeVfsHook: Libc VFS and Procfs virtualization hooks active");

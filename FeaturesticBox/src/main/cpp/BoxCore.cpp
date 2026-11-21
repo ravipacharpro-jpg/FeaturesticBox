@@ -334,6 +334,17 @@ static void safe_free(void *ptr) {
         }
         return;
     }
+    size_t mapbits = 0;
+    if (isJemallocPtrInvalidOrUnallocated(uptr, &mapbits)) {
+        int cnt = ++sSuppressedFreeCount;
+        if (cnt <= 32) {
+            char tname[32] = {0};
+            prctl(PR_GET_NAME, reinterpret_cast<unsigned long>(tname), 0, 0, 0);
+            ALOGE("JemallocGuard: SUPPRESSED unallocated page free(%p) mapbits=0x%zx (count=%d, tid=%d [%s])",
+                  ptr, mapbits, cnt, static_cast<int>(gettid()), tname[0] ? tname : "?");
+        }
+        return;
+    }
 #endif
     if (sOrigFree != nullptr) {
         sOrigFree(ptr);
@@ -655,10 +666,12 @@ static void safe_abort(void) {
     if (!isCriticalGameOrMainThread()) {
         char tname[32] = {0};
         prctl(PR_GET_NAME, reinterpret_cast<unsigned long>(tname), 0, 0, 0);
-        ALOGW("FEATURESTIC GUARD: Suppressed abort() from worker thread (tid=%d, name=%s) -> exiting thread cleanly",
+        ALOGW("FEATURESTIC GUARD: Suppressed abort() from worker thread (tid=%d, name=%s) -> isolating thread",
               static_cast<int>(gettid()), tname[0] ? tname : "?");
-        pthread_exit(nullptr);
-        return;
+        struct timespec ts{3600, 0};
+        while (true) {
+            nanosleep(&ts, nullptr);
+        }
     }
     if (sOrigAbort) sOrigAbort();
 }
