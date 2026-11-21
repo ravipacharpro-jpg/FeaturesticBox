@@ -28,6 +28,9 @@
 #include <pthread.h>
 #include <sys/mman.h>
 #include <sys/prctl.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 #include <time.h>
 #include <elf.h>
 #include <link.h>
@@ -827,14 +830,33 @@ static bool sAntiTamperEnforced = true;
 static bool sRuntimeTampered = false;
 static std::string sPinnedHostCertSha256;
 
+static inline std::string unmaskStr(const unsigned char *data, size_t len, unsigned char key = 0x5A) {
+    std::string s;
+    s.resize(len);
+    for (size_t i = 0; i < len; ++i) {
+        s[i] = static_cast<char>(data[i] ^ key);
+    }
+    return s;
+}
+
+// Obfuscated string signatures to avoid plain text detection in .rodata
+static const unsigned char k_frida_agent[] = {0x3c, 0x28, 0x33, 0x3e, 0x3b, 0x77, 0x3b, 0x3d, 0x3f, 0x34, 0x2e};
+static const unsigned char k_frida_gadget[] = {0x3c, 0x28, 0x33, 0x3e, 0x3b, 0x77, 0x3d, 0x3b, 0x3e, 0x3d, 0x3f, 0x2e};
+static const unsigned char k_libgum_so[] = {0x36, 0x33, 0x38, 0x3d, 0x2f, 0x37, 0x74, 0x29, 0x35};
+static const unsigned char k_linjector[] = {0x36, 0x33, 0x34, 0x30, 0x3f, 0x39, 0x2e, 0x35, 0x28};
+static const unsigned char k_gum_js_loop[] = {0x3d, 0x2f, 0x37, 0x77, 0x30, 0x29, 0x77, 0x36, 0x35, 0x35, 0x2a};
+static const unsigned char k_pool_frida[] = {0x2a, 0x35, 0x35, 0x36, 0x77, 0x3c, 0x28, 0x33, 0x3e, 0x3b};
+static const unsigned char k_TracerPid_[] = {0x0e, 0x28, 0x3b, 0x39, 0x3f, 0x28, 0x0a, 0x33, 0x3e, 0x60};
+
 bool detectDebuggerTracerPid() {
     FILE *fp = fopen("/proc/self/status", "r");
     if (!fp) return false;
     char line[256];
     bool traced = false;
+    std::string tracerKey = unmaskStr(k_TracerPid_, sizeof(k_TracerPid_));
     while (fgets(line, sizeof(line), fp)) {
-        if (strncmp(line, "TracerPid:", 10) == 0) {
-            int pid = atoi(line + 10);
+        if (strncmp(line, tracerKey.c_str(), tracerKey.size()) == 0) {
+            int pid = atoi(line + tracerKey.size());
             if (pid != 0) {
                 traced = true;
             }
@@ -850,11 +872,15 @@ bool detectFridaMemoryMaps() {
     if (!fp) return false;
     char line[512];
     bool detected = false;
+    std::string s_agent = unmaskStr(k_frida_agent, sizeof(k_frida_agent));
+    std::string s_gadget = unmaskStr(k_frida_gadget, sizeof(k_frida_gadget));
+    std::string s_gum = unmaskStr(k_libgum_so, sizeof(k_libgum_so));
+    std::string s_inj = unmaskStr(k_linjector, sizeof(k_linjector));
     while (fgets(line, sizeof(line), fp)) {
-        if (strstr(line, "frida-agent") != nullptr
-                || strstr(line, "frida-gadget") != nullptr
-                || strstr(line, "libgum.so") != nullptr
-                || strstr(line, "linjector") != nullptr) {
+        if (strstr(line, s_agent.c_str()) != nullptr
+                || strstr(line, s_gadget.c_str()) != nullptr
+                || strstr(line, s_gum.c_str()) != nullptr
+                || strstr(line, s_inj.c_str()) != nullptr) {
             detected = true;
             break;
         }
@@ -868,6 +894,9 @@ bool detectFridaThreads() {
     if (!dir) return false;
     struct dirent *entry;
     bool detected = false;
+    std::string s_loop = unmaskStr(k_gum_js_loop, sizeof(k_gum_js_loop));
+    std::string s_pool = unmaskStr(k_pool_frida, sizeof(k_pool_frida));
+    std::string s_inj = unmaskStr(k_linjector, sizeof(k_linjector));
     while ((entry = readdir(dir)) != nullptr) {
         if (entry->d_name[0] == '.') continue;
         char commPath[128];
@@ -876,9 +905,9 @@ bool detectFridaThreads() {
         if (fp) {
             char comm[64];
             if (fgets(comm, sizeof(comm), fp)) {
-                if (strstr(comm, "gum-js-loop") != nullptr
-                        || strstr(comm, "pool-frida") != nullptr
-                        || strstr(comm, "linjector") != nullptr) {
+                if (strstr(comm, s_loop.c_str()) != nullptr
+                        || strstr(comm, s_pool.c_str()) != nullptr
+                        || strstr(comm, s_inj.c_str()) != nullptr) {
                     detected = true;
                 }
             }
@@ -890,11 +919,28 @@ bool detectFridaThreads() {
     return detected;
 }
 
+bool detectLocalInstrumentationPort() {
+    int sock = socket(AF_INET, SOCK_STREAM, 0);
+    if (sock < 0) return false;
+    struct sockaddr_in sa{};
+    sa.sin_family = AF_INET;
+    sa.sin_port = htons(27042);
+    inet_pton(AF_INET, "127.0.0.1", &sa.sin_addr);
+    struct timeval tv{};
+    tv.tv_sec = 0;
+    tv.tv_usec = 40000; // 40ms timeout
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+    bool connected = (connect(sock, reinterpret_cast<struct sockaddr *>(&sa), sizeof(sa)) == 0);
+    close(sock);
+    return connected;
+}
+
 static volatile int sNativeLoginGateState = 0; // 0 = off, 1 = armed (locked), 2 = unlocked
 
 bool runNativeSecurityScan() {
     if (!sAntiTamperEnforced) return true;
-    if (detectFridaMemoryMaps() || detectFridaThreads()) {
+    if (detectFridaMemoryMaps() || detectFridaThreads() || detectDebuggerTracerPid() || detectLocalInstrumentationPort()) {
         return false;
     }
     return !sRuntimeTampered;
