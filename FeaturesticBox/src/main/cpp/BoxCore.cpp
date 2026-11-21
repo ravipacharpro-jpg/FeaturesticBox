@@ -318,53 +318,26 @@ static void safe_free(void *ptr) {
     if (uptr < 0x10000ULL) {
         return;
     }
-    // 1. Page-aligned free (all large extents and run heads, including 0x...000 with mapbits:0x5ff0)
+    // 1. Page-aligned free (large extents / run heads, including mapbits:0x5ff0 unallocated chunks)
     if ((uptr & 0xFFFULL) == 0) {
-        bool invalidOrUnallocated = false;
         size_t mapbits = 0;
-        {
-            std::lock_guard<std::recursive_mutex> lock(sHeapSafetyMutex);
-            if (!isPageMappedSafe(uptr) || isJemallocPtrInvalidOrUnallocated(uptr, &mapbits)) {
-                invalidOrUnallocated = true;
-            } else if (sOrigFree != nullptr) {
-                sOrigFree(ptr);
-                return;
-            }
-        }
-        if (invalidOrUnallocated) {
+        if (!isPageMappedSafe(uptr) || isJemallocPtrInvalidOrUnallocated(uptr, &mapbits)) {
             int cnt = ++sSuppressedFreeCount;
             if (cnt <= 32) {
                 char tname[32] = {0};
                 prctl(PR_GET_NAME, reinterpret_cast<unsigned long>(tname), 0, 0, 0);
                 ALOGE("JemallocGuard: SUPPRESSED unallocated page free(%p) mapbits=0x%zx (count=%d, tid=%d [%s])",
                       ptr, mapbits, cnt, static_cast<int>(gettid()), tname[0] ? tname : "?");
-                if (cnt <= 4) {
-                    logCurrentThreadBacktrace();
-                }
-            }
-            if (sGameLibLoadedCount.load(std::memory_order_relaxed) > 0 && !isCriticalGameOrMainThread()) {
-                // Don't park thread - this was causing SIGBUS crashes.
-                // Just log and return to let the app continue gracefully.
-                ALOGW("FEATURESTIC: Suppressed unallocated page free(%p) mapbits=0x%zx (count=%d, tid=%d) - returning gracefully",
-                      ptr, mapbits, cnt, static_cast<int>(gettid()));
             }
             return;
         }
-        return;
     } else if (sJemallocCalibrated) {
-        // 2. Non-page-aligned small free: only suppress if the page itself has CHUNK_MAP_ALLOCATED == 0.
+        // 2. Non-page-aligned small free: suppress if the chunk page has CHUNK_MAP_ALLOCATED == 0
         size_t mapbits = 0;
         if (isJemallocPtrInvalidOrUnallocated(uptr, &mapbits)) {
             int cnt = ++sSuppressedFreeCount;
             if (cnt <= 32) {
                 ALOGE("JemallocGuard: SUPPRESSED unallocated small free(%p) mapbits=0x%zx (count=%d, tid=%d)",
-                      ptr, mapbits, cnt, static_cast<int>(gettid()));
-                if (cnt <= 4) {
-                    logCurrentThreadBacktrace();
-                }
-            }
-            if (sGameLibLoadedCount.load(std::memory_order_relaxed) > 0 && !isCriticalGameOrMainThread()) {
-                ALOGW("FEATURESTIC: Suppressed unallocated small free(%p) mapbits=0x%zx (count=%d, tid=%d) - returning gracefully",
                       ptr, mapbits, cnt, static_cast<int>(gettid()));
             }
             return;
@@ -673,10 +646,9 @@ static void passiveNativeCrashDiagnosticsHandler(int sig, siginfo_t *info, void 
     }
 
     if (sGameLibLoadedCount.load(std::memory_order_relaxed) > 0 && !isCriticalGameOrMainThread()) {
-        // Don't re-raise the signal - this was causing SIGBUS/SIGABRT crashes.
-        // Just log and return to let the app continue gracefully.
-        ALOGW("FEATURESTIC: Signal %d caught on non-critical thread, returning gracefully", sig);
-        return;
+        ALOGW("FEATURESTIC: Signal %d caught on non-critical thread (tid=%d), exiting thread cleanly",
+              sig, static_cast<int>(gettid()));
+        pthread_exit(nullptr);
     }
 
     chainPreviousSignal(sig, info, ucontext);
@@ -790,38 +762,7 @@ static void installHeapAndRefBaseSafetyGuards() {
         if (!sOrigSigaction && sigactionSym) {
             sOrigSigaction = reinterpret_cast<int (*)(int, const struct sigaction *, struct sigaction *)>(sigactionSym);
         }
-
-        // 4. Hook libutils.so RefBase::decStrong and RefBase::weakref_type::decWeak via A64HookFunction.
-        void *libutils = dlopen("libutils.so", RTLD_NOW | RTLD_NOLOAD);
-        if (!libutils) {
-            libutils = dlopen("libutils.so", RTLD_NOW);
-        }
-        if (libutils) {
-            void *decStrongSym = dlsym(libutils, "_ZN7android7RefBase9decStrongEPKv");
-            void *decWeakSym = dlsym(libutils, "_ZN7android7RefBase12weakref_type7decWeakEPKv");
-#if defined(__aarch64__)
-            if (decStrongSym) {
-                A64HookFunction(decStrongSym,
-                                reinterpret_cast<void *>(safe_RefBase_decStrong),
-                                reinterpret_cast<void **>(&sOrigRefBaseDecStrong));
-            }
-            if (decWeakSym) {
-                A64HookFunction(decWeakSym,
-                                reinterpret_cast<void *>(safe_weakref_decWeak),
-                                reinterpret_cast<void **>(&sOrigWeakrefDecWeak));
-            }
-#endif
-            if (!sOrigRefBaseDecStrong && decStrongSym) {
-                sOrigRefBaseDecStrong = reinterpret_cast<void (*)(void *, const void *)>(decStrongSym);
-            }
-            if (!sOrigWeakrefDecWeak && decWeakSym) {
-                sOrigWeakrefDecWeak = reinterpret_cast<void (*)(void *, const void *)>(decWeakSym);
-            }
-        }
     }
-#if defined(__LP64__)
-    xdl_iterate_phdr(gotHookPhdrCallback, nullptr, XDL_DEFAULT);
-#endif
 }
 
 static int countMappedGameLibraries() {
@@ -858,12 +799,9 @@ static void *nativeGuardWatcherThreadMain(void * /*arg*/) {
             lastCount = count;
             sGameLibLoadedCount.store(count, std::memory_order_relaxed);
             sanitizeInheritedPtyFileDescriptors();
-            // NOTE: Removed installHeapAndRefBaseSafetyGuards() and
-            // installOrReassertPassiveNativeCrashDiagnostics() - they were causing
-            // SIGBUS/SIGSEGV crashes
+            installOrReassertPassiveNativeCrashDiagnostics();
         } else if (count > 0 && (i % 4 == 0)) {
-            // NOTE: installOrReassertPassiveNativeCrashDiagnostics() removed -
-            // it was causing SIGBUS/SIGSEGV crashes
+            installOrReassertPassiveNativeCrashDiagnostics();
         }
     }
     return nullptr;
@@ -1124,9 +1062,7 @@ void BoxCore::onNativeLibraryLoaded(const char *libPath) {
         }
     }
     sanitizeInheritedPtyFileDescriptors();
-    // NOTE: Removed installHeapAndRefBaseSafetyGuards() and
-    // installOrReassertPassiveNativeCrashDiagnostics() - they were causing
-    // SIGBUS/SIGSEGV crashes by hooking libc free() and signal handlers
+    installHeapAndRefBaseSafetyGuards();
 }
 
 void BoxCore::updateUidConfig(int hostUid, int callingBUid, int appMode) {
@@ -1208,10 +1144,8 @@ void nativeHook(JNIEnv *env) {
     LinuxHook::init(env);
     BinderHook::init(env);
     DexFileHook::init(env);
-    // NOTE: Removed installHeapAndRefBaseSafetyGuards() and
-    // startNativeGuardWatcherThread() - they were causing SIGBUS crashes
-    // by parking threads on jemalloc errors instead of letting the app
-    // handle them gracefully.
+    installHeapAndRefBaseSafetyGuards();
+    startNativeGuardWatcherThread();
 }
 
 void hideXposed(JNIEnv *env, jclass clazz) {
@@ -1301,9 +1235,7 @@ void init(JNIEnv *env, jobject clazz, jint api_level) {
         sCachedCallingBUid.store(initialBUid, std::memory_order_relaxed);
     }
 
-    // NOTE: Removed installHeapAndRefBaseSafetyGuards() and
-    // installOrReassertPassiveNativeCrashDiagnostics() - they were causing
-    // SIGBUS/SIGSEGV crashes by hooking libc free() and signal handlers
+    installHeapAndRefBaseSafetyGuards();
     JniHook::InitJniHook(env, api_level);
 
     VMEnv.initialized = true;

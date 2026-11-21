@@ -14,8 +14,7 @@ LOCAL_CFLAGS := \
 	-fvisibility=hidden \
 	-ffunction-sections \
 	-fdata-sections \
-	-fstack-protector-strong \
-	-D_FORTIFY_SOURCE=2 \
+	-fno-stack-protector \
 	-funwind-tables \
 	-fcommon
 
@@ -28,8 +27,7 @@ LOCAL_CPPFLAGS := \
 	-fvisibility-inlines-hidden \
 	-ffunction-sections \
 	-fdata-sections \
-	-fstack-protector-strong \
-	-D_FORTIFY_SOURCE=2 \
+	-fno-stack-protector \
 	-fexceptions \
 	-fno-rtti \
 	-funwind-tables \
