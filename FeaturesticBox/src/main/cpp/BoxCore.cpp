@@ -701,7 +701,7 @@ static void installOrReassertPassiveNativeCrashDiagnostics() {
     struct sigaction sa{};
     sa.sa_sigaction = passiveNativeCrashDiagnosticsHandler;
     sigemptyset(&sa.sa_mask);
-    sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
+    sa.sa_flags = SA_SIGINFO;
 
     struct sigaction prevSegv{};
     if (origSa(SIGSEGV, &sa, &prevSegv) == 0) {
@@ -749,7 +749,7 @@ static int safe_sigaction_common(int sig,
                 struct sigaction sa{};
                 sa.sa_sigaction = passiveNativeCrashDiagnosticsHandler;
                 sigemptyset(&sa.sa_mask);
-                sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
+                sa.sa_flags = SA_SIGINFO;
                 origFn(sig, &sa, nullptr);
             }
         }
