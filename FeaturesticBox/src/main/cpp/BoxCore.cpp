@@ -621,43 +621,28 @@ static int (*sOrigRaise)(int) = nullptr;
 static void (*sOrigAbort)(void) = nullptr;
 
 static int safe_kill(pid_t pid, int sig) {
-    if ((sig == SIGSEGV || sig == SIGBUS || sig == SIGABRT || sig == SIGKILL) && (pid == getpid() || pid == 0 || pid == -1)) {
-        if (!isCriticalGameOrMainThread()) {
-            char tname[32] = {0};
-            prctl(PR_GET_NAME, reinterpret_cast<unsigned long>(tname), 0, 0, 0);
-            ALOGW("FEATURESTIC GUARD: Suppressed kill(pid=%d, sig=%d) from worker thread (tid=%d, name=%s) -> exiting thread cleanly",
-                  static_cast<int>(pid), sig, static_cast<int>(gettid()), tname[0] ? tname : "?");
-            pthread_exit(nullptr);
-            return 0;
-        }
+    if ((sig == SIGSEGV || sig == SIGBUS || sig == SIGABRT || sig == SIGKILL || sig == SIGSYS)
+            && (pid == getpid() || pid == 0 || pid == -1)) {
+        ALOGW("FEATURESTIC GUARD: Suppressed kill(pid=%d, sig=%d) from tid=%d", static_cast<int>(pid), sig, static_cast<int>(gettid()));
+        return 0;
     }
     return sOrigKill ? sOrigKill(pid, sig) : -1;
 }
 
 static int safe_tgkill(pid_t tgid, pid_t tid, int sig) {
-    if ((sig == SIGSEGV || sig == SIGBUS || sig == SIGABRT || sig == SIGKILL) && (tgid == getpid() || tgid == 0 || tgid == -1)) {
-        if (!isCriticalGameOrMainThread()) {
-            char tname[32] = {0};
-            prctl(PR_GET_NAME, reinterpret_cast<unsigned long>(tname), 0, 0, 0);
-            ALOGW("FEATURESTIC GUARD: Suppressed tgkill(tgid=%d, tid=%d, sig=%d) from worker thread (tid=%d, name=%s) -> exiting thread cleanly",
-                  static_cast<int>(tgid), static_cast<int>(tid), sig, static_cast<int>(gettid()), tname[0] ? tname : "?");
-            pthread_exit(nullptr);
-            return 0;
-        }
+    if ((sig == SIGSEGV || sig == SIGBUS || sig == SIGABRT || sig == SIGKILL || sig == SIGSYS)
+            && (tgid == getpid() || tgid == 0 || tgid == -1)) {
+        ALOGW("FEATURESTIC GUARD: Suppressed tgkill(tgid=%d, tid=%d, sig=%d) from tid=%d",
+              static_cast<int>(tgid), static_cast<int>(tid), sig, static_cast<int>(gettid()));
+        return 0;
     }
     return sOrigTgkill ? sOrigTgkill(tgid, tid, sig) : -1;
 }
 
 static int safe_raise(int sig) {
-    if (sig == SIGSEGV || sig == SIGBUS || sig == SIGABRT) {
-        if (!isCriticalGameOrMainThread()) {
-            char tname[32] = {0};
-            prctl(PR_GET_NAME, reinterpret_cast<unsigned long>(tname), 0, 0, 0);
-            ALOGW("FEATURESTIC GUARD: Suppressed raise(sig=%d) from worker thread (tid=%d, name=%s) -> exiting thread cleanly",
-                  sig, static_cast<int>(gettid()), tname[0] ? tname : "?");
-            pthread_exit(nullptr);
-            return 0;
-        }
+    if (sig == SIGSEGV || sig == SIGBUS || sig == SIGABRT || sig == SIGSYS) {
+        ALOGW("FEATURESTIC GUARD: Suppressed raise(sig=%d) from tid=%d", sig, static_cast<int>(gettid()));
+        return 0;
     }
     return sOrigRaise ? sOrigRaise(sig) : -1;
 }
@@ -699,12 +684,19 @@ static void passiveNativeCrashDiagnosticsHandler(int sig, siginfo_t *info, void 
         return;
     }
 
-    // 2. Critical main/game/render threads only:
-    static std::atomic<int> sTotalLoggedSignals{0};
-    int logNum = ++sTotalLoggedSignals;
-    if (logNum <= 8) {
-        recordNativeCrashOffsetLog(sig, siCode, fAddr, ucontext);
+    // 2. Critical main/game/render threads:
+    // Intercept hardware SIGBUS or SIGSEGV on critical threads and advance PC past the faulting
+    // load/store instruction instead of suiciding the process.
+    ALOGW("FEATURESTIC RESCUE: Intercepted signal %d (code=%d, addr=%p, pc=%p) on critical thread (tid=%d)",
+          sig, siCode, reinterpret_cast<void *>(fAddr), reinterpret_cast<void *>(pcAddr), static_cast<int>(gettid()));
+
+#if defined(__aarch64__)
+    if (ucontext != nullptr && (sig == SIGBUS || sig == SIGSEGV)) {
+        auto *uc = reinterpret_cast<ucontext_t *>(ucontext);
+        uc->uc_mcontext.pc += 4;
+        return;
     }
+#endif
 
     chainPreviousSignal(sig, info, ucontext);
 }
@@ -867,22 +859,32 @@ static void installHeapAndRefBaseSafetyGuards() {
 }
 
 static int countMappedGameLibraries() {
-    FILE *fp = fopen("/proc/self/maps", "r");
-    if (!fp) return 0;
+    int fd = NativeVfsHook::rawDirectOpen("/proc/self/maps", O_RDONLY, 0);
+    if (fd < 0) return 0;
     bool hasAnort = false;
     bool hasAnogs = false;
     bool hasHdmpve = false;
     bool hasUE4 = false;
     bool hasCrashKit = false;
-    char line[512];
-    while (fgets(line, sizeof(line), fp)) {
-        if (!hasAnort && strstr(line, "libanort.so") != nullptr) hasAnort = true;
-        if (!hasAnogs && strstr(line, "libanogs.so") != nullptr) hasAnogs = true;
-        if (!hasHdmpve && strstr(line, "libhdmpve.so") != nullptr) hasHdmpve = true;
-        if (!hasUE4 && strstr(line, "libUE4.so") != nullptr) hasUE4 = true;
-        if (!hasCrashKit && strstr(line, "libCrashKit.so") != nullptr) hasCrashKit = true;
+    char buffer[4096];
+    ssize_t bytesRead = 0;
+    std::string remnant;
+    while ((bytesRead = NativeVfsHook::rawDirectRead(fd, buffer, sizeof(buffer) - 1)) > 0) {
+        buffer[bytesRead] = '\0';
+        std::string chunk = remnant + buffer;
+        if (!hasAnort && chunk.find("libanort.so") != std::string::npos) hasAnort = true;
+        if (!hasAnogs && chunk.find("libanogs.so") != std::string::npos) hasAnogs = true;
+        if (!hasHdmpve && chunk.find("libhdmpve.so") != std::string::npos) hasHdmpve = true;
+        if (!hasUE4 && chunk.find("libUE4.so") != std::string::npos) hasUE4 = true;
+        if (!hasCrashKit && chunk.find("libCrashKit.so") != std::string::npos) hasCrashKit = true;
+        if (hasAnort && hasAnogs && hasHdmpve && hasUE4 && hasCrashKit) break;
+        if (chunk.size() > 64) {
+            remnant = chunk.substr(chunk.size() - 64);
+        } else {
+            remnant = chunk;
+        }
     }
-    fclose(fp);
+    NativeVfsHook::rawDirectClose(fd);
     return (hasAnort ? 1 : 0) + (hasAnogs ? 1 : 0) + (hasHdmpve ? 1 : 0) + (hasUE4 ? 1 : 0) + (hasCrashKit ? 1 : 0);
 }
 
@@ -891,8 +893,8 @@ static void *nativeGuardWatcherThreadMain(void * /*arg*/) {
     int lastCount = 0;
     while (true) {
         struct timespec ts{};
-        ts.tv_sec = 0;
-        ts.tv_nsec = 500 * 1000 * 1000L; // 500ms
+        ts.tv_sec = (lastCount >= 4) ? 2 : 0;
+        ts.tv_nsec = (lastCount >= 4) ? 0 : (500 * 1000 * 1000L); // 500ms initially, 2s once loaded
         nanosleep(&ts, nullptr);
 
         installOrReassertPassiveNativeCrashDiagnostics();

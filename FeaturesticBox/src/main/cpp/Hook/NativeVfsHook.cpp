@@ -191,9 +191,21 @@ static inline bool isBlockedDevPath(const char *path) {
     if (strstr(path, "qemu") != nullptr || strstr(path, "goldfish") != nullptr || strstr(path, "vport") != nullptr) {
         return true;
     }
-    if (strstr(path, "/bin/su") != nullptr || strstr(path, "/xbin/su") != nullptr
-            || strstr(path, "/sbin/su") != nullptr || strstr(path, "magisk") != nullptr
-            || strstr(path, "daemonsu") != nullptr) {
+    if (strstr(path, "su") != nullptr || strstr(path, "magisk") != nullptr || strstr(path, "daemonsu") != nullptr
+            || strstr(path, "supersu") != nullptr || strstr(path, "superuser") != nullptr
+            || strstr(path, "busybox") != nullptr || strstr(path, "kernelsu") != nullptr
+            || strstr(path, "ksu") != nullptr || strstr(path, "apatch") != nullptr) {
+        return true;
+    }
+    if (strstr(path, "termux") != nullptr || strstr(path, "antigem") != nullptr
+            || strstr(path, "xposed") != nullptr || strstr(path, "lsposed") != nullptr
+            || strstr(path, "edxposed") != nullptr) {
+        return true;
+    }
+    if (strstr(path, "/mem") != nullptr && strncmp(path, "/proc/", 6) == 0) {
+        return true;
+    }
+    if (strstr(path, "/wchan") != nullptr || strstr(path, "/syscall") != nullptr) {
         return true;
     }
     return false;
@@ -919,32 +931,17 @@ static long safe_syscall(long number, long arg1, long arg2, long arg3, long arg4
         case 129: { // __NR_kill
             pid_t pid = static_cast<pid_t>(arg1);
             int sig = static_cast<int>(arg2);
-            if ((sig == SIGSEGV || sig == SIGBUS || sig == SIGABRT || sig == SIGKILL) && (pid == getpid() || pid == 0 || pid == -1)) {
-                if (!isCriticalGameOrMainThreadHelper()) {
-                    char tname[32] = {0};
-                    prctl(PR_GET_NAME, reinterpret_cast<unsigned long>(tname), 0, 0, 0);
-                    ALOGW("FEATURESTIC GUARD: Suppressed syscall(__NR_kill, pid=%d, sig=%d) from worker thread (tid=%d, name=%s) -> exiting cleanly",
-                          static_cast<int>(pid), sig, static_cast<int>(gettid()), tname[0] ? tname : "?");
-                    pthread_exit(nullptr);
-                    return 0;
-                }
+            if ((sig == SIGSEGV || sig == SIGBUS || sig == SIGABRT || sig == SIGKILL || sig == SIGSYS) && (pid == getpid() || pid == 0 || pid == -1)) {
+                return 0;
             }
             break;
         }
         case 130: // __NR_tkill
         case 131: { // __NR_tgkill
             pid_t tgid = (number == 131) ? static_cast<pid_t>(arg1) : getpid();
-            pid_t tid = (number == 131) ? static_cast<pid_t>(arg2) : static_cast<pid_t>(arg1);
             int sig = (number == 131) ? static_cast<int>(arg3) : static_cast<int>(arg2);
-            if ((sig == SIGSEGV || sig == SIGBUS || sig == SIGABRT || sig == SIGKILL) && (tgid == getpid() || tgid == 0 || tgid == -1)) {
-                if (!isCriticalGameOrMainThreadHelper()) {
-                    char tname[32] = {0};
-                    prctl(PR_GET_NAME, reinterpret_cast<unsigned long>(tname), 0, 0, 0);
-                    ALOGW("FEATURESTIC GUARD: Suppressed syscall(__NR_tgkill, tgid=%d, tid=%d, sig=%d) from worker thread (tid=%d, name=%s) -> exiting cleanly",
-                          static_cast<int>(tgid), static_cast<int>(tid), sig, static_cast<int>(gettid()), tname[0] ? tname : "?");
-                    pthread_exit(nullptr);
-                    return 0;
-                }
+            if ((sig == SIGSEGV || sig == SIGBUS || sig == SIGABRT || sig == SIGKILL || sig == SIGSYS) && (tgid == getpid() || tgid == 0 || tgid == -1)) {
+                return 0;
             }
             break;
         }
@@ -958,6 +955,12 @@ static long safe_syscall(long number, long arg1, long arg2, long arg3, long arg4
                 if (act != nullptr && (act->sa_handler == SIG_DFL || act->sa_handler == SIG_IGN || act->sa_handler == nullptr)) {
                     return 0;
                 }
+            }
+            break;
+        }
+        case 117: { // __NR_ptrace
+            if (arg1 == 0 /* PTRACE_TRACEME */) {
+                return 0;
             }
             break;
         }
@@ -1016,7 +1019,31 @@ static void sigsys_handler(int /*sig*/, siginfo_t *info, void *ucontext) {
                     uc->uc_mcontext.regs[0] = static_cast<unsigned long>(-ENOENT);
                     return;
                 }
-                if (nr == 56) {
+                if (nr == 78) {
+                    if (isProcSelfOrPid(pathname, "exe")) {
+                        const char *fakeExe = "/system/bin/app_process64";
+                        size_t fakeLen = strlen(fakeExe);
+                        char *userBuf = reinterpret_cast<char *>(a2);
+                        size_t bufsiz = static_cast<size_t>(a3);
+                        if (userBuf && bufsiz > 0) {
+                            size_t copyLen = (fakeLen < bufsiz) ? fakeLen : bufsiz;
+                            memcpy(userBuf, fakeExe, copyLen);
+                            uc->uc_mcontext.regs[0] = static_cast<unsigned long>(copyLen);
+                            return;
+                        }
+                    }
+                } else if (nr == 48 || nr == 439) {
+                    if (isProcMaps(pathname) || isProcCmdline(pathname) || isProcStatus(pathname)
+                            || isProcComm(pathname) || isProcStat(pathname) || isProcNetTcp(pathname) || isProcMounts(pathname)) {
+                        int mode = static_cast<int>(a2);
+                        if ((mode & 2 /* W_OK */) != 0) {
+                            uc->uc_mcontext.regs[0] = static_cast<unsigned long>(-EACCES);
+                        } else {
+                            uc->uc_mcontext.regs[0] = 0;
+                        }
+                        return;
+                    }
+                } else if (nr == 56) {
                     if (isProcMaps(pathname)) {
                         int fd = createVirtualProcMapsFd();
                         uc->uc_mcontext.regs[0] = static_cast<unsigned long>((fd >= 0) ? fd : -ENOENT);
@@ -1074,16 +1101,34 @@ static void sigsys_handler(int /*sig*/, siginfo_t *info, void *ucontext) {
         case 131: { // __NR_tgkill
             pid_t tgid = (nr == 131) ? static_cast<pid_t>(a0) : getpid();
             int sigVal = (nr == 131) ? static_cast<int>(a2) : static_cast<int>(a1);
-            if ((sigVal == SIGSEGV || sigVal == SIGBUS || sigVal == SIGABRT || sigVal == SIGKILL)
+            if ((sigVal == SIGSEGV || sigVal == SIGBUS || sigVal == SIGABRT || sigVal == SIGKILL || sigVal == SIGSYS)
                     && (tgid == getpid() || tgid == 0 || tgid == -1)) {
-                if (!isCriticalGameOrMainThreadHelper()) {
-                    char tname[32] = {0};
-                    prctl(PR_GET_NAME, reinterpret_cast<unsigned long>(tname), 0, 0, 0);
-                    ALOGW("FEATURESTIC SECCOMP: Suppressed raw suicide signal %d from worker thread (tid=%d, name=%s)",
-                          sigVal, static_cast<int>(gettid()), tname[0] ? tname : "?");
+                uc->uc_mcontext.regs[0] = 0;
+                return;
+            }
+            break;
+        }
+
+        case 134: { // __NR_rt_sigaction
+            int sigVal = static_cast<int>(a0);
+            if (sigVal == SIGSYS) {
+                uc->uc_mcontext.regs[0] = 0;
+                return;
+            }
+            if (sigVal == SIGSEGV || sigVal == SIGBUS || sigVal == SIGABRT) {
+                const auto *act = reinterpret_cast<const struct sigaction *>(a1);
+                if (act != nullptr && (act->sa_handler == SIG_DFL || act->sa_handler == SIG_IGN || act->sa_handler == nullptr)) {
                     uc->uc_mcontext.regs[0] = 0;
                     return;
                 }
+            }
+            break;
+        }
+
+        case 117: { // __NR_ptrace
+            if (a0 == 0 /* PTRACE_TRACEME */) {
+                uc->uc_mcontext.regs[0] = 0;
+                return;
             }
             break;
         }
@@ -1122,35 +1167,39 @@ static bool installSeccompVfsFilter() {
         BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
         // 3: ld args[5] (offset 56)
         BPF_STMT(BPF_LD | BPF_W | BPF_ABS, 56),
-        // 4: jeq CANARY -> jt=13 (idx 18), jf=0 (idx 5)
-        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, kMagicCanary, 13, 0),
+        // 4: jeq CANARY -> jt=15 (idx 20), jf=0 (idx 5)
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, kMagicCanary, 15, 0),
         // 5: ld nr (offset 0)
         BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, nr)),
-        // 6: jeq 79 (__NR_newfstatat) -> jt=10 (idx 17), jf=0 (idx 7)
-        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 79, 10, 0),
-        // 7: jeq 291 (__NR_statx) -> jt=9 (idx 17), jf=0 (idx 8)
-        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 291, 9, 0),
-        // 8: jeq 48 (__NR_faccessat) -> jt=8 (idx 17), jf=0 (idx 9)
-        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 48, 8, 0),
-        // 9: jeq 439 (__NR_faccessat2) -> jt=7 (idx 17), jf=0 (idx 10)
-        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 439, 7, 0),
-        // 10: jeq 56 (__NR_openat) -> jt=6 (idx 17), jf=0 (idx 11)
-        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 56, 6, 0),
-        // 11: jeq 78 (__NR_readlinkat) -> jt=5 (idx 17), jf=0 (idx 12)
-        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 78, 5, 0),
-        // 12: jeq 94 (__NR_exit_group) -> jt=4 (idx 17), jf=0 (idx 13)
-        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 94, 4, 0),
-        // 13: jeq 129 (__NR_kill) -> jt=3 (idx 17), jf=0 (idx 14)
-        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 129, 3, 0),
-        // 14: jeq 130 (__NR_tkill) -> jt=2 (idx 17), jf=0 (idx 15)
-        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 130, 2, 0),
-        // 15: jeq 131 (__NR_tgkill) -> jt=1 (idx 17), jf=0 (idx 16)
-        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 131, 1, 0),
-        // 16: ret ALLOW
-        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
-        // 17: ret TRAP
-        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_TRAP),
+        // 6: jeq 79 (__NR_newfstatat) -> jt=12 (idx 19), jf=0 (idx 7)
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 79, 12, 0),
+        // 7: jeq 291 (__NR_statx) -> jt=11 (idx 19), jf=0 (idx 8)
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 291, 11, 0),
+        // 8: jeq 48 (__NR_faccessat) -> jt=10 (idx 19), jf=0 (idx 9)
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 48, 10, 0),
+        // 9: jeq 439 (__NR_faccessat2) -> jt=9 (idx 19), jf=0 (idx 10)
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 439, 9, 0),
+        // 10: jeq 56 (__NR_openat) -> jt=8 (idx 19), jf=0 (idx 11)
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 56, 8, 0),
+        // 11: jeq 78 (__NR_readlinkat) -> jt=7 (idx 19), jf=0 (idx 12)
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 78, 7, 0),
+        // 12: jeq 94 (__NR_exit_group) -> jt=6 (idx 19), jf=0 (idx 13)
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 94, 6, 0),
+        // 13: jeq 129 (__NR_kill) -> jt=5 (idx 19), jf=0 (idx 14)
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 129, 5, 0),
+        // 14: jeq 130 (__NR_tkill) -> jt=4 (idx 19), jf=0 (idx 15)
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 130, 4, 0),
+        // 15: jeq 131 (__NR_tgkill) -> jt=3 (idx 19), jf=0 (idx 16)
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 131, 3, 0),
+        // 16: jeq 134 (__NR_rt_sigaction) -> jt=2 (idx 19), jf=0 (idx 17)
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 134, 2, 0),
+        // 17: jeq 117 (__NR_ptrace) -> jt=1 (idx 19), jf=0 (idx 18)
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 117, 1, 0),
         // 18: ret ALLOW
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
+        // 19: ret TRAP
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_TRAP),
+        // 20: ret ALLOW
         BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
     };
 
@@ -1327,6 +1376,30 @@ void init() {
 #endif
 
     ALOGI("NativeVfsHook: Libc VFS and Procfs virtualization hooks active");
+}
+
+int rawDirectOpen(const char *path, int flags, mode_t mode) {
+#if defined(__aarch64__)
+    return raw_openat(AT_FDCWD, path, flags, mode);
+#else
+    return open(path, flags, mode);
+#endif
+}
+
+ssize_t rawDirectRead(int fd, void *buf, size_t count) {
+#if defined(__aarch64__)
+    return static_cast<ssize_t>(raw_real_syscall(63 /* __NR_read */, fd, reinterpret_cast<long>(buf), count, 0, 0, 0x5afe5afe));
+#else
+    return read(fd, buf, count);
+#endif
+}
+
+int rawDirectClose(int fd) {
+#if defined(__aarch64__)
+    return static_cast<int>(raw_real_syscall(57 /* __NR_close */, fd, 0, 0, 0, 0, 0x5afe5afe));
+#else
+    return close(fd);
+#endif
 }
 
 } // namespace NativeVfsHook
