@@ -1172,7 +1172,6 @@ static bool installSeccompVfsFilter() {
     ALOGI("NativeVfsHook: SECCOMP-BPF Raw Syscall Trap successfully active");
     return true;
 }
-#endif
 
 } // anonymous namespace
 
