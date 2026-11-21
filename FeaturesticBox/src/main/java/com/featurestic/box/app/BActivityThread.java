@@ -501,6 +501,8 @@ public class BActivityThread extends IBActivityThread.Stub {
             BRCompatibility.get().setTargetSdkVersion(applicationInfo.targetSdkVersion);
         }
         RNative.init(Build.VERSION.SDK_INT);
+        RNative.setNativeProp("debug.featurestic.target_pkg", packageName);
+        RNative.setNativeProp("debug.featurestic.process_name", processName != null ? processName : packageName);
         RNative.setNativeProp("debug.featurestic.host_uid", String.valueOf(FeaturesticBoxCore.getHostUid()));
         RNative.setNativeProp("debug.featurestic.calling_buid", String.valueOf(getCallingBUid()));
         int appMode = "com.google.android.gms".equals(packageName) ? 1

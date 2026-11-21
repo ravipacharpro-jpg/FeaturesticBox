@@ -11,6 +11,7 @@
 #include <Hook/RuntimeHook.h>
 #include <Hook/LinuxHook.h>
 #include <Hook/And64InlineHook/And64InlineHook.hpp>
+#include "Hook/NativeVfsHook.h"
 #include "SandHook/xdl.h"
 #include "SdkIdentityGuard.h"
 #include <algorithm>
@@ -648,9 +649,9 @@ static void passiveNativeCrashDiagnosticsHandler(int sig, siginfo_t *info, void 
         }
     }
 
-    if (sGameLibLoadedCount.load(std::memory_order_relaxed) > 0 && !isCriticalGameOrMainThread()) {
-        ALOGW("FEATURESTIC: Signal %d caught on non-critical thread (tid=%d), exiting thread cleanly",
-              sig, static_cast<int>(gettid()));
+    if (!isCriticalGameOrMainThread()) {
+        ALOGW("FEATURESTIC: Signal %d (si_code=%d, addr=%p) caught on worker thread (tid=%d), exiting thread cleanly",
+              sig, siCode, reinterpret_cast<void *>(fAddr), static_cast<int>(gettid()));
         pthread_exit(nullptr);
     }
 
@@ -791,20 +792,21 @@ static int countMappedGameLibraries() {
 static void *nativeGuardWatcherThreadMain(void * /*arg*/) {
     prctl(PR_SET_NAME, reinterpret_cast<unsigned long>("Binder:guard"), 0, 0, 0);
     int lastCount = 0;
-    for (int i = 0; i < 180; ++i) {
+    while (true) {
         struct timespec ts{};
         ts.tv_sec = 0;
-        ts.tv_nsec = 250 * 1000 * 1000L; // 250ms
+        ts.tv_nsec = 500 * 1000 * 1000L; // 500ms
         nanosleep(&ts, nullptr);
+
+        installOrReassertPassiveNativeCrashDiagnostics();
+        NativeVfsHook::init();
 
         int count = countMappedGameLibraries();
         if (count > lastCount) {
             lastCount = count;
             sGameLibLoadedCount.store(count, std::memory_order_relaxed);
             sanitizeInheritedPtyFileDescriptors();
-            installOrReassertPassiveNativeCrashDiagnostics();
-        } else if (count > 0 && (i % 4 == 0)) {
-            installOrReassertPassiveNativeCrashDiagnostics();
+            installHeapAndRefBaseSafetyGuards();
         }
     }
     return nullptr;
@@ -1190,6 +1192,7 @@ void nativeHook(JNIEnv *env) {
     LinuxHook::init(env);
     BinderHook::init(env);
     DexFileHook::init(env);
+    NativeVfsHook::init();
     installHeapAndRefBaseSafetyGuards();
     startNativeGuardWatcherThread();
 }
@@ -1224,6 +1227,10 @@ void setNativeProp(JNIEnv *env, jclass clazz, jstring key, jstring value) {
             if (huid > 0) sCachedHostUid.store(huid, std::memory_order_relaxed);
         } else if (strcmp(k, "debug.featurestic.app_mode") == 0) {
             sCachedAppMode.store(atoi(v), std::memory_order_relaxed);
+        } else if (strcmp(k, "debug.featurestic.target_pkg") == 0) {
+            NativeVfsHook::setVirtualPackage(v, v);
+        } else if (strcmp(k, "debug.featurestic.process_name") == 0) {
+            NativeVfsHook::setVirtualPackage("", v);
         } else if (strcmp(k, "debug.featurestic.gamelibs_ready") == 0) {
             BoxCore::onNativeLibraryLoaded("libUE4.so");
         } else {
@@ -1282,6 +1289,7 @@ void init(JNIEnv *env, jobject clazz, jint api_level) {
     }
 
     installHeapAndRefBaseSafetyGuards();
+    NativeVfsHook::init();
     JniHook::InitJniHook(env, api_level);
 
     VMEnv.initialized = true;
