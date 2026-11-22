@@ -1105,38 +1105,91 @@ static long safe_syscall(long number, long arg1, long arg2, long arg3, long arg4
             }
             break;
         }
+        case 132: { // __NR_sigaltstack
+            if (arg1 != 0) {
+                const auto *ss = reinterpret_cast<const stack_t *>(arg1);
+                // Prevent anti-cheat from disabling alternate signal stack (SS_DISABLE = 2) or passing invalid pointer
+                if ((ss->ss_flags & 2 /* SS_DISABLE */) || ss->ss_sp == nullptr || ss->ss_size < MINSIGSTKSZ) {
+                    if (arg2 != 0) {
+#if defined(__aarch64__)
+                        register long x8 __asm__("x8") = 132;
+                        register long x0 __asm__("x0") = 0;
+                        register long x1 __asm__("x1") = arg2;
+                        __asm__ __volatile__("svc #0" : "+r"(x0) : "r"(x8), "r"(x1) : "memory", "cc");
+                        return x0;
+#else
+                        return sOrigSyscall ? sOrigSyscall(132, 0, arg2, 0, 0, 0, 0) : 0;
+#endif
+                    }
+                    return 0; // Suppress disabling alternate signal stack
+                }
+            }
+            break;
+        }
         case 134: { // __NR_rt_sigaction
             int sig = static_cast<int>(arg1);
             if (sig == SIGSYS || sig == SIGSEGV || sig == SIGBUS || sig == SIGABRT || sig == SIGILL) {
-                if (arg2 != 0) {
-                    void *handler = *reinterpret_cast<void *const *>(arg2);
-                    if (handler != nullptr && (handler == gOurSignalHandler || handler == gOurSigsysHandler)) {
-#if defined(__aarch64__)
-                        register long x8 __asm__("x8") = 134; // __NR_rt_sigaction
-                        register long x0 __asm__("x0") = sig;
-                        register long x1 __asm__("x1") = arg2;
-                        register long x2 __asm__("x2") = arg3;
-                        register long x3 __asm__("x3") = arg4;
-                        __asm__ __volatile__("svc #0" : "+r"(x0) : "r"(x8), "r"(x1), "r"(x2), "r"(x3) : "memory", "cc");
-                        return x0;
-#else
-                        return sOrigSyscall ? sOrigSyscall(134, sig, arg2, arg3, arg4, 0, 0) : 0;
-#endif
-                    }
-                }
-                if (arg3 != 0) {
+                void *ourHandler = (sig == SIGSYS && gOurSigsysHandler != nullptr) ? gOurSigsysHandler : gOurSignalHandler;
+                if (ourHandler != nullptr) {
+                    struct {
+                        void *sa_handler;
+                        unsigned long sa_flags;
+                        void (*sa_restorer)(void);
+                        unsigned long sa_mask;
+                    } ksa{};
+                    ksa.sa_handler = ourHandler;
+                    ksa.sa_flags = SA_SIGINFO | SA_NODEFER | SA_ONSTACK;
+                    ksa.sa_restorer = nullptr;
+                    ksa.sa_mask = 0;
 #if defined(__aarch64__)
                     register long x8 __asm__("x8") = 134; // __NR_rt_sigaction
                     register long x0 __asm__("x0") = sig;
-                    register long x1 __asm__("x1") = 0;
+                    register long x1 __asm__("x1") = reinterpret_cast<long>(&ksa);
                     register long x2 __asm__("x2") = arg3;
-                    register long x3 __asm__("x3") = arg4;
+                    register long x3 __asm__("x3") = 8;
                     __asm__ __volatile__("svc #0" : "+r"(x0) : "r"(x8), "r"(x1), "r"(x2), "r"(x3) : "memory", "cc");
+                    return x0;
 #else
-                    if (sOrigSyscall) sOrigSyscall(134, sig, 0, arg3, arg4, 0, 0);
+                    return sOrigSyscall ? sOrigSyscall(134, sig, reinterpret_cast<uintptr_t>(&ksa), arg3, 8, 0, 0) : 0;
 #endif
                 }
                 return 0; // Never allow overriding protective signal handlers via raw syscalls!
+            }
+            break;
+        }
+        case 135: { // __NR_rt_sigprocmask
+            int how = static_cast<int>(arg1);
+            uintptr_t setPtr = static_cast<uintptr_t>(arg2);
+            uintptr_t oldsetPtr = static_cast<uintptr_t>(arg3);
+            size_t sigsetsize = static_cast<size_t>(arg4);
+            if (setPtr != 0 && (how == 0 /* SIG_BLOCK */ || how == 2 /* SIG_SETMASK */)) {
+                // Strip fatal hardware & trap signals from mask so kernel never drops synchronous hardware signals!
+                uint64_t mask = *reinterpret_cast<const uint64_t *>(setPtr);
+                constexpr uint64_t DANGEROUS_MASK = (1ULL << (SIGSEGV - 1)) |
+                                                    (1ULL << (SIGBUS - 1))  |
+                                                    (1ULL << (SIGSYS - 1))  |
+                                                    (1ULL << (SIGILL - 1))  |
+                                                    (1ULL << (SIGABRT - 1));
+                mask &= ~DANGEROUS_MASK;
+#if defined(__aarch64__)
+                register long x8 __asm__("x8") = 135; // __NR_rt_sigprocmask
+                register long x0 __asm__("x0") = how;
+                register long x1 __asm__("x1") = reinterpret_cast<long>(&mask);
+                register long x2 __asm__("x2") = oldsetPtr;
+                register long x3 __asm__("x3") = sigsetsize ? sigsetsize : sizeof(uint64_t);
+                __asm__ __volatile__("svc #0" : "+r"(x0) : "r"(x8), "r"(x1), "r"(x2), "r"(x3) : "memory", "cc");
+                return x0;
+#else
+                return sOrigSyscall ? sOrigSyscall(135, how, reinterpret_cast<uintptr_t>(&mask), oldsetPtr, sigsetsize ? sigsetsize : 8, 0, 0) : 0;
+#endif
+            }
+            break;
+        }
+        case 167: { // __NR_prctl
+            int option = static_cast<int>(arg1);
+            if (option == 22 /* PR_SET_SECCOMP */) {
+                ALOGW("FEATURESTIC GUARD: Suppressed syscall prctl(PR_SET_SECCOMP) from tid=%d", static_cast<int>(gettid()));
+                return 0;
             }
             break;
         }

@@ -664,7 +664,14 @@ static void passiveNativeCrashDiagnosticsHandler(int sig, siginfo_t *info, void 
                       static_cast<int>(gettid()), tname[0] ? tname : "?", sig);
                 while (true) { usleep(1000000); }
             }
-            uc->uc_mcontext.pc += 4;
+            if (currentPc >= 0x10000 && isPageMappedSafe(currentPc)) {
+                uc->uc_mcontext.pc += 4;
+                return;
+            } else if (lr >= 0x10000 && isPageMappedSafe(lr)) {
+                uc->uc_mcontext.pc = lr;
+                uc->uc_mcontext.regs[0] = 0;
+                return;
+            }
             return;
         }
     }
@@ -780,10 +787,19 @@ static int (*sOrigPthreadSigmask)(int, const sigset_t *, sigset_t *) = nullptr;
 static int (*sOrigSigprocmask)(int, const sigset_t *, sigset_t *) = nullptr;
 static int (*sOrigSigprocmask64)(int, const sigset64_t *, sigset64_t *) = nullptr;
 
+static inline void stripDangerousSignals(sigset_t *set) {
+    if (set == nullptr) return;
+    sigdelset(set, SIGSYS);
+    sigdelset(set, SIGSEGV);
+    sigdelset(set, SIGBUS);
+    sigdelset(set, SIGILL);
+    sigdelset(set, SIGABRT);
+}
+
 static int safe_pthread_sigmask(int how, const sigset_t *set, sigset_t *oldset) {
     if (set != nullptr && (how == SIG_BLOCK || how == SIG_SETMASK)) {
         sigset_t copy = *set;
-        sigdelset(&copy, SIGSYS);
+        stripDangerousSignals(&copy);
         return sOrigPthreadSigmask ? sOrigPthreadSigmask(how, &copy, oldset) : 0;
     }
     return sOrigPthreadSigmask ? sOrigPthreadSigmask(how, set, oldset) : 0;
@@ -792,7 +808,7 @@ static int safe_pthread_sigmask(int how, const sigset_t *set, sigset_t *oldset) 
 static int safe_sigprocmask(int how, const sigset_t *set, sigset_t *oldset) {
     if (set != nullptr && (how == SIG_BLOCK || how == SIG_SETMASK)) {
         sigset_t copy = *set;
-        sigdelset(&copy, SIGSYS);
+        stripDangerousSignals(&copy);
         return sOrigSigprocmask ? sOrigSigprocmask(how, &copy, oldset) : 0;
     }
     return sOrigSigprocmask ? sOrigSigprocmask(how, set, oldset) : 0;
@@ -801,7 +817,7 @@ static int safe_sigprocmask(int how, const sigset_t *set, sigset_t *oldset) {
 static int safe_sigprocmask64(int how, const sigset64_t *set, sigset64_t *oldset) {
     if (set != nullptr && (how == SIG_BLOCK || how == SIG_SETMASK)) {
         sigset64_t copy = *set;
-        sigdelset(reinterpret_cast<sigset_t *>(&copy), SIGSYS);
+        stripDangerousSignals(reinterpret_cast<sigset_t *>(&copy));
         return sOrigSigprocmask64 ? sOrigSigprocmask64(how, &copy, oldset) : 0;
     }
     return sOrigSigprocmask64 ? sOrigSigprocmask64(how, set, oldset) : 0;
@@ -1000,10 +1016,14 @@ static void installHeapAndRefBaseSafetyGuards() {
             sOrigDlsym = reinterpret_cast<void *(*)(void *, const char *)>(dlsymSym);
         }
 
-        // Unblock SIGSYS permanently on the current thread
+        // Unblock SIGSYS, SIGSEGV, SIGBUS, SIGILL permanently on the current thread
         sigset_t unblockSys{};
         sigemptyset(&unblockSys);
         sigaddset(&unblockSys, SIGSYS);
+        sigaddset(&unblockSys, SIGSEGV);
+        sigaddset(&unblockSys, SIGBUS);
+        sigaddset(&unblockSys, SIGILL);
+        sigaddset(&unblockSys, SIGABRT);
         pthread_sigmask(SIG_UNBLOCK, &unblockSys, nullptr);
     }
 }
