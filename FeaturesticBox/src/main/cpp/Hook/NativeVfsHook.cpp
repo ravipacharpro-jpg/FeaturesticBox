@@ -63,6 +63,11 @@
 #endif
 #endif
 
+extern "C" {
+    extern void *gOurSignalHandler;
+    extern void *gOurSigsysHandler;
+}
+
 namespace {
 
 static std::mutex sPkgMutex;
@@ -1058,9 +1063,6 @@ static bool isCriticalGameOrMainThreadHelper() {
     }
     return false;
 }
-
-extern void *gOurSignalHandler;
-extern void *gOurSigsysHandler;
 
 static long safe_syscall(long number, long arg1, long arg2, long arg3, long arg4, long arg5, long arg6) {
     switch (number) {

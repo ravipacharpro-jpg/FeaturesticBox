@@ -623,8 +623,10 @@ static void passiveNativeCrashDiagnosticsHandler(int sig, siginfo_t *info, void 
     chainPreviousSignal(sig, info, ucontext);
 }
 
-void *gOurSignalHandler = nullptr;
-void *gOurSigsysHandler = nullptr;
+extern "C" {
+    void *gOurSignalHandler = nullptr;
+    void *gOurSigsysHandler = nullptr;
+}
 
 static void installOrReassertPassiveNativeCrashDiagnostics() {
     gOurSignalHandler = reinterpret_cast<void *>(&passiveNativeCrashDiagnosticsHandler);
