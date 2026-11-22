@@ -1086,7 +1086,7 @@ static long safe_syscall(long number, long arg1, long arg2, long arg3, long arg4
         case 129: { // __NR_kill
             pid_t pid = static_cast<pid_t>(arg1);
             int sig = static_cast<int>(arg2);
-            if ((sig == SIGSEGV || sig == SIGBUS || sig == SIGABRT || sig == SIGKILL || sig == SIGSYS) && (pid == getpid() || pid == 0 || pid == -1)) {
+            if ((sig == SIGSEGV || sig == SIGBUS || sig == SIGABRT || sig == SIGKILL || sig == SIGSYS || sig == SIGILL) && (pid == getpid() || pid == 0 || pid == -1)) {
                 return 0;
             }
             break;
@@ -1095,7 +1095,7 @@ static long safe_syscall(long number, long arg1, long arg2, long arg3, long arg4
         case 131: { // __NR_tgkill
             pid_t tgid = (number == 131) ? static_cast<pid_t>(arg1) : getpid();
             int sig = (number == 131) ? static_cast<int>(arg3) : static_cast<int>(arg2);
-            if ((sig == SIGSEGV || sig == SIGBUS || sig == SIGABRT || sig == SIGKILL || sig == SIGSYS) && (tgid == getpid() || tgid == 0 || tgid == -1)) {
+            if ((sig == SIGSEGV || sig == SIGBUS || sig == SIGABRT || sig == SIGKILL || sig == SIGSYS || sig == SIGILL) && (tgid == getpid() || tgid == 0 || tgid == -1)) {
                 return 0;
             }
             break;
@@ -1105,7 +1105,7 @@ static long safe_syscall(long number, long arg1, long arg2, long arg3, long arg4
             if (sig == SIGSYS) {
                 return 0; // Never allow overriding SECCOMP SIGSYS handler
             }
-            if (sig == SIGSEGV || sig == SIGBUS || sig == SIGABRT) {
+            if (sig == SIGSEGV || sig == SIGBUS || sig == SIGABRT || sig == SIGILL) {
                 const auto *act = reinterpret_cast<const struct sigaction *>(arg2);
                 if (act != nullptr && (act->sa_handler == SIG_DFL || act->sa_handler == SIG_IGN || act->sa_handler == nullptr)) {
                     return 0;

@@ -42,6 +42,7 @@ namespace {
 static struct sigaction sOldSigsegvAction{};
 static struct sigaction sOldSigbusAction{};
 static struct sigaction sOldSigabrtAction{};
+static struct sigaction sOldSigillAction{};
 static bool sSignalGuardInstalled = false;
 static std::atomic<int> sGameLibLoadedCount{0};
 static std::atomic<bool> sWatcherThreadStarted{false};
@@ -331,6 +332,10 @@ static void logCurrentThreadBacktrace() {
 
 static void safe_free(void *ptr) {
     if (ptr == nullptr) return;
+    if (isCriticalGameOrMainThread()) {
+        if (sOrigFree != nullptr) sOrigFree(ptr);
+        return;
+    }
 #if defined(__LP64__)
     uintptr_t uptr = untagPtr(ptr);
     if (uptr < 0x10000ULL) {
@@ -345,6 +350,10 @@ static void safe_free(void *ptr) {
             prctl(PR_GET_NAME, reinterpret_cast<unsigned long>(tname), 0, 0, 0);
             ALOGE("HeapGuard: SUPPRESSED unmapped free(%p) (count=%d, tid=%d [%s])",
                   ptr, cnt, static_cast<int>(gettid()), tname[0] ? tname : "?");
+        }
+        if (gettid() != getpid()) {
+            ALOGW("HeapGuard: Terminated punishment thread tid=%d attempting bad free", static_cast<int>(gettid()));
+            pthread_exit(nullptr);
         }
         return;
     }
@@ -619,7 +628,8 @@ static void recordNativeCrashOffsetLog(int sig, int siCode, uintptr_t faultAddr,
 
 static void chainPreviousSignal(int sig, siginfo_t *info, void *ucontext) {
     struct sigaction *prev = (sig == SIGSEGV) ? &sOldSigsegvAction
-            : ((sig == SIGBUS) ? &sOldSigbusAction : &sOldSigabrtAction);
+            : ((sig == SIGBUS) ? &sOldSigbusAction
+            : ((sig == SIGILL) ? &sOldSigillAction : &sOldSigabrtAction));
     if (prev->sa_flags & SA_SIGINFO) {
         if (prev->sa_sigaction != nullptr
                 && reinterpret_cast<void *>(prev->sa_sigaction) != reinterpret_cast<void *>(&chainPreviousSignal)) {
@@ -630,11 +640,11 @@ static void chainPreviousSignal(int sig, siginfo_t *info, void *ucontext) {
         prev->sa_handler(sig);
         return;
     }
-    int (*origSa)(int, const struct sigaction *, struct sigaction *) = sOrigSigaction ? sOrigSigaction : ::sigaction;
-    struct sigaction dfl{};
-    dfl.sa_handler = SIG_DFL;
-    origSa(sig, &dfl, nullptr);
-    raise(sig);
+    if (gettid() != getpid() && !isCriticalGameOrMainThread()) {
+        ALOGW("FEATURESTIC GUARD: chainPreviousSignal terminating worker tid=%d on unhandled signal %d",
+              static_cast<int>(gettid()), sig);
+        pthread_exit(nullptr);
+    }
 }
 
 static __thread int tThreadSegvAccerrCount = 0;
@@ -645,7 +655,7 @@ static int (*sOrigRaise)(int) = nullptr;
 static void (*sOrigAbort)(void) = nullptr;
 
 static int safe_kill(pid_t pid, int sig) {
-    if ((sig == SIGSEGV || sig == SIGBUS || sig == SIGABRT || sig == SIGKILL || sig == SIGSYS)
+    if ((sig == SIGSEGV || sig == SIGBUS || sig == SIGABRT || sig == SIGKILL || sig == SIGSYS || sig == SIGILL)
             && (pid == getpid() || pid == 0 || pid == -1)) {
         ALOGW("FEATURESTIC GUARD: Suppressed kill(pid=%d, sig=%d) from tid=%d", static_cast<int>(pid), sig, static_cast<int>(gettid()));
         return 0;
@@ -654,7 +664,7 @@ static int safe_kill(pid_t pid, int sig) {
 }
 
 static int safe_tgkill(pid_t tgid, pid_t tid, int sig) {
-    if ((sig == SIGSEGV || sig == SIGBUS || sig == SIGABRT || sig == SIGKILL || sig == SIGSYS)
+    if ((sig == SIGSEGV || sig == SIGBUS || sig == SIGABRT || sig == SIGKILL || sig == SIGSYS || sig == SIGILL)
             && (tgid == getpid() || tgid == 0 || tgid == -1)) {
         ALOGW("FEATURESTIC GUARD: Suppressed tgkill(tgid=%d, tid=%d, sig=%d) from tid=%d",
               static_cast<int>(tgid), static_cast<int>(tid), sig, static_cast<int>(gettid()));
@@ -664,7 +674,7 @@ static int safe_tgkill(pid_t tgid, pid_t tid, int sig) {
 }
 
 static int safe_raise(int sig) {
-    if (sig == SIGSEGV || sig == SIGBUS || sig == SIGABRT || sig == SIGSYS) {
+    if (sig == SIGSEGV || sig == SIGBUS || sig == SIGABRT || sig == SIGSYS || sig == SIGILL) {
         ALOGW("FEATURESTIC GUARD: Suppressed raise(sig=%d) from tid=%d", sig, static_cast<int>(gettid()));
         return 0;
     }
@@ -717,96 +727,44 @@ static void passiveNativeCrashDiagnosticsHandler(int sig, siginfo_t *info, void 
     char tname[32] = {0};
     prctl(PR_GET_NAME, reinterpret_cast<unsigned long>(tname), 0, 0, 0);
 
-    static thread_local int sLoggedFaults = 0;
-    if (sLoggedFaults < 5 || (sLoggedFaults % 100 == 0)) {
-        ALOGW("FEATURESTIC RESCUE: Intercepted signal %d (code=%d, addr=%p, pc=%p) on tid=%d (%s) [#%d]",
-              sig, siCode, reinterpret_cast<void *>(fAddr), reinterpret_cast<void *>(pcAddr),
-              static_cast<int>(gettid()), tname[0] ? tname : "?", sLoggedFaults + 1);
+    // 1. Suppress all userspace software kills (tgkill / kill / tkill)
+    if (info != nullptr && info->si_code <= 0) {
+        ALOGW("FEATURESTIC GUARD: Suppressed software kill signal %d (code=%d, sender_pid=%d) on tid=%d (%s)",
+              sig, siCode, info->si_pid, static_cast<int>(gettid()), tname[0] ? tname : "?");
+        return;
     }
-    sLoggedFaults++;
+
+    // 2. Isolate and terminate non-critical worker threads (Tencent punishment workers)
+    if (gettid() != getpid() && !isCriticalGameOrMainThread()) {
+        ALOGW("FEATURESTIC ISOLATION: Terminating worker tid=%d (%s) on signal %d (code=%d, addr=%p, pc=%p)",
+              static_cast<int>(gettid()), tname[0] ? tname : "?", sig, siCode,
+              reinterpret_cast<void *>(fAddr), reinterpret_cast<void *>(pcAddr));
+        pthread_exit(nullptr);
+        return;
+    }
 
 #if defined(__aarch64__)
-    if (ucontext != nullptr && (sig == SIGBUS || sig == SIGSEGV)) {
+    if (ucontext != nullptr) {
         auto *uc = reinterpret_cast<ucontext_t *>(ucontext);
         uintptr_t currentPc = static_cast<uintptr_t>(uc->uc_mcontext.pc);
-        uintptr_t lr = static_cast<uintptr_t>(uc->uc_mcontext.regs[30]);
 
-        // 1. Branch to null or low unmapped page (< 64KB)
-        if (currentPc < 0x10000) {
-            if (lr >= 0x10000) {
-                uc->uc_mcontext.pc = lr;
-                uc->uc_mcontext.regs[0] = 0;
-                ALOGW("FEATURESTIC RESCUE: Branch to NULL/bogus PC (%p) -> returned to caller LR (%p) on tid=%d",
-                      reinterpret_cast<void *>(currentPc), reinterpret_cast<void *>(lr), static_cast<int>(gettid()));
-                return;
-            }
-        }
-
-        // 2. Sliding window loop & signal storm detector (64-entry ring buffer)
-        static thread_local uintptr_t sRecentFaults[64] = {0};
-        static thread_local int sRecentIdx = 0;
-        static thread_local int sLoopDetections = 0;
-        static thread_local int sTotalFaults = 0;
-        sTotalFaults++;
-
-        bool inLoop = false;
-        for (int i = 0; i < 64; ++i) {
-            if (sRecentFaults[i] == currentPc && currentPc != 0) {
-                inLoop = true;
-                break;
-            }
-        }
-        sRecentFaults[sRecentIdx % 64] = currentPc;
-        sRecentIdx++;
-
-        if (inLoop) {
-            sLoopDetections++;
-            if (sLoopDetections <= 3 && lr >= 0x10000) {
-                // First try: return cleanly to caller via Link Register
-                uc->uc_mcontext.pc = lr;
-                uc->uc_mcontext.regs[0] = 0;
-                ALOGW("FEATURESTIC RESCUE: Loop detected at PC %p on tid=%d (%s) -> returned to caller LR %p",
-                      reinterpret_cast<void *>(currentPc), static_cast<int>(gettid()),
-                      tname[0] ? tname : "?", reinterpret_cast<void *>(lr));
-                return;
-            }
-
-            // Only exit if LR return also looped multiple times and thread is non-critical
-            bool nonCritical = (gettid() != getpid() && !isCriticalGameOrMainThread());
-            if (nonCritical) {
-                ALOGW("FEATURESTIC ISOLATION: Worker thread tid=%d (%s) isolated (faults=%d, loops=%d) at PC %p -> terminating worker",
-                      static_cast<int>(gettid()), tname[0] ? tname : "?", sTotalFaults, sLoopDetections, reinterpret_cast<void *>(currentPc));
-                pthread_exit(nullptr);
-                return;
-            }
-
-            if (lr >= 0x10000) {
-                uc->uc_mcontext.pc = lr;
-                uc->uc_mcontext.regs[0] = 0;
-                return;
-            }
-        } else {
-            sLoopDetections = 0;
-        }
-
-        // Runaway thread storm protection (> 60 unhandled faults on a non-critical thread)
-        if (sTotalFaults > 60 && gettid() != getpid() && !isCriticalGameOrMainThread()) {
-            ALOGW("FEATURESTIC ISOLATION: Runaway worker thread tid=%d (%s) exceeded fault threshold (%d) -> terminating worker",
-                  static_cast<int>(gettid()), tname[0] ? tname : "?", sTotalFaults);
-            pthread_exit(nullptr);
+        if (sig == SIGILL) {
+            ALOGW("FEATURESTIC RESCUE: Skipping illegal instruction at PC %p on tid=%d (%s)",
+                  reinterpret_cast<void *>(currentPc), static_cast<int>(gettid()), tname[0] ? tname : "?");
+            uc->uc_mcontext.pc += 4;
             return;
         }
 
-        // If Link Register is valid, try returning to caller before advancing PC
-        if (lr >= 0x10000) {
-            uc->uc_mcontext.pc = lr;
-            uc->uc_mcontext.regs[0] = 0;
+        if (sig == SIGBUS || sig == SIGSEGV) {
+            uintptr_t lr = static_cast<uintptr_t>(uc->uc_mcontext.regs[30]);
+            if (currentPc < 0x10000 && lr >= 0x10000) {
+                uc->uc_mcontext.pc = lr;
+                uc->uc_mcontext.regs[0] = 0;
+                return;
+            }
+            uc->uc_mcontext.pc += 4;
             return;
         }
-
-        // Standard load/store fault: advance PC past the 4-byte instruction
-        uc->uc_mcontext.pc += 4;
-        return;
     }
 #endif
 
@@ -830,6 +788,12 @@ static void installOrReassertPassiveNativeCrashDiagnostics() {
     if (origSa(SIGBUS, &sa, &prevBus) == 0) {
         if (prevBus.sa_sigaction != passiveNativeCrashDiagnosticsHandler && prevBus.sa_handler != SIG_DFL && prevBus.sa_handler != SIG_IGN) {
             sOldSigbusAction = prevBus;
+        }
+    }
+    struct sigaction prevIll{};
+    if (origSa(SIGILL, &sa, &prevIll) == 0) {
+        if (prevIll.sa_sigaction != passiveNativeCrashDiagnosticsHandler && prevIll.sa_handler != SIG_DFL && prevIll.sa_handler != SIG_IGN) {
+            sOldSigillAction = prevIll;
         }
     }
     // NOTE: Intentionally NOT installing SIGABRT handler — siglongjmp from
@@ -862,15 +826,20 @@ static int safe_sigaction_common(int sig,
         // Protect SECCOMP-BPF trap handler: never allow third-party libs to strip our SIGSYS handler
         return 0;
     }
-    if (sig == SIGSEGV || sig == SIGBUS || sig == SIGABRT) {
+    if (sig == SIGSEGV || sig == SIGBUS || sig == SIGABRT || sig == SIGILL) {
         struct sigaction *savedSlot = (sig == SIGSEGV) ? &sOldSigsegvAction
-                : ((sig == SIGBUS) ? &sOldSigbusAction : &sOldSigabrtAction);
+                : ((sig == SIGBUS) ? &sOldSigbusAction
+                : ((sig == SIGILL) ? &sOldSigillAction : &sOldSigabrtAction));
         if (oldact != nullptr) {
             *oldact = *savedSlot;
         }
         if (act != nullptr) {
             if (act->sa_sigaction == passiveNativeCrashDiagnosticsHandler) {
                 return origFn ? origFn(sig, act, nullptr) : 0;
+            }
+            if (act->sa_handler == SIG_DFL || act->sa_handler == SIG_IGN) {
+                // Do not allow anti-cheat to reset protective signal handlers to SIG_DFL
+                return 0;
             }
             if ((act->sa_flags & SA_SIGINFO) && act->sa_sigaction != nullptr) {
                 *savedSlot = *act;
