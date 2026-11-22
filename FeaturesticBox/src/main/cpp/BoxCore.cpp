@@ -926,7 +926,7 @@ static int safe_sigprocmask(int how, const sigset_t *set, sigset_t *oldset) {
 static int safe_sigprocmask64(int how, const sigset64_t *set, sigset64_t *oldset) {
     if (set != nullptr && (how == SIG_BLOCK || how == SIG_SETMASK)) {
         sigset64_t copy = *set;
-        sigdelset64(&copy, SIGSYS);
+        sigdelset(reinterpret_cast<sigset_t *>(&copy), SIGSYS);
         return sOrigSigprocmask64 ? sOrigSigprocmask64(how, &copy, oldset) : 0;
     }
     return sOrigSigprocmask64 ? sOrigSigprocmask64(how, set, oldset) : 0;
