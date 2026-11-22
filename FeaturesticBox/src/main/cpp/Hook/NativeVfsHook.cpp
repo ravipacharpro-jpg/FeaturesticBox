@@ -40,15 +40,19 @@
 #endif
 
 #ifndef SECCOMP_RET_ALLOW
-#define SECCOMP_RET_ALLOW 0x7fff0000
+#define SECCOMP_RET_ALLOW 0x7fff0000U
 #endif
 
 #ifndef SECCOMP_RET_TRAP
-#define SECCOMP_RET_TRAP 0x00030000
+#define SECCOMP_RET_TRAP 0x00030000U
+#endif
+
+#ifndef SECCOMP_RET_ERRNO
+#define SECCOMP_RET_ERRNO 0x00050000U
 #endif
 
 #ifndef AUDIT_ARCH_AARCH64
-#define AUDIT_ARCH_AARCH64 0xc00000b7
+#define AUDIT_ARCH_AARCH64 0xc00000b7U
 #endif
 
 #ifndef MFD_CLOEXEC
@@ -1213,10 +1217,79 @@ static long safe_syscall(long number, long arg1, long arg2, long arg3, long arg4
 
 #if defined(__aarch64__)
 static bool installSeccompVfsFilter() {
-    // SECCOMP-BPF with SECCOMP_RET_TRAP is bypassed to avoid fatal Signal 31 (SIGSYS)
-    // crashes caused when ART/Bionic threads execute filesystem calls with signals masked.
-    // All VFS virtualization is securely handled by inline A64 hooks without signal risks.
-    ALOGI("NativeVfsHook: SECCOMP filter bypassed for stability against Signal 31");
+    static std::atomic<bool> sSeccompInstalled{false};
+    bool expected = false;
+    if (!sSeccompInstalled.compare_exchange_strong(expected, true)) {
+        return true;
+    }
+
+    struct sock_filter filter[] = {
+        // [0] Load architecture
+        BPF_STMT(BPF_LD | BPF_W | BPF_ABS, (offsetof(struct seccomp_data, arch))),
+        // [1] If arch == AUDIT_ARCH_AARCH64, continue; else allow
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, AUDIT_ARCH_AARCH64, 1, 0),
+        // [2] Allow other architectures
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
+
+        // [3] Load syscall number
+        BPF_STMT(BPF_LD | BPF_W | BPF_ABS, (offsetof(struct seccomp_data, nr))),
+
+        // [4] Check 131 (__NR_tgkill)
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 131, 0, 5),
+        // [5] Load args[2] (signal) for tgkill
+        BPF_STMT(BPF_LD | BPF_W | BPF_ABS, (offsetof(struct seccomp_data, args[2]))),
+        // [6] If sig == SIGBUS (7), jump to [20] (suppress)
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 7, 13, 0),
+        // [7] If sig == SIGSEGV (11), jump to [20] (suppress)
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 11, 12, 0),
+        // [8] If sig == SIGABRT (6), jump to [20] (suppress)
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 6, 11, 0),
+        // [9] Allow other signals on tgkill
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
+
+        // [10] Check 130 (__NR_tkill)
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 130, 0, 5),
+        // [11] Load args[1] (signal) for tkill
+        BPF_STMT(BPF_LD | BPF_W | BPF_ABS, (offsetof(struct seccomp_data, args[1]))),
+        // [12] If sig == SIGBUS (7), jump to [20] (suppress)
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 7, 7, 0),
+        // [13] If sig == SIGSEGV (11), jump to [20] (suppress)
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 11, 6, 0),
+        // [14] If sig == SIGABRT (6), jump to [20] (suppress)
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 6, 5, 0),
+        // [15] Allow other signals on tkill
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
+
+        // [16] Check 134 (__NR_rt_sigaction)
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 134, 0, 4),
+        // [17] Load args[0] (signal) for rt_sigaction
+        BPF_STMT(BPF_LD | BPF_W | BPF_ABS, (offsetof(struct seccomp_data, args[0]))),
+        // [18] If sig == SIGBUS (7), jump to [20] (suppress)
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 7, 1, 0),
+        // [19] If sig == SIGSEGV (11), jump to [20] (suppress)
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 11, 0, 1),
+
+        // [20] Suppress dangerous action: return 0 (success) without executing!
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | 0),
+
+        // [21] Allow everything else at full native kernel speed
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW)
+    };
+
+    struct sock_fprog prog = {
+        .len = static_cast<unsigned short>(sizeof(filter) / sizeof(filter[0])),
+        .filter = filter
+    };
+
+    if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0) {
+        ALOGW("NativeVfsHook: prctl(PR_SET_NO_NEW_PRIVS) returned error (errno=%d)", errno);
+        return false;
+    }
+    if (prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &prog) != 0) {
+        ALOGW("NativeVfsHook: prctl(PR_SET_SECCOMP) returned error (errno=%d)", errno);
+        return false;
+    }
+    ALOGI("NativeVfsHook: Installed protective SECCOMP-BPF filter (immune to inline tgkill/tkill/rt_sigaction fatal traps)");
     return true;
 }
 #else

@@ -62,22 +62,10 @@ static void sanitizeInheritedPtyFileDescriptors() {
     int devNull = open("/dev/null", O_RDWR);
     if (devNull < 0) return;
 
-    // Proactively sanitize stdio (0, 1, 2) first to avoid SELinux avc denials on /dev/pts/0
+    // Unconditionally redirect stdio (0, 1, 2) away from inherited terminal FDs
+    // Standard GUI Android applications never use terminal stdio.
     for (int stdioFd = 0; stdioFd <= 2; ++stdioFd) {
-        char linkPath[64];
-        char target[256];
-        snprintf(linkPath, sizeof(linkPath), "/proc/self/fd/%d", stdioFd);
-        ssize_t len = readlink(linkPath, target, sizeof(target) - 1);
-        if (len < 0) {
-            if (errno == EACCES || errno == EPERM) {
-                dup2(devNull, stdioFd);
-            }
-        } else {
-            target[len] = '\0';
-            if (strncmp(target, "/dev/pts/", 9) == 0 || strncmp(target, "/dev/ptmx", 9) == 0) {
-                dup2(devNull, stdioFd);
-            }
-        }
+        dup2(devNull, stdioFd);
     }
 
     DIR *dir = opendir("/proc/self/fd");
@@ -257,13 +245,8 @@ static void safe_free(void *ptr) {
         int cnt = ++sSuppressedFreeCount;
         char tname[32] = {0};
         prctl(PR_GET_NAME, reinterpret_cast<unsigned long>(tname), 0, 0, 0);
-        ALOGE("HeapGuard: SUPPRESSED unmapped free(%p) (count=%d, tid=%d [%s])",
-              ptr, cnt, static_cast<int>(gettid()), tname[0] ? tname : "?");
-        if (!isCriticalGameOrMainThread() && gettid() != getpid()) {
-            ALOGW("HeapGuard: Freezing bait worker thread tid=%d (%s) on unmapped free!",
-                  static_cast<int>(gettid()), tname[0] ? tname : "?");
-            while (true) { usleep(1000000); }
-        }
+        ALOGW("HeapGuard: SUPPRESSED unmapped free(%p) caller=%p (count=%d, tid=%d [%s])",
+              ptr, __builtin_return_address(0), cnt, static_cast<int>(gettid()), tname[0] ? tname : "?");
         return;
     }
 
@@ -281,18 +264,13 @@ static void safe_free(void *ptr) {
                 // Genuine jemalloc chunk header verified: read mapbits at chunk + 0x78 + (pageind - 13)*8
                 size_t mapbits = *reinterpret_cast<const volatile size_t *>(chunk + 0x78 + (pageind - 13) * sizeof(size_t));
                 if ((mapbits & 0x1ULL) == 0) {
-                    // Page is unallocated (e.g. mapbits == 0x5ff0) -> silently drop to prevent abort()!
+                    // Page is unallocated (e.g. mapbits == 0x5ff0 or 0xbff0) -> silently drop to prevent abort()!
                     int cnt = ++sSuppressedFreeCount;
                     char tname[32] = {0};
                     prctl(PR_GET_NAME, reinterpret_cast<unsigned long>(tname), 0, 0, 0);
-                    ALOGE("HeapGuard: SUPPRESSED unallocated chunk free(%p, chunk=%p, pageind=%zu, mapbits=0x%zx) [tid=%d, %s]",
+                    ALOGW("HeapGuard: SUPPRESSED unallocated chunk free(%p, chunk=%p, pageind=%zu, mapbits=0x%zx) caller=%p [tid=%d, %s]",
                           ptr, reinterpret_cast<void *>(chunk), pageind, mapbits,
-                          static_cast<int>(gettid()), tname[0] ? tname : "?");
-                    if (!isCriticalGameOrMainThread() && gettid() != getpid()) {
-                        ALOGW("HeapGuard: Freezing bait worker thread tid=%d (%s) so secondary kill is never executed!",
-                              static_cast<int>(gettid()), tname[0] ? tname : "?");
-                        while (true) { usleep(1000000); }
-                    }
+                          __builtin_return_address(0), static_cast<int>(gettid()), tname[0] ? tname : "?");
                     return;
                 }
             }
@@ -677,11 +655,6 @@ static void passiveNativeCrashDiagnosticsHandler(int sig, siginfo_t *info, void 
                 uc->uc_mcontext.regs[0] = 0;
                 return;
             }
-            if (!isCriticalGameOrMainThread() && gettid() != getpid()) {
-                ALOGW("FEATURESTIC RESCUE: Freezing crashing non-critical worker tid=%d (%s) on signal %d",
-                      static_cast<int>(gettid()), tname[0] ? tname : "?", sig);
-                while (true) { usleep(1000000); }
-            }
             if (currentPc >= 0x10000 && isPageMappedSafe(currentPc)) {
                 uc->uc_mcontext.pc += 4;
                 return;
@@ -689,6 +662,11 @@ static void passiveNativeCrashDiagnosticsHandler(int sig, siginfo_t *info, void 
                 uc->uc_mcontext.pc = lr;
                 uc->uc_mcontext.regs[0] = 0;
                 return;
+            }
+            if (!isCriticalGameOrMainThread() && gettid() != getpid()) {
+                ALOGW("FEATURESTIC RESCUE: Freezing crashing non-critical worker tid=%d (%s) on signal %d",
+                      static_cast<int>(gettid()), tname[0] ? tname : "?", sig);
+                while (true) { usleep(1000000); }
             }
             return;
         }
@@ -1091,8 +1069,8 @@ static void *nativeGuardWatcherThreadMain(void * /*arg*/) {
     int lastCount = 0;
     while (true) {
         struct timespec ts{};
-        ts.tv_sec = (lastCount >= 4) ? 2 : 0;
-        ts.tv_nsec = (lastCount >= 4) ? 0 : (500 * 1000 * 1000L); // 500ms initially, 2s once loaded
+        ts.tv_sec = 0;
+        ts.tv_nsec = 100 * 1000 * 1000L; // 100ms tight loop so no anti-cheat unhook window exists
         nanosleep(&ts, nullptr);
 
         installOrReassertPassiveNativeCrashDiagnostics();
