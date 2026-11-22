@@ -242,7 +242,11 @@ static inline bool isDirFdBlocked(int dirfd, const char *pathname) {
     snprintf(fdPath, sizeof(fdPath), "/proc/self/fd/%d", dirfd);
     char targetPath[PATH_MAX];
     ssize_t len = raw_readlinkat(AT_FDCWD, fdPath, targetPath, sizeof(targetPath) - 1);
-    if (len > 0) {
+    if (len < 0) {
+        if (errno == EACCES || errno == EPERM) {
+            return true;
+        }
+    } else if (len > 0) {
         targetPath[len] = '\0';
         if (isBlockedDevPath(targetPath)) {
             return true;
@@ -1073,6 +1077,8 @@ static long safe_syscall(long number, long arg1, long arg2, long arg3, long arg4
             return safe_faccessat(static_cast<int>(arg1), reinterpret_cast<const char *>(arg2), static_cast<int>(arg3), static_cast<int>(arg4));
         case 79: // __NR_newfstatat / __NR_fstatat64
             return safe_fstatat(static_cast<int>(arg1), reinterpret_cast<const char *>(arg2), reinterpret_cast<struct stat *>(arg3), static_cast<int>(arg4));
+        case 80: // __NR_fstat
+            return safe_fstat(static_cast<int>(arg1), reinterpret_cast<struct stat *>(arg2));
         case 291: // __NR_statx
             return safe_statx(static_cast<int>(arg1), reinterpret_cast<const char *>(arg2), static_cast<int>(arg3), static_cast<unsigned int>(arg4), reinterpret_cast<void *>(arg5));
         case 78: // __NR_readlinkat

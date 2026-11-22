@@ -69,12 +69,12 @@ static void sanitizeInheritedPtyFileDescriptors() {
         snprintf(linkPath, sizeof(linkPath), "/proc/self/fd/%d", stdioFd);
         ssize_t len = readlink(linkPath, target, sizeof(target) - 1);
         if (len < 0) {
-            if (errno == EACCES) {
+            if (errno == EACCES || errno == EPERM) {
                 dup2(devNull, stdioFd);
             }
         } else {
             target[len] = '\0';
-            if (strncmp(target, "/dev/pts/", 9) == 0) {
+            if (strncmp(target, "/dev/pts/", 9) == 0 || strncmp(target, "/dev/ptmx", 9) == 0) {
                 dup2(devNull, stdioFd);
             }
         }
@@ -92,9 +92,13 @@ static void sanitizeInheritedPtyFileDescriptors() {
             char target[256];
             snprintf(linkPath, sizeof(linkPath), "/proc/self/fd/%d", fd);
             ssize_t len = readlink(linkPath, target, sizeof(target) - 1);
-            if (len > 0) {
+            if (len < 0) {
+                if (errno == EACCES || errno == EPERM) {
+                    dup2(devNull, fd);
+                }
+            } else {
                 target[len] = '\0';
-                if (strncmp(target, "/dev/pts/", 9) == 0) {
+                if (strncmp(target, "/dev/pts/", 9) == 0 || strncmp(target, "/dev/ptmx", 9) == 0) {
                     dup2(devNull, fd);
                 }
             }
@@ -383,6 +387,7 @@ static void patchGotSlotSafe(void **slot, void *replacement) {
     uintptr_t pageStart = reinterpret_cast<uintptr_t>(slot) & ~uintptr_t(0xFFF);
     if (mprotect(reinterpret_cast<void *>(pageStart), 4096, PROT_READ | PROT_WRITE) == 0) {
         *slot = replacement;
+        mprotect(reinterpret_cast<void *>(pageStart), 4096, PROT_READ);
     }
 }
 
@@ -422,7 +427,14 @@ static int gotHookPhdrCallback(struct dl_phdr_info *info, size_t /*size*/, void 
             || strstr(info->dlpi_name, "/libc.so") != nullptr
             || strstr(info->dlpi_name, "/ld-android.so") != nullptr
             || strstr(info->dlpi_name, "linker64") != nullptr
-            || strstr(info->dlpi_name, "/libart.so") != nullptr) {
+            || strstr(info->dlpi_name, "/libart.so") != nullptr
+            || strstr(info->dlpi_name, "libanort") != nullptr
+            || strstr(info->dlpi_name, "libCrashKit") != nullptr
+            || strstr(info->dlpi_name, "libanogs") != nullptr
+            || strstr(info->dlpi_name, "libhdmpve") != nullptr
+            || strstr(info->dlpi_name, "libgcloud") != nullptr
+            || strstr(info->dlpi_name, "libturing") != nullptr
+            || strstr(info->dlpi_name, "libtersafe") != nullptr) {
         return 0;
     }
 
@@ -686,6 +698,16 @@ extern "C" {
 }
 
 static void installOrReassertPassiveNativeCrashDiagnostics() {
+    static uint8_t sAltStackBuffer[65536] __attribute__((aligned(16)));
+    stack_t curSs{};
+    if (sigaltstack(nullptr, &curSs) == 0 && ((curSs.ss_flags & SS_DISABLE) || curSs.ss_sp == nullptr || curSs.ss_size < MINSIGSTKSZ)) {
+        stack_t newSs{};
+        newSs.ss_sp = sAltStackBuffer;
+        newSs.ss_size = sizeof(sAltStackBuffer);
+        newSs.ss_flags = 0;
+        sigaltstack(&newSs, nullptr);
+    }
+
     gOurSignalHandler = reinterpret_cast<void *>(&passiveNativeCrashDiagnosticsHandler);
     int (*origSa)(int, const struct sigaction *, struct sigaction *) = sOrigSigaction ? sOrigSigaction : ::sigaction;
     struct sigaction sa{};
