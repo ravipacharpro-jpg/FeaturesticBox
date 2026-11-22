@@ -1059,6 +1059,9 @@ static bool isCriticalGameOrMainThreadHelper() {
     return false;
 }
 
+extern void *gOurSignalHandler;
+extern void *gOurSigsysHandler;
+
 static long safe_syscall(long number, long arg1, long arg2, long arg3, long arg4, long arg5, long arg6) {
     switch (number) {
         case 56: // __NR_openat
@@ -1103,6 +1106,12 @@ static long safe_syscall(long number, long arg1, long arg2, long arg3, long arg4
         case 134: { // __NR_rt_sigaction
             int sig = static_cast<int>(arg1);
             if (sig == SIGSYS || sig == SIGSEGV || sig == SIGBUS || sig == SIGABRT || sig == SIGILL) {
+                if (arg2 != 0) {
+                    void *handler = *reinterpret_cast<void *const *>(arg2);
+                    if (handler != nullptr && (handler == gOurSignalHandler || handler == gOurSigsysHandler)) {
+                        return syscall(__NR_rt_sigaction, sig, reinterpret_cast<void *>(arg2), reinterpret_cast<void *>(arg3), arg4);
+                    }
+                }
                 if (arg3 != 0) {
                     syscall(__NR_rt_sigaction, sig, nullptr, reinterpret_cast<void *>(arg3), arg4);
                 }

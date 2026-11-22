@@ -609,7 +609,7 @@ static void passiveNativeCrashDiagnosticsHandler(int sig, siginfo_t *info, void 
                   sig, reinterpret_cast<void *>(currentPc), reinterpret_cast<void *>(fAddr),
                   static_cast<int>(gettid()), tname[0] ? tname : "?");
             uintptr_t lr = static_cast<uintptr_t>(uc->uc_mcontext.regs[30]);
-            if (currentPc < 0x10000 && lr >= 0x10000) {
+            if ((currentPc < 0x10000 || !isPageMappedSafe(currentPc)) && lr >= 0x10000 && isPageMappedSafe(lr)) {
                 uc->uc_mcontext.pc = lr;
                 uc->uc_mcontext.regs[0] = 0;
                 return;
@@ -623,7 +623,11 @@ static void passiveNativeCrashDiagnosticsHandler(int sig, siginfo_t *info, void 
     chainPreviousSignal(sig, info, ucontext);
 }
 
+void *gOurSignalHandler = nullptr;
+void *gOurSigsysHandler = nullptr;
+
 static void installOrReassertPassiveNativeCrashDiagnostics() {
+    gOurSignalHandler = reinterpret_cast<void *>(&passiveNativeCrashDiagnosticsHandler);
     int (*origSa)(int, const struct sigaction *, struct sigaction *) = sOrigSigaction ? sOrigSigaction : ::sigaction;
     struct sigaction sa{};
     sa.sa_sigaction = passiveNativeCrashDiagnosticsHandler;
@@ -656,8 +660,6 @@ static void installOrReassertPassiveNativeCrashDiagnostics() {
 
 // Intercept sigaction() so libanort.so / libCrashKit.so cannot strip our
 // passiveNativeCrashDiagnosticsHandler back to SIG_DFL before raising SIGBUS (signal 7).
-static void *sOurSigsysHandler = nullptr;
-
 static int safe_sigaction_common(int sig,
                                  const struct sigaction *act,
                                  struct sigaction *oldact,
@@ -667,11 +669,11 @@ static int safe_sigaction_common(int sig,
             origFn(sig, nullptr, oldact);
         }
         if (act != nullptr && (act->sa_flags & SA_SIGINFO) && act->sa_sigaction != nullptr) {
-            if (sOurSigsysHandler == nullptr) {
-                sOurSigsysHandler = reinterpret_cast<void *>(act->sa_sigaction);
+            if (gOurSigsysHandler == nullptr) {
+                gOurSigsysHandler = reinterpret_cast<void *>(act->sa_sigaction);
                 return origFn ? origFn(sig, act, nullptr) : 0;
             }
-            if (reinterpret_cast<void *>(act->sa_sigaction) == sOurSigsysHandler) {
+            if (reinterpret_cast<void *>(act->sa_sigaction) == gOurSigsysHandler) {
                 return origFn ? origFn(sig, act, nullptr) : 0;
             }
         }
