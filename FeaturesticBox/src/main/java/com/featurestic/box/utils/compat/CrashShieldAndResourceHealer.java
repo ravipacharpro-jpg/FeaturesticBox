@@ -127,7 +127,11 @@ public final class CrashShieldAndResourceHealer {
                 || msg.contains("SignInConfiguration")
                 || fullTrace.contains("SignInHubActivity")
                 || fullTrace.contains("SignInConfiguration")
-                || (t instanceof android.os.BadParcelableException && msg.contains("ClassNotFoundException"))) {
+                || (t instanceof android.os.BadParcelableException && msg.contains("ClassNotFoundException"))
+                || t instanceof UnsatisfiedLinkError
+                || msg.contains("QueryProgress")
+                || fullTrace.contains("GCBGDownloadService")
+                || fullTrace.contains("blue.studio")) {
             return true;
         }
 

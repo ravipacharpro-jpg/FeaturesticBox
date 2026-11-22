@@ -473,13 +473,16 @@ public class BActivityThread extends IBActivityThread.Stub {
             } catch (Throwable ignored) {
             }
         }
+        extractNativeLibs(packageContext, applicationInfo);
         try {
             ClassLoader guestClassLoader = BRLoadedApk.get(loadedApk).getClassLoader();
             File resolvedLibDir = (applicationInfo.nativeLibraryDir != null && new File(applicationInfo.nativeLibraryDir).isDirectory())
                     ? new File(applicationInfo.nativeLibraryDir)
                     : BEnvironment.getAppLibDir(packageName);
+            String abiSubDir = FeaturesticBoxCore.is64Bit() ? "arm64-v8a" : "armeabi-v7a";
             File pluginDir = new File(FeaturesticBoxCore.getContext().getNoBackupFilesDir(), "native");
-            DexFileCompat.addNativeLibraryDirectories(guestClassLoader, resolvedLibDir, pluginDir);
+            File abiDir = new File(pluginDir, abiSubDir);
+            DexFileCompat.addNativeLibraryDirectories(guestClassLoader, abiDir, resolvedLibDir, pluginDir);
         } catch (Throwable ignored) {
         }
         int targetSdkVersion = applicationInfo.targetSdkVersion;
@@ -860,6 +863,12 @@ public class BActivityThread extends IBActivityThread.Stub {
 
     private void onBeforeApplicationOnCreate(String packageName, String processName, Application app) {
         GameTelemetrySanitizer.sanitizeGameTelemetry(app);
+        if ("com.pubg.imobile".equals(packageName) || (processName != null && processName.contains("imobile"))) {
+            try {
+                System.loadLibrary("UE4");
+            } catch (Throwable ignored) {
+            }
+        }
         for (AppLifecycleCallback cb : FeaturesticBoxCore.get().getAppLifecycleCallbacks()) {
             cb.beforeApplicationOnCreate(packageName, processName, app, getUserId());
         }
