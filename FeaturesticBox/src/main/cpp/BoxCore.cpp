@@ -59,32 +59,49 @@ static std::atomic<int> sCachedAppMode{0}; // 0 = normal virtual app, 1 = gms (R
 // Sanitize any inherited /dev/pts/* pseudo-terminal file descriptors at startup
 // so anti-cheat /proc/self/fd scans never see a Termux/shell pty FD.
 static void sanitizeInheritedPtyFileDescriptors() {
-    DIR *dir = opendir("/proc/self/fd");
-    if (!dir) return;
     int devNull = open("/dev/null", O_RDWR);
-    if (devNull < 0) {
-        closedir(dir);
-        return;
-    }
-    int dirFd = dirfd(dir);
-    struct dirent *entry;
-    while ((entry = readdir(dir)) != nullptr) {
-        if (entry->d_name[0] == '.') continue;
-        int fd = atoi(entry->d_name);
-        if (fd < 0 || fd == dirFd || fd == devNull) continue;
+    if (devNull < 0) return;
+
+    // Proactively sanitize stdio (0, 1, 2) first to avoid SELinux avc denials on /dev/pts/0
+    for (int stdioFd = 0; stdioFd <= 2; ++stdioFd) {
         char linkPath[64];
         char target[256];
-        snprintf(linkPath, sizeof(linkPath), "/proc/self/fd/%d", fd);
+        snprintf(linkPath, sizeof(linkPath), "/proc/self/fd/%d", stdioFd);
         ssize_t len = readlink(linkPath, target, sizeof(target) - 1);
-        if (len > 0) {
+        if (len < 0) {
+            if (errno == EACCES) {
+                dup2(devNull, stdioFd);
+            }
+        } else {
             target[len] = '\0';
             if (strncmp(target, "/dev/pts/", 9) == 0) {
-                dup2(devNull, fd);
+                dup2(devNull, stdioFd);
             }
         }
     }
+
+    DIR *dir = opendir("/proc/self/fd");
+    if (dir) {
+        int dirFd = dirfd(dir);
+        struct dirent *entry;
+        while ((entry = readdir(dir)) != nullptr) {
+            if (entry->d_name[0] == '.') continue;
+            int fd = atoi(entry->d_name);
+            if (fd < 0 || fd == dirFd || fd == devNull) continue;
+            char linkPath[64];
+            char target[256];
+            snprintf(linkPath, sizeof(linkPath), "/proc/self/fd/%d", fd);
+            ssize_t len = readlink(linkPath, target, sizeof(target) - 1);
+            if (len > 0) {
+                target[len] = '\0';
+                if (strncmp(target, "/dev/pts/", 9) == 0) {
+                    dup2(devNull, fd);
+                }
+            }
+        }
+        closedir(dir);
+    }
     close(devNull);
-    closedir(dir);
 }
 
 static bool isCriticalGameOrMainThread() {
@@ -231,8 +248,7 @@ static void safe_free(void *ptr) {
     if (uptr < 0x10000ULL) {
         return;
     }
-    // Only suppress if the memory address is genuinely unmapped in process address space.
-    // Never terminate valid worker threads.
+    // 1. Suppress if the memory address is unmapped in process address space.
     if (!isPageMappedSafe(uptr)) {
         int cnt = ++sSuppressedFreeCount;
         if (cnt <= 32) {
@@ -242,6 +258,35 @@ static void safe_free(void *ptr) {
                   ptr, cnt, static_cast<int>(gettid()), tname[0] ? tname : "?");
         }
         return;
+    }
+
+    // 2. Suppress if address belongs to an unallocated jemalloc arena chunk page.
+    // In Android Bionic jemalloc (2MB chunks, map_bias=13, map_bits offset 0x78):
+    // Passing an unallocated chunk page (mapbits bit 0 == 0) causes Bionic to call __libc_fatal
+    // and abort() with "Invalid %p passed to free: value not allocated, chunk: %p mapbits: %zx".
+    uintptr_t chunk = uptr & ~uintptr_t(0x1FFFFF);
+    size_t pageind = (uptr - chunk) >> 12;
+    if (pageind >= 13 && pageind < 512) {
+        if (isPageMappedSafe(chunk)) {
+            const auto *chunkWords = reinterpret_cast<const volatile size_t *>(chunk);
+            uintptr_t arenaPtr = untagPtr(reinterpret_cast<const void *>(chunkWords[0]));
+            if (arenaPtr >= 0x10000ULL && arenaPtr < UINT64_C(0x0001000000000000) && (arenaPtr & 0x7ULL) == 0) {
+                // Genuine jemalloc chunk header verified: read mapbits at chunk + 0x78 + (pageind - 13)*8
+                size_t mapbits = *reinterpret_cast<const volatile size_t *>(chunk + 0x78 + (pageind - 13) * sizeof(size_t));
+                if ((mapbits & 0x1ULL) == 0) {
+                    // Page is unallocated (e.g. mapbits == 0x5ff0) -> silently drop to prevent abort()!
+                    int cnt = ++sSuppressedFreeCount;
+                    if (cnt <= 32) {
+                        char tname[32] = {0};
+                        prctl(PR_GET_NAME, reinterpret_cast<unsigned long>(tname), 0, 0, 0);
+                        ALOGE("HeapGuard: SUPPRESSED unallocated chunk free(%p, chunk=%p, pageind=%zu, mapbits=0x%zx) [tid=%d, %s]",
+                              ptr, reinterpret_cast<void *>(chunk), pageind, mapbits,
+                              static_cast<int>(gettid()), tname[0] ? tname : "?");
+                    }
+                    return;
+                }
+            }
+        }
     }
 #endif
     if (sOrigFree != nullptr) {
@@ -548,7 +593,7 @@ static void safe_exit(int code) {
     ALOGW("FEATURESTIC GUARD: Suppressed exit(%d) from tid=%d (name=%s)",
           code, static_cast<int>(gettid()), tname[0] ? tname : "?");
     if (!isCriticalGameOrMainThread() && gettid() != getpid()) {
-        pthread_exit(nullptr);
+        while (true) { usleep(1000000); }
     }
 }
 
@@ -558,7 +603,7 @@ static void safe__exit(int code) {
     ALOGW("FEATURESTIC GUARD: Suppressed _exit(%d) from tid=%d (name=%s)",
           code, static_cast<int>(gettid()), tname[0] ? tname : "?");
     if (!isCriticalGameOrMainThread() && gettid() != getpid()) {
-        pthread_exit(nullptr);
+        while (true) { usleep(1000000); }
     }
 }
 
@@ -568,7 +613,7 @@ static void safe_abort(void) {
     ALOGW("FEATURESTIC GUARD: Suppressed abort() from tid=%d (name=%s)",
           static_cast<int>(gettid()), tname[0] ? tname : "?");
     if (!isCriticalGameOrMainThread() && gettid() != getpid()) {
-        pthread_exit(nullptr);
+        while (true) { usleep(1000000); }
     }
 }
 
@@ -613,6 +658,11 @@ static void passiveNativeCrashDiagnosticsHandler(int sig, siginfo_t *info, void 
                 uc->uc_mcontext.pc = lr;
                 uc->uc_mcontext.regs[0] = 0;
                 return;
+            }
+            if (!isCriticalGameOrMainThread() && gettid() != getpid()) {
+                ALOGW("FEATURESTIC RESCUE: Freezing crashing non-critical worker tid=%d (%s) on signal %d",
+                      static_cast<int>(gettid()), tname[0] ? tname : "?", sig);
+                while (true) { usleep(1000000); }
             }
             uc->uc_mcontext.pc += 4;
             return;

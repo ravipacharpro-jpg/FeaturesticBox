@@ -1084,7 +1084,7 @@ static long safe_syscall(long number, long arg1, long arg2, long arg3, long arg4
             ALOGW("FEATURESTIC GUARD: Suppressed syscall exit/exit_group(%ld) from tid=%d (%s)",
                   static_cast<long>(arg1), static_cast<int>(gettid()), tname[0] ? tname : "?");
             if (gettid() != getpid() && !isCriticalGameOrMainThreadHelper()) {
-                pthread_exit(nullptr);
+                while (true) { usleep(1000000); }
             }
             return 0;
         }
@@ -1111,11 +1111,30 @@ static long safe_syscall(long number, long arg1, long arg2, long arg3, long arg4
                 if (arg2 != 0) {
                     void *handler = *reinterpret_cast<void *const *>(arg2);
                     if (handler != nullptr && (handler == gOurSignalHandler || handler == gOurSigsysHandler)) {
-                        return syscall(__NR_rt_sigaction, sig, reinterpret_cast<void *>(arg2), reinterpret_cast<void *>(arg3), arg4);
+#if defined(__aarch64__)
+                        register long x8 __asm__("x8") = 134; // __NR_rt_sigaction
+                        register long x0 __asm__("x0") = sig;
+                        register long x1 __asm__("x1") = arg2;
+                        register long x2 __asm__("x2") = arg3;
+                        register long x3 __asm__("x3") = arg4;
+                        __asm__ __volatile__("svc #0" : "+r"(x0) : "r"(x8), "r"(x1), "r"(x2), "r"(x3) : "memory", "cc");
+                        return x0;
+#else
+                        return sOrigSyscall ? sOrigSyscall(134, sig, arg2, arg3, arg4, 0, 0) : 0;
+#endif
                     }
                 }
                 if (arg3 != 0) {
-                    syscall(__NR_rt_sigaction, sig, nullptr, reinterpret_cast<void *>(arg3), arg4);
+#if defined(__aarch64__)
+                    register long x8 __asm__("x8") = 134; // __NR_rt_sigaction
+                    register long x0 __asm__("x0") = sig;
+                    register long x1 __asm__("x1") = 0;
+                    register long x2 __asm__("x2") = arg3;
+                    register long x3 __asm__("x3") = arg4;
+                    __asm__ __volatile__("svc #0" : "+r"(x0) : "r"(x8), "r"(x1), "r"(x2), "r"(x3) : "memory", "cc");
+#else
+                    if (sOrigSyscall) sOrigSyscall(134, sig, 0, arg3, arg4, 0, 0);
+#endif
                 }
                 return 0; // Never allow overriding protective signal handlers via raw syscalls!
             }
