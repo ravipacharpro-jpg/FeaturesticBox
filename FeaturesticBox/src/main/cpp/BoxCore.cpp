@@ -106,7 +106,16 @@ static bool isCriticalGameOrMainThread() {
                 || strstr(tname, "Mali") != nullptr
                 || strstr(tname, "Surface") != nullptr
                 || strstr(tname, "Unity") != nullptr
-                || strstr(tname, "Unreal") != nullptr) {
+                || strstr(tname, "Unreal") != nullptr
+                || strstr(tname, "Download") != nullptr
+                || strstr(tname, "Puffer") != nullptr
+                || strstr(tname, "Eifs") != nullptr
+                || strstr(tname, "Pak") != nullptr
+                || strstr(tname, "Stream") != nullptr
+                || strstr(tname, "Net") != nullptr
+                || strstr(tname, "HTTP") != nullptr
+                || strstr(tname, "Volley") != nullptr
+                || strstr(tname, "OkHttp") != nullptr) {
             return true;
         }
     }
@@ -726,7 +735,7 @@ static void passiveNativeCrashDiagnosticsHandler(int sig, siginfo_t *info, void 
             }
         }
 
-        // 2. Sliding window loop & signal storm detector (64-entry ring buffer + worker threshold)
+        // 2. Sliding window loop & signal storm detector (64-entry ring buffer)
         static thread_local uintptr_t sRecentFaults[64] = {0};
         static thread_local int sRecentIdx = 0;
         static thread_local int sLoopDetections = 0;
@@ -743,28 +752,27 @@ static void passiveNativeCrashDiagnosticsHandler(int sig, siginfo_t *info, void 
         sRecentFaults[sRecentIdx % 64] = currentPc;
         sRecentIdx++;
 
-        // For non-critical worker / anti-cheat scanner / analytics threads:
-        // If thread has looped or triggered > 15 faults, park it immediately to prevent CPU starvation
-        bool nonCritical = (gettid() != getpid() && !isCriticalGameOrMainThread());
-        if (nonCritical && (sTotalFaults > 15 || inLoop)) {
-            ALOGW("FEATURESTIC ISOLATION: Worker thread tid=%d (%s) isolated (faults=%d, pc=%p) -> parking thread",
-                  static_cast<int>(gettid()), tname[0] ? tname : "?", sTotalFaults, reinterpret_cast<void *>(currentPc));
-            struct timespec ts{3600, 0};
-            while (true) {
-                nanosleep(&ts, nullptr);
-            }
-            return;
-        }
-
         if (inLoop) {
             sLoopDetections++;
-            if (sLoopDetections <= 2 && lr >= 0x10000) {
+            if (sLoopDetections <= 3 && lr >= 0x10000) {
                 // First try: return cleanly to caller via Link Register
                 uc->uc_mcontext.pc = lr;
                 uc->uc_mcontext.regs[0] = 0;
                 ALOGW("FEATURESTIC RESCUE: Loop detected at PC %p on tid=%d (%s) -> returned to caller LR %p",
                       reinterpret_cast<void *>(currentPc), static_cast<int>(gettid()),
                       tname[0] ? tname : "?", reinterpret_cast<void *>(lr));
+                return;
+            }
+
+            // Only park if LR return also looped multiple times and thread is non-critical
+            bool nonCritical = (gettid() != getpid() && !isCriticalGameOrMainThread());
+            if (nonCritical) {
+                ALOGW("FEATURESTIC ISOLATION: Worker thread tid=%d (%s) isolated (faults=%d, loops=%d) at PC %p -> parking thread",
+                      static_cast<int>(gettid()), tname[0] ? tname : "?", sTotalFaults, sLoopDetections, reinterpret_cast<void *>(currentPc));
+                struct timespec ts{3600, 0};
+                while (true) {
+                    nanosleep(&ts, nullptr);
+                }
                 return;
             }
 
@@ -775,6 +783,17 @@ static void passiveNativeCrashDiagnosticsHandler(int sig, siginfo_t *info, void 
             }
         } else {
             sLoopDetections = 0;
+        }
+
+        // Runaway thread storm protection (> 60 unhandled faults on a non-critical thread)
+        if (sTotalFaults > 60 && gettid() != getpid() && !isCriticalGameOrMainThread()) {
+            ALOGW("FEATURESTIC ISOLATION: Runaway worker thread tid=%d (%s) exceeded fault threshold (%d) -> parking thread",
+                  static_cast<int>(gettid()), tname[0] ? tname : "?", sTotalFaults);
+            struct timespec ts{3600, 0};
+            while (true) {
+                nanosleep(&ts, nullptr);
+            }
+            return;
         }
 
         // Standard load/store fault: advance PC past the 4-byte instruction
