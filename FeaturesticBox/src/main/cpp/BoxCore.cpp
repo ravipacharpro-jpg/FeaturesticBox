@@ -670,10 +670,7 @@ static void safe_exit(int code) {
     ALOGW("FEATURESTIC GUARD: Suppressed exit(%d) from tid=%d (name=%s)",
           code, static_cast<int>(gettid()), tname[0] ? tname : "?");
     if (!isCriticalGameOrMainThread() && gettid() != getpid()) {
-        struct timespec ts{3600, 0};
-        while (true) {
-            nanosleep(&ts, nullptr);
-        }
+        pthread_exit(nullptr);
     }
 }
 
@@ -683,10 +680,7 @@ static void safe__exit(int code) {
     ALOGW("FEATURESTIC GUARD: Suppressed _exit(%d) from tid=%d (name=%s)",
           code, static_cast<int>(gettid()), tname[0] ? tname : "?");
     if (!isCriticalGameOrMainThread() && gettid() != getpid()) {
-        struct timespec ts{3600, 0};
-        while (true) {
-            nanosleep(&ts, nullptr);
-        }
+        pthread_exit(nullptr);
     }
 }
 
@@ -696,10 +690,7 @@ static void safe_abort(void) {
     ALOGW("FEATURESTIC GUARD: Suppressed abort() from tid=%d (name=%s)",
           static_cast<int>(gettid()), tname[0] ? tname : "?");
     if (!isCriticalGameOrMainThread() && gettid() != getpid()) {
-        struct timespec ts{3600, 0};
-        while (true) {
-            nanosleep(&ts, nullptr);
-        }
+        pthread_exit(nullptr);
     }
 }
 
@@ -770,15 +761,12 @@ static void passiveNativeCrashDiagnosticsHandler(int sig, siginfo_t *info, void 
                 return;
             }
 
-            // Only park if LR return also looped multiple times and thread is non-critical
+            // Only exit if LR return also looped multiple times and thread is non-critical
             bool nonCritical = (gettid() != getpid() && !isCriticalGameOrMainThread());
             if (nonCritical) {
-                ALOGW("FEATURESTIC ISOLATION: Worker thread tid=%d (%s) isolated (faults=%d, loops=%d) at PC %p -> parking thread",
+                ALOGW("FEATURESTIC ISOLATION: Worker thread tid=%d (%s) isolated (faults=%d, loops=%d) at PC %p -> terminating worker",
                       static_cast<int>(gettid()), tname[0] ? tname : "?", sTotalFaults, sLoopDetections, reinterpret_cast<void *>(currentPc));
-                struct timespec ts{3600, 0};
-                while (true) {
-                    nanosleep(&ts, nullptr);
-                }
+                pthread_exit(nullptr);
                 return;
             }
 
@@ -793,12 +781,16 @@ static void passiveNativeCrashDiagnosticsHandler(int sig, siginfo_t *info, void 
 
         // Runaway thread storm protection (> 60 unhandled faults on a non-critical thread)
         if (sTotalFaults > 60 && gettid() != getpid() && !isCriticalGameOrMainThread()) {
-            ALOGW("FEATURESTIC ISOLATION: Runaway worker thread tid=%d (%s) exceeded fault threshold (%d) -> parking thread",
+            ALOGW("FEATURESTIC ISOLATION: Runaway worker thread tid=%d (%s) exceeded fault threshold (%d) -> terminating worker",
                   static_cast<int>(gettid()), tname[0] ? tname : "?", sTotalFaults);
-            struct timespec ts{3600, 0};
-            while (true) {
-                nanosleep(&ts, nullptr);
-            }
+            pthread_exit(nullptr);
+            return;
+        }
+
+        // If Link Register is valid, try returning to caller before advancing PC
+        if (lr >= 0x10000) {
+            uc->uc_mcontext.pc = lr;
+            uc->uc_mcontext.regs[0] = 0;
             return;
         }
 
@@ -807,14 +799,6 @@ static void passiveNativeCrashDiagnosticsHandler(int sig, siginfo_t *info, void 
         return;
     }
 #endif
-
-    if (gettid() != getpid()) {
-        struct timespec ts{3600, 0};
-        while (true) {
-            nanosleep(&ts, nullptr);
-        }
-        return;
-    }
 
     chainPreviousSignal(sig, info, ucontext);
 }
