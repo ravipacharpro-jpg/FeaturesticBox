@@ -357,7 +357,7 @@ static void safe_free(void *ptr) {
             ALOGE("JemallocGuard: SUPPRESSED unallocated page free(%p) mapbits=0x%zx (count=%d, tid=%d [%s])",
                   ptr, mapbits, cnt, static_cast<int>(gettid()), tname[0] ? tname : "?");
         }
-        if (gettid() != getpid() && !isCriticalGameOrMainThreadHelper()) {
+        if (gettid() != getpid() && !isCriticalGameOrMainThread()) {
             ALOGW("JemallocGuard: Terminated punishment thread tid=%d to prevent fallback kill",
                   static_cast<int>(gettid()));
             pthread_exit(nullptr);
@@ -422,7 +422,7 @@ static void safe_RefBase_decStrong(void *self, const void *id) {
         if (sGameLibLoadedCount.load(std::memory_order_relaxed) > 0 && !isCriticalGameOrMainThread()) {
             ALOGW("FEATURESTIC: Suppressed invalid/duplicate decStrong(%p) (count=%d, tid=%d) - returning gracefully", self, cnt, static_cast<int>(gettid()));
         }
-        if (gettid() != getpid() && !isCriticalGameOrMainThreadHelper()) {
+        if (gettid() != getpid() && !isCriticalGameOrMainThread()) {
             ALOGW("RefBaseGuard: Terminated punishment thread tid=%d to prevent fallback kill",
                   static_cast<int>(gettid()));
             pthread_exit(nullptr);
