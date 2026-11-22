@@ -170,117 +170,7 @@ static bool isPageMappedSafe(uintptr_t addr) {
     return mincore(reinterpret_cast<void *>(pageBase), 4096, &vec) == 0;
 }
 
-static bool isJemallocPtrInvalidOrUnallocated(uintptr_t uptr, size_t *outMapbits = nullptr);
-
-static void calibrateJemallocChunkLayout() {
-    if (sJemallocCalibrated) return;
-    void *p9 = malloc(9 * 4096);
-    void *barrier = malloc(4096);
-    void *p10 = malloc(10 * 4096);
-
-    if (p9 != nullptr && p10 != nullptr) {
-        uintptr_t u9 = untagPtr(p9);
-        uintptr_t u10 = untagPtr(p10);
-        uintptr_t chunk9 = u9 & ~uintptr_t(0x1FFFFF);
-        uintptr_t chunk10 = u10 & ~uintptr_t(0x1FFFFF);
-        size_t pageind9 = (u9 - chunk9) >> 12;
-        size_t pageind10 = (u10 - chunk10) >> 12;
-
-        constexpr int kMaxHeaderWords = 13 * 512;
-        if (pageind9 >= 13 && pageind9 < 512 && isPageMappedSafe(chunk9)) {
-            const auto *words9 = reinterpret_cast<const volatile size_t *>(chunk9);
-            size_t *before9 = static_cast<size_t *>(malloc(kMaxHeaderWords * sizeof(size_t)));
-            if (before9 != nullptr) {
-                for (int k = 0; k < kMaxHeaderWords; ++k) {
-                    before9[k] = words9[k];
-                }
-                free(p9);
-                p9 = nullptr;
-
-                int foundK9 = -1;
-                for (int k = 0; k < kMaxHeaderWords; ++k) {
-                    if ((before9[k] & 0xFF3ULL) == 0xFF3ULL && (words9[k] & 0xFF3ULL) == 0xFF0ULL) {
-                        if ((before9[k] & 0xFFFF3ULL) == 0x9FF3ULL || foundK9 < 0) {
-                            foundK9 = k;
-                            if ((before9[k] & 0xFFFF3ULL) == 0x9FF3ULL) {
-                                break;
-                            }
-                        }
-                    }
-                }
-
-                if (foundK9 >= 0) {
-                    int stride = 1;
-                    if (chunk9 == chunk10 && pageind10 >= 13 && pageind10 < 512 && pageind10 != pageind9) {
-                        for (int k = 0; k < kMaxHeaderWords; ++k) {
-                            if ((words9[k] & 0xFFFF3ULL) == 0xAFF3ULL) {
-                                int diffK = k - foundK9;
-                                int diffP = static_cast<int>(pageind10) - static_cast<int>(pageind9);
-                                if (diffP != 0 && (diffK % diffP) == 0 && (diffK / diffP) >= 1 && (diffK / diffP) <= 16) {
-                                    stride = diffK / diffP;
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                    sJemallocMapbitsStride = stride;
-                    sJemallocMapbitsBaseIdx = foundK9 - static_cast<int>(pageind9) * stride;
-                    sJemallocCalibrated = true;
-
-                    size_t verifyBits = 0;
-                    bool selfTest = isJemallocPtrInvalidOrUnallocated(u9, &verifyBits);
-                    ALOGE("JemallocGuard calibrated: baseIdx=%d, stride=%d, k9=%d, pageind9=%zu, before=0x%zx, after=0x%zx, selfTest=%d (verifyBits=0x%zx)",
-                          sJemallocMapbitsBaseIdx,
-                          sJemallocMapbitsStride,
-                          foundK9,
-                          pageind9,
-                          before9[foundK9],
-                          static_cast<size_t>(words9[foundK9]),
-                          selfTest ? 1 : 0,
-                          verifyBits);
-                }
-                free(before9);
-            }
-        }
-    }
-    if (p9 != nullptr) free(p9);
-    if (p10 != nullptr) free(p10);
-    if (barrier != nullptr) free(barrier);
-}
-
-// Returns true ONLY if uptr resides in a valid jemalloc arena chunk page whose
-// mapbits have bit 0 (CHUNK_MAP_ALLOCATED) == 0 (e.g. mapbits == 0x5ff0).
-static bool isJemallocPtrInvalidOrUnallocated(uintptr_t uptr, size_t *outMapbits) {
-    if (!sJemallocCalibrated) {
-        return false;
-    }
-    uintptr_t chunk = uptr & ~uintptr_t(0x1FFFFF);
-    size_t pageind = (uptr - chunk) >> 12;
-    // In 4KB-page Bionic jemalloc, pages 0..12 (0x0000..0xcfff) are the chunk header (map_bias = 13).
-    if (pageind < 13 || pageind >= 512) {
-        return false;
-    }
-    int wordIdx = sJemallocMapbitsBaseIdx + static_cast<int>(pageind) * sJemallocMapbitsStride;
-    if (wordIdx < 0 || wordIdx >= (13 * 512)) {
-        return false;
-    }
-    if (!isPageMappedSafe(chunk)) {
-        return true;
-    }
-    const auto *chunkWords = reinterpret_cast<const volatile size_t *>(chunk);
-    // Sanity check that chunk header looks like a genuine jemalloc arena chunk:
-    // chunkWords[0] is arena_t* (a valid 8-byte-aligned pointer in user space).
-    uintptr_t arenaPtr = untagPtr(reinterpret_cast<const void *>(chunkWords[0]));
-    if (arenaPtr < 0x10000ULL || arenaPtr >= UINT64_C(0x0001000000000000) || (arenaPtr & 0x7ULL) != 0) {
-        return false;
-    }
-    size_t mapbits = chunkWords[wordIdx];
-    if (outMapbits != nullptr) {
-        *outMapbits = mapbits;
-    }
-    // Bit 0 (CHUNK_MAP_ALLOCATED) == 0 -> value not allocated (e.g. mapbits == 0x5ff0)!
-    return (mapbits & 0x1ULL) == 0;
-}
+// Jemalloc heuristics removed to prevent false positives on Android Scudo allocator.
 #endif
 
 struct UnwindBacktraceState {
@@ -342,7 +232,7 @@ static void safe_free(void *ptr) {
         return;
     }
     // Only suppress if the memory address is genuinely unmapped in process address space.
-    // Never terminate valid worker threads on mapped addresses.
+    // Never terminate valid worker threads.
     if (!isPageMappedSafe(uptr)) {
         int cnt = ++sSuppressedFreeCount;
         if (cnt <= 32) {
@@ -350,26 +240,6 @@ static void safe_free(void *ptr) {
             prctl(PR_GET_NAME, reinterpret_cast<unsigned long>(tname), 0, 0, 0);
             ALOGE("HeapGuard: SUPPRESSED unmapped free(%p) (count=%d, tid=%d [%s])",
                   ptr, cnt, static_cast<int>(gettid()), tname[0] ? tname : "?");
-        }
-        if (gettid() != getpid()) {
-            ALOGW("HeapGuard: Terminated punishment thread tid=%d attempting bad free", static_cast<int>(gettid()));
-            pthread_exit(nullptr);
-        }
-        return;
-    }
-    size_t mapbits = 0;
-    if (isJemallocPtrInvalidOrUnallocated(uptr, &mapbits)) {
-        int cnt = ++sSuppressedFreeCount;
-        if (cnt <= 32) {
-            char tname[32] = {0};
-            prctl(PR_GET_NAME, reinterpret_cast<unsigned long>(tname), 0, 0, 0);
-            ALOGE("JemallocGuard: SUPPRESSED unallocated page free(%p) mapbits=0x%zx (count=%d, tid=%d [%s])",
-                  ptr, mapbits, cnt, static_cast<int>(gettid()), tname[0] ? tname : "?");
-        }
-        if (gettid() != getpid() && !isCriticalGameOrMainThread()) {
-            ALOGW("JemallocGuard: Terminated punishment thread tid=%d to prevent fallback kill",
-                  static_cast<int>(gettid()));
-            pthread_exit(nullptr);
         }
         return;
     }
@@ -427,14 +297,6 @@ static void safe_RefBase_decStrong(void *self, const void *id) {
             if (cnt <= 4) {
                 logCurrentThreadBacktrace();
             }
-        }
-        if (sGameLibLoadedCount.load(std::memory_order_relaxed) > 0 && !isCriticalGameOrMainThread()) {
-            ALOGW("FEATURESTIC: Suppressed invalid/duplicate decStrong(%p) (count=%d, tid=%d) - returning gracefully", self, cnt, static_cast<int>(gettid()));
-        }
-        if (gettid() != getpid() && !isCriticalGameOrMainThread()) {
-            ALOGW("RefBaseGuard: Terminated punishment thread tid=%d to prevent fallback kill",
-                  static_cast<int>(gettid()));
-            pthread_exit(nullptr);
         }
         return;
     }
@@ -640,11 +502,7 @@ static void chainPreviousSignal(int sig, siginfo_t *info, void *ucontext) {
         prev->sa_handler(sig);
         return;
     }
-    if (gettid() != getpid() && !isCriticalGameOrMainThread()) {
-        ALOGW("FEATURESTIC GUARD: chainPreviousSignal terminating worker tid=%d on unhandled signal %d",
-              static_cast<int>(gettid()), sig);
-        pthread_exit(nullptr);
-    }
+    // Return gracefully instead of letting the process crash or killing threads
 }
 
 static __thread int tThreadSegvAccerrCount = 0;
@@ -655,7 +513,7 @@ static int (*sOrigRaise)(int) = nullptr;
 static void (*sOrigAbort)(void) = nullptr;
 
 static int safe_kill(pid_t pid, int sig) {
-    if ((sig == SIGSEGV || sig == SIGBUS || sig == SIGABRT || sig == SIGKILL || sig == SIGSYS || sig == SIGILL)
+    if ((sig == SIGSEGV || sig == SIGBUS || sig == SIGABRT || sig == SIGKILL || sig == SIGSYS || sig == SIGILL || sig == SIGTERM || sig == SIGQUIT)
             && (pid == getpid() || pid == 0 || pid == -1)) {
         ALOGW("FEATURESTIC GUARD: Suppressed kill(pid=%d, sig=%d) from tid=%d", static_cast<int>(pid), sig, static_cast<int>(gettid()));
         return 0;
@@ -664,7 +522,7 @@ static int safe_kill(pid_t pid, int sig) {
 }
 
 static int safe_tgkill(pid_t tgid, pid_t tid, int sig) {
-    if ((sig == SIGSEGV || sig == SIGBUS || sig == SIGABRT || sig == SIGKILL || sig == SIGSYS || sig == SIGILL)
+    if ((sig == SIGSEGV || sig == SIGBUS || sig == SIGABRT || sig == SIGKILL || sig == SIGSYS || sig == SIGILL || sig == SIGTERM || sig == SIGQUIT)
             && (tgid == getpid() || tgid == 0 || tgid == -1)) {
         ALOGW("FEATURESTIC GUARD: Suppressed tgkill(tgid=%d, tid=%d, sig=%d) from tid=%d",
               static_cast<int>(tgid), static_cast<int>(tid), sig, static_cast<int>(gettid()));
@@ -674,7 +532,7 @@ static int safe_tgkill(pid_t tgid, pid_t tid, int sig) {
 }
 
 static int safe_raise(int sig) {
-    if (sig == SIGSEGV || sig == SIGBUS || sig == SIGABRT || sig == SIGSYS || sig == SIGILL) {
+    if (sig == SIGSEGV || sig == SIGBUS || sig == SIGABRT || sig == SIGSYS || sig == SIGILL || sig == SIGTERM || sig == SIGQUIT) {
         ALOGW("FEATURESTIC GUARD: Suppressed raise(sig=%d) from tid=%d", sig, static_cast<int>(gettid()));
         return 0;
     }
@@ -734,15 +592,6 @@ static void passiveNativeCrashDiagnosticsHandler(int sig, siginfo_t *info, void 
         return;
     }
 
-    // 2. Isolate and terminate non-critical worker threads (Tencent punishment workers)
-    if (gettid() != getpid() && !isCriticalGameOrMainThread()) {
-        ALOGW("FEATURESTIC ISOLATION: Terminating worker tid=%d (%s) on signal %d (code=%d, addr=%p, pc=%p)",
-              static_cast<int>(gettid()), tname[0] ? tname : "?", sig, siCode,
-              reinterpret_cast<void *>(fAddr), reinterpret_cast<void *>(pcAddr));
-        pthread_exit(nullptr);
-        return;
-    }
-
 #if defined(__aarch64__)
     if (ucontext != nullptr) {
         auto *uc = reinterpret_cast<ucontext_t *>(ucontext);
@@ -756,6 +605,9 @@ static void passiveNativeCrashDiagnosticsHandler(int sig, siginfo_t *info, void 
         }
 
         if (sig == SIGBUS || sig == SIGSEGV) {
+            ALOGW("FEATURESTIC RESCUE: Rescuing signal %d at PC %p (addr=%p) on tid=%d (%s)",
+                  sig, reinterpret_cast<void *>(currentPc), reinterpret_cast<void *>(fAddr),
+                  static_cast<int>(gettid()), tname[0] ? tname : "?");
             uintptr_t lr = static_cast<uintptr_t>(uc->uc_mcontext.regs[30]);
             if (currentPc < 0x10000 && lr >= 0x10000) {
                 uc->uc_mcontext.pc = lr;
@@ -776,7 +628,7 @@ static void installOrReassertPassiveNativeCrashDiagnostics() {
     struct sigaction sa{};
     sa.sa_sigaction = passiveNativeCrashDiagnosticsHandler;
     sigemptyset(&sa.sa_mask);
-    sa.sa_flags = SA_SIGINFO;
+    sa.sa_flags = SA_SIGINFO | SA_NODEFER | SA_ONSTACK;
 
     struct sigaction prevSegv{};
     if (origSa(SIGSEGV, &sa, &prevSegv) == 0) {
@@ -853,7 +705,7 @@ static int safe_sigaction_common(int sig,
                 struct sigaction sa{};
                 sa.sa_sigaction = passiveNativeCrashDiagnosticsHandler;
                 sigemptyset(&sa.sa_mask);
-                sa.sa_flags = SA_SIGINFO;
+                sa.sa_flags = SA_SIGINFO | SA_NODEFER | SA_ONSTACK;
                 origFn(sig, &sa, nullptr);
             }
         }
@@ -972,14 +824,10 @@ static void installHeapAndRefBaseSafetyGuards() {
     static bool sGuardsInitialized = false;
     if (!sGuardsInitialized) {
         sGuardsInitialized = true;
-#if defined(__LP64__)
-        // 1. Calibrate Bionic jemalloc chunk mapbits layout FIRST using raw malloc/free.
-        calibrateJemallocChunkLayout();
-#endif
-        // 2. Install signal diagnostics BEFORE hooking sigaction().
+        // 1. Install signal diagnostics BEFORE hooking sigaction().
         installOrReassertPassiveNativeCrashDiagnostics();
 
-        // 3. Hook libc.so free() and sigaction()/sigaction64() directly via A64HookFunction.
+        // 2. Hook libc.so free() and sigaction()/sigaction64() directly via A64HookFunction.
         void *freeSym = dlsym(RTLD_DEFAULT, "free");
         void *sigactionSym = dlsym(RTLD_DEFAULT, "sigaction");
         void *sigaction64Sym = dlsym(RTLD_DEFAULT, "sigaction64");
