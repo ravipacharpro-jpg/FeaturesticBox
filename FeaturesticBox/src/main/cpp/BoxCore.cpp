@@ -101,7 +101,12 @@ static bool isCriticalGameOrMainThread() {
                 || strstr(tname, "RenderEngine") != nullptr
                 || strstr(tname, "hwui") != nullptr
                 || strstr(tname, "Finalizer") != nullptr
-                || strstr(tname, "HeapTask") != nullptr) {
+                || strstr(tname, "HeapTask") != nullptr
+                || strstr(tname, "mali") != nullptr
+                || strstr(tname, "Mali") != nullptr
+                || strstr(tname, "Surface") != nullptr
+                || strstr(tname, "Unity") != nullptr
+                || strstr(tname, "Unreal") != nullptr) {
             return true;
         }
     }
@@ -695,9 +700,14 @@ static void passiveNativeCrashDiagnosticsHandler(int sig, siginfo_t *info, void 
 
     char tname[32] = {0};
     prctl(PR_GET_NAME, reinterpret_cast<unsigned long>(tname), 0, 0, 0);
-    ALOGW("FEATURESTIC RESCUE: Intercepted signal %d (code=%d, addr=%p, pc=%p) on tid=%d (%s) -> advancing PC",
-          sig, siCode, reinterpret_cast<void *>(fAddr), reinterpret_cast<void *>(pcAddr),
-          static_cast<int>(gettid()), tname[0] ? tname : "?");
+
+    static thread_local int sLoggedFaults = 0;
+    if (sLoggedFaults < 5 || (sLoggedFaults % 100 == 0)) {
+        ALOGW("FEATURESTIC RESCUE: Intercepted signal %d (code=%d, addr=%p, pc=%p) on tid=%d (%s) [#%d]",
+              sig, siCode, reinterpret_cast<void *>(fAddr), reinterpret_cast<void *>(pcAddr),
+              static_cast<int>(gettid()), tname[0] ? tname : "?", sLoggedFaults + 1);
+    }
+    sLoggedFaults++;
 
 #if defined(__aarch64__)
     if (ucontext != nullptr && (sig == SIGBUS || sig == SIGSEGV)) {
@@ -716,20 +726,35 @@ static void passiveNativeCrashDiagnosticsHandler(int sig, siginfo_t *info, void 
             }
         }
 
-        // 2. Sliding window loop & signal storm detector (ring buffer of last 8 fault PCs)
-        static thread_local uintptr_t sRecentFaults[8] = {0};
+        // 2. Sliding window loop & signal storm detector (64-entry ring buffer + worker threshold)
+        static thread_local uintptr_t sRecentFaults[64] = {0};
         static thread_local int sRecentIdx = 0;
         static thread_local int sLoopDetections = 0;
+        static thread_local int sTotalFaults = 0;
+        sTotalFaults++;
 
         bool inLoop = false;
-        for (int i = 0; i < 8; ++i) {
+        for (int i = 0; i < 64; ++i) {
             if (sRecentFaults[i] == currentPc && currentPc != 0) {
                 inLoop = true;
                 break;
             }
         }
-        sRecentFaults[sRecentIdx % 8] = currentPc;
+        sRecentFaults[sRecentIdx % 64] = currentPc;
         sRecentIdx++;
+
+        // For non-critical worker / anti-cheat scanner / analytics threads:
+        // If thread has looped or triggered > 15 faults, park it immediately to prevent CPU starvation
+        bool nonCritical = (gettid() != getpid() && !isCriticalGameOrMainThread());
+        if (nonCritical && (sTotalFaults > 15 || inLoop)) {
+            ALOGW("FEATURESTIC ISOLATION: Worker thread tid=%d (%s) isolated (faults=%d, pc=%p) -> parking thread",
+                  static_cast<int>(gettid()), tname[0] ? tname : "?", sTotalFaults, reinterpret_cast<void *>(currentPc));
+            struct timespec ts{3600, 0};
+            while (true) {
+                nanosleep(&ts, nullptr);
+            }
+            return;
+        }
 
         if (inLoop) {
             sLoopDetections++;
@@ -740,18 +765,6 @@ static void passiveNativeCrashDiagnosticsHandler(int sig, siginfo_t *info, void 
                 ALOGW("FEATURESTIC RESCUE: Loop detected at PC %p on tid=%d (%s) -> returned to caller LR %p",
                       reinterpret_cast<void *>(currentPc), static_cast<int>(gettid()),
                       tname[0] ? tname : "?", reinterpret_cast<void *>(lr));
-                return;
-            }
-
-            // Loop repeats or LR return failed:
-            // For worker / anti-cheat scanner / background threads, park to stop signal storm
-            if (gettid() != getpid() && !isCriticalGameOrMainThread()) {
-                ALOGW("FEATURESTIC ISOLATION: Worker thread tid=%d (%s) stuck in unresolvable fault loop at PC %p -> isolating thread",
-                      static_cast<int>(gettid()), tname[0] ? tname : "?", reinterpret_cast<void *>(currentPc));
-                struct timespec ts{3600, 0};
-                while (true) {
-                    nanosleep(&ts, nullptr);
-                }
                 return;
             }
 
