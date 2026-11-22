@@ -891,6 +891,73 @@ static int safe_sigaction64(int sig, const struct sigaction *act, struct sigacti
     return safe_sigaction_common(sig, act, oldact, sOrigSigaction64 ? sOrigSigaction64 : sOrigSigaction);
 }
 
+struct DlIterateProxyData {
+    int (*origCallback)(struct dl_phdr_info *info, size_t size, void *data);
+    void *origArg;
+};
+
+static int (*sOrigDlIteratePhdr)(int (*)(struct dl_phdr_info *, size_t, void *), void *) = nullptr;
+static void *(*sOrigDlsym)(void *, const char *) = nullptr;
+
+static int safe_dl_iterate_phdr_cb(struct dl_phdr_info *info, size_t size, void *data) {
+    if (info != nullptr && info->dlpi_name != nullptr) {
+        const char *name = info->dlpi_name;
+        if (strstr(name, "Featurestic") != nullptr
+                || strstr(name, "featurestic") != nullptr
+                || strstr(name, "SandHook") != nullptr
+                || strstr(name, "sandhook") != nullptr
+                || strstr(name, "dobby") != nullptr
+                || strstr(name, "loader") != nullptr
+                || strstr(name, "frida") != nullptr
+                || strstr(name, "xposed") != nullptr
+                || strstr(name, "edxp") != nullptr
+                || strstr(name, "lspd") != nullptr
+                || strstr(name, "magisk") != nullptr
+                || strstr(name, "zygisk") != nullptr
+                || strstr(name, "termux") != nullptr
+                || strstr(name, "antigem") != nullptr
+                || strstr(name, "substrate") != nullptr
+                || strstr(name, "Substrate") != nullptr
+                || strstr(name, "blackbox") != nullptr
+                || strstr(name, "BlackBox") != nullptr) {
+            // Stealth masking: hide container and hooking libraries from anti-cheat
+            return 0;
+        }
+    }
+    auto *proxy = reinterpret_cast<DlIterateProxyData *>(data);
+    if (proxy != nullptr && proxy->origCallback != nullptr) {
+        return proxy->origCallback(info, size, proxy->origArg);
+    }
+    return 0;
+}
+
+static int safe_dl_iterate_phdr(int (*callback)(struct dl_phdr_info *, size_t, void *), void *data) {
+    if (callback == nullptr) return 0;
+    DlIterateProxyData proxy{callback, data};
+    return sOrigDlIteratePhdr ? sOrigDlIteratePhdr(safe_dl_iterate_phdr_cb, &proxy) : 0;
+}
+
+static void *safe_dlsym(void *handle, const char *symbol) {
+    if (symbol != nullptr) {
+        if (strstr(symbol, "A64HookFunction") != nullptr
+                || strstr(symbol, "SandHook") != nullptr
+                || strstr(symbol, "DobbyHook") != nullptr
+                || strstr(symbol, "dobby") != nullptr
+                || strstr(symbol, "featurestic") != nullptr
+                || strstr(symbol, "Featurestic") != nullptr
+                || strstr(symbol, "NativeVfsHook") != nullptr
+                || strstr(symbol, "Substrate") != nullptr
+                || strstr(symbol, "MSHookFunction") != nullptr
+                || strstr(symbol, "blackbox") != nullptr
+                || strstr(symbol, "BlackBox") != nullptr
+                || strstr(symbol, "BoxCore") != nullptr) {
+            // Anti-cheat blindfold: hide hook framework symbols
+            return nullptr;
+        }
+    }
+    return sOrigDlsym ? sOrigDlsym(handle, symbol) : nullptr;
+}
+
 static void installHeapAndRefBaseSafetyGuards() {
     static bool sGuardsInitialized = false;
     if (!sGuardsInitialized) {
@@ -913,6 +980,8 @@ static void installHeapAndRefBaseSafetyGuards() {
         void *exitSym = dlsym(RTLD_DEFAULT, "exit");
         void *_exitSym = dlsym(RTLD_DEFAULT, "_exit");
         void *_ExitSym = dlsym(RTLD_DEFAULT, "_Exit");
+        void *dlIteratePhdrSym = dlsym(RTLD_DEFAULT, "dl_iterate_phdr");
+        void *dlsymSym = dlsym(RTLD_DEFAULT, "dlsym");
 #if defined(__aarch64__)
         if (freeSym) {
             A64HookFunction(freeSym,
@@ -964,6 +1033,16 @@ static void installHeapAndRefBaseSafetyGuards() {
                             reinterpret_cast<void *>(safe__exit),
                             nullptr);
         }
+        if (dlIteratePhdrSym) {
+            A64HookFunction(dlIteratePhdrSym,
+                            reinterpret_cast<void *>(safe_dl_iterate_phdr),
+                            reinterpret_cast<void **>(&sOrigDlIteratePhdr));
+        }
+        if (dlsymSym) {
+            A64HookFunction(dlsymSym,
+                            reinterpret_cast<void *>(safe_dlsym),
+                            reinterpret_cast<void **>(&sOrigDlsym));
+        }
 #endif
         if (!sOrigFree && freeSym) {
             sOrigFree = reinterpret_cast<void (*)(void *)>(freeSym);
@@ -975,6 +1054,12 @@ static void installHeapAndRefBaseSafetyGuards() {
         if (!sOrigTgkill && tgkillSym) sOrigTgkill = reinterpret_cast<int (*)(pid_t, pid_t, int)>(tgkillSym);
         if (!sOrigRaise && raiseSym) sOrigRaise = reinterpret_cast<int (*)(int)>(raiseSym);
         if (!sOrigAbort && abortSym) sOrigAbort = reinterpret_cast<void (*)(void)>(abortSym);
+        if (!sOrigDlIteratePhdr && dlIteratePhdrSym) {
+            sOrigDlIteratePhdr = reinterpret_cast<int (*)(int (*)(struct dl_phdr_info *, size_t, void *), void *)>(dlIteratePhdrSym);
+        }
+        if (!sOrigDlsym && dlsymSym) {
+            sOrigDlsym = reinterpret_cast<void *(*)(void *, const char *)>(dlsymSym);
+        }
     }
 }
 

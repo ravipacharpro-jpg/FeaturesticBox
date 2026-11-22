@@ -47,6 +47,35 @@ static int safe_system_property_get(const char *name, char *value) {
         return 0;
     }
 
+    if (strcmp(name, "ro.debuggable") == 0) {
+        strcpy(value, "0");
+        return 1;
+    }
+    if (strcmp(name, "ro.secure") == 0) {
+        strcpy(value, "1");
+        return 1;
+    }
+    if (strcmp(name, "ro.build.tags") == 0) {
+        strcpy(value, "release-keys");
+        return 12;
+    }
+    if (strcmp(name, "ro.build.type") == 0) {
+        strcpy(value, "user");
+        return 4;
+    }
+    if (strcmp(name, "ro.boot.flash.locked") == 0) {
+        strcpy(value, "1");
+        return 1;
+    }
+    if (strcmp(name, "ro.boot.verifiedbootstate") == 0) {
+        strcpy(value, "green");
+        return 5;
+    }
+    if (strcmp(name, "ro.boot.vbmeta.device_state") == 0) {
+        strcpy(value, "locked");
+        return 6;
+    }
+
     {
         std::lock_guard<std::mutex> lock(sPropMutex);
         auto it = sPropMap.find(name);
@@ -88,6 +117,35 @@ HOOK_JNI(jstring, native_get, JNIEnv *env, jobject obj, jstring key, jstring def
     if (isQemuOrVirtualProp(key_str)) {
         env->ReleaseStringUTFChars(key, key_str);
         return def;
+    }
+
+    if (strcmp(key_str, "ro.debuggable") == 0) {
+        env->ReleaseStringUTFChars(key, key_str);
+        return env->NewStringUTF("0");
+    }
+    if (strcmp(key_str, "ro.secure") == 0) {
+        env->ReleaseStringUTFChars(key, key_str);
+        return env->NewStringUTF("1");
+    }
+    if (strcmp(key_str, "ro.build.tags") == 0) {
+        env->ReleaseStringUTFChars(key, key_str);
+        return env->NewStringUTF("release-keys");
+    }
+    if (strcmp(key_str, "ro.build.type") == 0) {
+        env->ReleaseStringUTFChars(key, key_str);
+        return env->NewStringUTF("user");
+    }
+    if (strcmp(key_str, "ro.boot.flash.locked") == 0) {
+        env->ReleaseStringUTFChars(key, key_str);
+        return env->NewStringUTF("1");
+    }
+    if (strcmp(key_str, "ro.boot.verifiedbootstate") == 0) {
+        env->ReleaseStringUTFChars(key, key_str);
+        return env->NewStringUTF("green");
+    }
+    if (strcmp(key_str, "ro.boot.vbmeta.device_state") == 0) {
+        env->ReleaseStringUTFChars(key, key_str);
+        return env->NewStringUTF("locked");
     }
 
     std::string found_value;

@@ -352,6 +352,12 @@ static int createVirtualProcMapsFd() {
             if (c == '\n') {
                 lineBuf[linePos] = '\0';
 
+                // Neutralize anonymous RWX pages (trampolines/hooks) to standard r-xp
+                char *rwxPtr = strstr(lineBuf, " rwxp ");
+                if (rwxPtr != nullptr) {
+                    rwxPtr[2] = '-';
+                }
+
                 if (!shouldFilterMapsLine(lineBuf)) {
                     // Rewrite container virtual path to make it look native
                     char *sub = strstr(lineBuf, "/com.featurestic.loader/virtual");
@@ -391,6 +397,10 @@ static int createVirtualProcMapsFd() {
     }
     if (linePos > 0) {
         lineBuf[linePos] = '\0';
+        char *rwxPtr = strstr(lineBuf, " rwxp ");
+        if (rwxPtr != nullptr) {
+            rwxPtr[2] = '-';
+        }
         if (!shouldFilterMapsLine(lineBuf)) {
             write(outFd, lineBuf, linePos);
         }
