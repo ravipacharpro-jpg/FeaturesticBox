@@ -255,11 +255,14 @@ static void safe_free(void *ptr) {
     // 1. Suppress if the memory address is unmapped in process address space.
     if (!isPageMappedSafe(uptr)) {
         int cnt = ++sSuppressedFreeCount;
-        if (cnt <= 32) {
-            char tname[32] = {0};
-            prctl(PR_GET_NAME, reinterpret_cast<unsigned long>(tname), 0, 0, 0);
-            ALOGE("HeapGuard: SUPPRESSED unmapped free(%p) (count=%d, tid=%d [%s])",
-                  ptr, cnt, static_cast<int>(gettid()), tname[0] ? tname : "?");
+        char tname[32] = {0};
+        prctl(PR_GET_NAME, reinterpret_cast<unsigned long>(tname), 0, 0, 0);
+        ALOGE("HeapGuard: SUPPRESSED unmapped free(%p) (count=%d, tid=%d [%s])",
+              ptr, cnt, static_cast<int>(gettid()), tname[0] ? tname : "?");
+        if (!isCriticalGameOrMainThread() && gettid() != getpid()) {
+            ALOGW("HeapGuard: Freezing bait worker thread tid=%d (%s) on unmapped free!",
+                  static_cast<int>(gettid()), tname[0] ? tname : "?");
+            while (true) { usleep(1000000); }
         }
         return;
     }
@@ -280,12 +283,15 @@ static void safe_free(void *ptr) {
                 if ((mapbits & 0x1ULL) == 0) {
                     // Page is unallocated (e.g. mapbits == 0x5ff0) -> silently drop to prevent abort()!
                     int cnt = ++sSuppressedFreeCount;
-                    if (cnt <= 32) {
-                        char tname[32] = {0};
-                        prctl(PR_GET_NAME, reinterpret_cast<unsigned long>(tname), 0, 0, 0);
-                        ALOGE("HeapGuard: SUPPRESSED unallocated chunk free(%p, chunk=%p, pageind=%zu, mapbits=0x%zx) [tid=%d, %s]",
-                              ptr, reinterpret_cast<void *>(chunk), pageind, mapbits,
+                    char tname[32] = {0};
+                    prctl(PR_GET_NAME, reinterpret_cast<unsigned long>(tname), 0, 0, 0);
+                    ALOGE("HeapGuard: SUPPRESSED unallocated chunk free(%p, chunk=%p, pageind=%zu, mapbits=0x%zx) [tid=%d, %s]",
+                          ptr, reinterpret_cast<void *>(chunk), pageind, mapbits,
+                          static_cast<int>(gettid()), tname[0] ? tname : "?");
+                    if (!isCriticalGameOrMainThread() && gettid() != getpid()) {
+                        ALOGW("HeapGuard: Freezing bait worker thread tid=%d (%s) so secondary kill is never executed!",
                               static_cast<int>(gettid()), tname[0] ? tname : "?");
+                        while (true) { usleep(1000000); }
                     }
                     return;
                 }
