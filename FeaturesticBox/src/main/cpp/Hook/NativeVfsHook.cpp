@@ -1164,6 +1164,9 @@ static void sigsys_handler(int /*sig*/, siginfo_t *info, void *ucontext) {
     // Without this, returning from the signal handler will re-execute `svc #0` in an infinite loop!
     uc->uc_mcontext.pc += 4;
 
+    // Ensure SIGSYS remains unblocked in the restored thread signal mask!
+    sigdelset(&uc->uc_sigmask, SIGSYS);
+
     switch (nr) {
         case 79: // __NR_newfstatat / __NR_fstatat64
         case 291: // __NR_statx
@@ -1309,7 +1312,92 @@ static void sigsys_handler(int /*sig*/, siginfo_t *info, void *ucontext) {
 }
 
 static bool installSeccompVfsFilter() {
-    ALOGI("NativeVfsHook: SECCOMP-BPF trap bypassed for stability (libc VFS hooks active)");
+    static bool sFilterInstalled = false;
+    if (sFilterInstalled) {
+        return true;
+    }
+
+    static const uint32_t kMagicCanary = 0x5afe5afe;
+
+    struct sigaction sa{};
+    sa.sa_sigaction = sigsys_handler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = SA_SIGINFO;
+    if (sigaction(SIGSYS, &sa, nullptr) != 0) {
+        ALOGE("NativeVfsHook: Failed to install SIGSYS handler: %s", strerror(errno));
+        return false;
+    }
+
+    // Permanently unblock SIGSYS on calling thread
+    sigset_t unblockSys{};
+    sigemptyset(&unblockSys);
+    sigaddset(&unblockSys, SIGSYS);
+    pthread_sigmask(SIG_UNBLOCK, &unblockSys, nullptr);
+
+    struct sock_filter filter[] = {
+        // 0: ld arch
+        BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, arch)),
+        // 1: jeq arch -> jt=1 (idx 3), jf=0 (idx 2)
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, AUDIT_ARCH_AARCH64, 1, 0),
+        // 2: ret ALLOW
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
+        // 3: ld args[5] (offset 56)
+        BPF_STMT(BPF_LD | BPF_W | BPF_ABS, 56),
+        // 4: jeq CANARY -> jt=16 (idx 21), jf=0 (idx 5)
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, kMagicCanary, 16, 0),
+        // 5: ld nr (offset 0)
+        BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, nr)),
+        // 6: jeq 79 (__NR_newfstatat) -> jt=13 (idx 20), jf=0 (idx 7)
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 79, 13, 0),
+        // 7: jeq 291 (__NR_statx) -> jt=12 (idx 20), jf=0 (idx 8)
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 291, 12, 0),
+        // 8: jeq 48 (__NR_faccessat) -> jt=11 (idx 20), jf=0 (idx 9)
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 48, 11, 0),
+        // 9: jeq 439 (__NR_faccessat2) -> jt=10 (idx 20), jf=0 (idx 10)
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 439, 10, 0),
+        // 10: jeq 56 (__NR_openat) -> jt=9 (idx 20), jf=0 (idx 11)
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 56, 9, 0),
+        // 11: jeq 78 (__NR_readlinkat) -> jt=8 (idx 20), jf=0 (idx 12)
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 78, 8, 0),
+        // 12: jeq 94 (__NR_exit_group) -> jt=7 (idx 20), jf=0 (idx 13)
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 94, 7, 0),
+        // 13: jeq 93 (__NR_exit) -> jt=6 (idx 20), jf=0 (idx 14)
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 93, 6, 0),
+        // 14: jeq 129 (__NR_kill) -> jt=5 (idx 20), jf=0 (idx 15)
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 129, 5, 0),
+        // 15: jeq 130 (__NR_tkill) -> jt=4 (idx 20), jf=0 (idx 16)
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 130, 4, 0),
+        // 16: jeq 131 (__NR_tgkill) -> jt=3 (idx 20), jf=0 (idx 17)
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 131, 3, 0),
+        // 17: jeq 134 (__NR_rt_sigaction) -> jt=2 (idx 20), jf=0 (idx 18)
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 134, 2, 0),
+        // 18: jeq 117 (__NR_ptrace) -> jt=1 (idx 20), jf=0 (idx 19)
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 117, 1, 0),
+        // 19: ret ALLOW
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
+        // 20: ret TRAP
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_TRAP),
+        // 21: ret ALLOW
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
+    };
+
+    struct sock_fprog prog = {
+        .len = static_cast<unsigned short>(sizeof(filter) / sizeof(filter[0])),
+        .filter = filter,
+    };
+
+    if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0) {
+        ALOGE("NativeVfsHook: prctl(PR_SET_NO_NEW_PRIVS) failed: %s", strerror(errno));
+        return false;
+    }
+
+    if (prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &prog) != 0) {
+        ALOGE("NativeVfsHook: prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER) failed: %s", strerror(errno));
+        return false;
+    }
+
+    sFilterInstalled = true;
+    ALOGI("NativeVfsHook: Hardened SECCOMP-BPF Raw Syscall Trap successfully active");
     return true;
 }
 #else

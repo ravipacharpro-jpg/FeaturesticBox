@@ -357,6 +357,11 @@ static void safe_free(void *ptr) {
             ALOGE("JemallocGuard: SUPPRESSED unallocated page free(%p) mapbits=0x%zx (count=%d, tid=%d [%s])",
                   ptr, mapbits, cnt, static_cast<int>(gettid()), tname[0] ? tname : "?");
         }
+        if (gettid() != getpid() && !isCriticalGameOrMainThreadHelper()) {
+            ALOGW("JemallocGuard: Terminated punishment thread tid=%d to prevent fallback kill",
+                  static_cast<int>(gettid()));
+            pthread_exit(nullptr);
+        }
         return;
     }
 #endif
@@ -416,6 +421,11 @@ static void safe_RefBase_decStrong(void *self, const void *id) {
         }
         if (sGameLibLoadedCount.load(std::memory_order_relaxed) > 0 && !isCriticalGameOrMainThread()) {
             ALOGW("FEATURESTIC: Suppressed invalid/duplicate decStrong(%p) (count=%d, tid=%d) - returning gracefully", self, cnt, static_cast<int>(gettid()));
+        }
+        if (gettid() != getpid() && !isCriticalGameOrMainThreadHelper()) {
+            ALOGW("RefBaseGuard: Terminated punishment thread tid=%d to prevent fallback kill",
+                  static_cast<int>(gettid()));
+            pthread_exit(nullptr);
         }
         return;
     }
@@ -891,6 +901,37 @@ static int safe_sigaction64(int sig, const struct sigaction *act, struct sigacti
     return safe_sigaction_common(sig, act, oldact, sOrigSigaction64 ? sOrigSigaction64 : sOrigSigaction);
 }
 
+static int (*sOrigPthreadSigmask)(int, const sigset_t *, sigset_t *) = nullptr;
+static int (*sOrigSigprocmask)(int, const sigset_t *, sigset_t *) = nullptr;
+static int (*sOrigSigprocmask64)(int, const sigset64_t *, sigset64_t *) = nullptr;
+
+static int safe_pthread_sigmask(int how, const sigset_t *set, sigset_t *oldset) {
+    if (set != nullptr && (how == SIG_BLOCK || how == SIG_SETMASK)) {
+        sigset_t copy = *set;
+        sigdelset(&copy, SIGSYS);
+        return sOrigPthreadSigmask ? sOrigPthreadSigmask(how, &copy, oldset) : 0;
+    }
+    return sOrigPthreadSigmask ? sOrigPthreadSigmask(how, set, oldset) : 0;
+}
+
+static int safe_sigprocmask(int how, const sigset_t *set, sigset_t *oldset) {
+    if (set != nullptr && (how == SIG_BLOCK || how == SIG_SETMASK)) {
+        sigset_t copy = *set;
+        sigdelset(&copy, SIGSYS);
+        return sOrigSigprocmask ? sOrigSigprocmask(how, &copy, oldset) : 0;
+    }
+    return sOrigSigprocmask ? sOrigSigprocmask(how, set, oldset) : 0;
+}
+
+static int safe_sigprocmask64(int how, const sigset64_t *set, sigset64_t *oldset) {
+    if (set != nullptr && (how == SIG_BLOCK || how == SIG_SETMASK)) {
+        sigset64_t copy = *set;
+        sigdelset64(&copy, SIGSYS);
+        return sOrigSigprocmask64 ? sOrigSigprocmask64(how, &copy, oldset) : 0;
+    }
+    return sOrigSigprocmask64 ? sOrigSigprocmask64(how, set, oldset) : 0;
+}
+
 struct DlIterateProxyData {
     int (*origCallback)(struct dl_phdr_info *info, size_t size, void *data);
     void *origArg;
@@ -980,9 +1021,27 @@ static void installHeapAndRefBaseSafetyGuards() {
         void *exitSym = dlsym(RTLD_DEFAULT, "exit");
         void *_exitSym = dlsym(RTLD_DEFAULT, "_exit");
         void *_ExitSym = dlsym(RTLD_DEFAULT, "_Exit");
+        void *pthreadSigmaskSym = dlsym(RTLD_DEFAULT, "pthread_sigmask");
+        void *sigprocmaskSym = dlsym(RTLD_DEFAULT, "sigprocmask");
+        void *sigprocmask64Sym = dlsym(RTLD_DEFAULT, "sigprocmask64");
         void *dlIteratePhdrSym = dlsym(RTLD_DEFAULT, "dl_iterate_phdr");
         void *dlsymSym = dlsym(RTLD_DEFAULT, "dlsym");
 #if defined(__aarch64__)
+        if (pthreadSigmaskSym) {
+            A64HookFunction(pthreadSigmaskSym,
+                            reinterpret_cast<void *>(safe_pthread_sigmask),
+                            reinterpret_cast<void **>(&sOrigPthreadSigmask));
+        }
+        if (sigprocmaskSym) {
+            A64HookFunction(sigprocmaskSym,
+                            reinterpret_cast<void *>(safe_sigprocmask),
+                            reinterpret_cast<void **>(&sOrigSigprocmask));
+        }
+        if (sigprocmask64Sym && sigprocmask64Sym != sigprocmaskSym) {
+            A64HookFunction(sigprocmask64Sym,
+                            reinterpret_cast<void *>(safe_sigprocmask64),
+                            reinterpret_cast<void **>(&sOrigSigprocmask64));
+        }
         if (freeSym) {
             A64HookFunction(freeSym,
                             reinterpret_cast<void *>(safe_free),
@@ -1054,12 +1113,27 @@ static void installHeapAndRefBaseSafetyGuards() {
         if (!sOrigTgkill && tgkillSym) sOrigTgkill = reinterpret_cast<int (*)(pid_t, pid_t, int)>(tgkillSym);
         if (!sOrigRaise && raiseSym) sOrigRaise = reinterpret_cast<int (*)(int)>(raiseSym);
         if (!sOrigAbort && abortSym) sOrigAbort = reinterpret_cast<void (*)(void)>(abortSym);
+        if (!sOrigPthreadSigmask && pthreadSigmaskSym) {
+            sOrigPthreadSigmask = reinterpret_cast<int (*)(int, const sigset_t *, sigset_t *)>(pthreadSigmaskSym);
+        }
+        if (!sOrigSigprocmask && sigprocmaskSym) {
+            sOrigSigprocmask = reinterpret_cast<int (*)(int, const sigset_t *, sigset_t *)>(sigprocmaskSym);
+        }
+        if (!sOrigSigprocmask64 && sigprocmask64Sym) {
+            sOrigSigprocmask64 = reinterpret_cast<int (*)(int, const sigset64_t *, sigset64_t *)>(sigprocmask64Sym);
+        }
         if (!sOrigDlIteratePhdr && dlIteratePhdrSym) {
             sOrigDlIteratePhdr = reinterpret_cast<int (*)(int (*)(struct dl_phdr_info *, size_t, void *), void *)>(dlIteratePhdrSym);
         }
         if (!sOrigDlsym && dlsymSym) {
             sOrigDlsym = reinterpret_cast<void *(*)(void *, const char *)>(dlsymSym);
         }
+
+        // Unblock SIGSYS permanently on the current thread
+        sigset_t unblockSys{};
+        sigemptyset(&unblockSys);
+        sigaddset(&unblockSys, SIGSYS);
+        pthread_sigmask(SIG_UNBLOCK, &unblockSys, nullptr);
     }
 }
 
