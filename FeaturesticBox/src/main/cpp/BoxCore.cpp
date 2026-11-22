@@ -669,9 +669,11 @@ static void safe_exit(int code) {
     prctl(PR_GET_NAME, reinterpret_cast<unsigned long>(tname), 0, 0, 0);
     ALOGW("FEATURESTIC GUARD: Suppressed exit(%d) from tid=%d (name=%s)",
           code, static_cast<int>(gettid()), tname[0] ? tname : "?");
-    struct timespec ts{3600, 0};
-    while (true) {
-        nanosleep(&ts, nullptr);
+    if (!isCriticalGameOrMainThread() && gettid() != getpid()) {
+        struct timespec ts{3600, 0};
+        while (true) {
+            nanosleep(&ts, nullptr);
+        }
     }
 }
 
@@ -680,9 +682,11 @@ static void safe__exit(int code) {
     prctl(PR_GET_NAME, reinterpret_cast<unsigned long>(tname), 0, 0, 0);
     ALOGW("FEATURESTIC GUARD: Suppressed _exit(%d) from tid=%d (name=%s)",
           code, static_cast<int>(gettid()), tname[0] ? tname : "?");
-    struct timespec ts{3600, 0};
-    while (true) {
-        nanosleep(&ts, nullptr);
+    if (!isCriticalGameOrMainThread() && gettid() != getpid()) {
+        struct timespec ts{3600, 0};
+        while (true) {
+            nanosleep(&ts, nullptr);
+        }
     }
 }
 
@@ -691,9 +695,11 @@ static void safe_abort(void) {
     prctl(PR_GET_NAME, reinterpret_cast<unsigned long>(tname), 0, 0, 0);
     ALOGW("FEATURESTIC GUARD: Suppressed abort() from tid=%d (name=%s)",
           static_cast<int>(gettid()), tname[0] ? tname : "?");
-    struct timespec ts{3600, 0};
-    while (true) {
-        nanosleep(&ts, nullptr);
+    if (!isCriticalGameOrMainThread() && gettid() != getpid()) {
+        struct timespec ts{3600, 0};
+        while (true) {
+            nanosleep(&ts, nullptr);
+        }
     }
 }
 

@@ -866,7 +866,15 @@ public class BActivityThread extends IBActivityThread.Stub {
         if ("com.pubg.imobile".equals(packageName) || (processName != null && processName.contains("imobile"))) {
             try {
                 System.loadLibrary("UE4");
-            } catch (Throwable ignored) {
+            } catch (Throwable t1) {
+                try {
+                    String abiSubDir = FeaturesticBoxCore.is64Bit() ? "arm64-v8a" : "armeabi-v7a";
+                    File ue4 = new File(new File(new File(app.getNoBackupFilesDir(), "native"), abiSubDir), "libUE4.so");
+                    if (ue4.exists()) {
+                        System.load(ue4.getAbsolutePath());
+                    }
+                } catch (Throwable ignored) {
+                }
             }
         }
         for (AppLifecycleCallback cb : FeaturesticBoxCore.get().getAppLifecycleCallbacks()) {

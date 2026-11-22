@@ -221,6 +221,9 @@ static inline bool isBlockedDevPath(const char *path) {
     if (strstr(path, "/mem") != nullptr && strncmp(path, "/proc/", 6) == 0) {
         return true;
     }
+    if (strstr(path, "/pagemap") != nullptr && strncmp(path, "/proc/", 6) == 0) {
+        return true;
+    }
     if (strstr(path, "/wchan") != nullptr || strstr(path, "/syscall") != nullptr) {
         return true;
     }
@@ -258,6 +261,15 @@ static inline bool isProcMounts(const char *path) {
         return true;
     }
     return false;
+}
+
+static inline bool isProcEnviron(const char *path) {
+    return isProcSelfOrPid(path, "environ");
+}
+
+static inline bool isProcNetUnix(const char *path) {
+    if (!path) return false;
+    return (strcmp(path, "/proc/net/unix") == 0 || isProcSelfOrPid(path, "net/unix"));
 }
 
 static int createAnonymousMemFd(const char *name) {
@@ -298,6 +310,8 @@ static bool shouldFilterMapsLine(const char *line) {
     if (strstr(line, "kernelsu") != nullptr) return true;
     if (strstr(line, "apatch") != nullptr) return true;
     if (strstr(line, "dev/pts") != nullptr) return true;
+    if (strstr(line, "antigem") != nullptr) return true;
+    if (strstr(line, "termux") != nullptr) return true;
     return false;
 }
 
@@ -590,6 +604,74 @@ static int createVirtualProcMountsFd() {
     return outFd;
 }
 
+static int createVirtualProcEnvironFd() {
+    int outFd = createAnonymousMemFd("v_environ");
+    if (outFd < 0) return -1;
+    // Clean Android environment strings separated by '\0'
+    const char cleanEnv[] =
+        "ANDROID_ROOT=/system\0"
+        "ANDROID_DATA=/data\0"
+        "EXTERNAL_STORAGE=/sdcard\0"
+        "ASEC_MOUNTPOINT=/mnt/asec\0"
+        "PATH=/product/bin:/apex/com.android.runtime/bin:/apex/com.android.art/bin:/system_ext/bin:/system/bin:/system/xbin:/odm/bin:/vendor/bin:/vendor/xbin\0";
+    write(outFd, cleanEnv, sizeof(cleanEnv));
+    lseek(outFd, 0, SEEK_SET);
+    return outFd;
+}
+
+static int createVirtualProcNetUnixFd() {
+    if (sInVfsBypass) return -1;
+    sInVfsBypass = true;
+
+    int realFd = raw_openat(AT_FDCWD, "/proc/net/unix", O_RDONLY | O_CLOEXEC);
+    if (realFd < 0) {
+        sInVfsBypass = false;
+        return -1;
+    }
+
+    int outFd = createAnonymousMemFd("v_unix");
+    if (outFd < 0) {
+        close(realFd);
+        sInVfsBypass = false;
+        return -1;
+    }
+
+    char inBuf[4096];
+    char lineBuf[1024];
+    size_t linePos = 0;
+    ssize_t bytesRead = 0;
+
+    while ((bytesRead = read(realFd, inBuf, sizeof(inBuf))) > 0) {
+        for (ssize_t i = 0; i < bytesRead; ++i) {
+            char c = inBuf[i];
+            if (linePos < sizeof(lineBuf) - 1) {
+                lineBuf[linePos++] = c;
+            }
+            if (c == '\n') {
+                lineBuf[linePos] = '\0';
+                if (strstr(lineBuf, "magisk") == nullptr
+                        && strstr(lineBuf, "zygisk") == nullptr
+                        && strstr(lineBuf, "termux") == nullptr
+                        && strstr(lineBuf, "antigem") == nullptr
+                        && strstr(lineBuf, "featurestic") == nullptr
+                        && strstr(lineBuf, "sandhook") == nullptr) {
+                    write(outFd, lineBuf, linePos);
+                }
+                linePos = 0;
+            }
+        }
+    }
+    if (linePos > 0) {
+        lineBuf[linePos] = '\0';
+        write(outFd, lineBuf, linePos);
+    }
+
+    close(realFd);
+    lseek(outFd, 0, SEEK_SET);
+    sInVfsBypass = false;
+    return outFd;
+}
+
 // ==================== Hook Implementations ====================
 
 static int safe_openat(int dirfd, const char *pathname, int flags, ...) {
@@ -630,6 +712,12 @@ static int safe_openat(int dirfd, const char *pathname, int flags, ...) {
         if (fd >= 0) return fd;
     } else if (isProcMounts(pathname)) {
         int fd = createVirtualProcMountsFd();
+        if (fd >= 0) return fd;
+    } else if (isProcEnviron(pathname)) {
+        int fd = createVirtualProcEnvironFd();
+        if (fd >= 0) return fd;
+    } else if (isProcNetUnix(pathname)) {
+        int fd = createVirtualProcNetUnixFd();
         if (fd >= 0) return fd;
     }
 
@@ -676,6 +764,12 @@ static int safe_openat64(int dirfd, const char *pathname, int flags, ...) {
     } else if (isProcMounts(pathname)) {
         int fd = createVirtualProcMountsFd();
         if (fd >= 0) return fd;
+    } else if (isProcEnviron(pathname)) {
+        int fd = createVirtualProcEnvironFd();
+        if (fd >= 0) return fd;
+    } else if (isProcNetUnix(pathname)) {
+        int fd = createVirtualProcNetUnixFd();
+        if (fd >= 0) return fd;
     }
 
     const char *redirected = IO::redirectPath(pathname);
@@ -721,6 +815,12 @@ static int safe_open(const char *pathname, int flags, ...) {
     } else if (isProcMounts(pathname)) {
         int fd = createVirtualProcMountsFd();
         if (fd >= 0) return fd;
+    } else if (isProcEnviron(pathname)) {
+        int fd = createVirtualProcEnvironFd();
+        if (fd >= 0) return fd;
+    } else if (isProcNetUnix(pathname)) {
+        int fd = createVirtualProcNetUnixFd();
+        if (fd >= 0) return fd;
     }
 
     const char *redirected = IO::redirectPath(pathname);
@@ -736,7 +836,8 @@ static int safe_faccessat(int dirfd, const char *pathname, int mode, int flags) 
         return -1;
     }
     if (isProcMaps(pathname) || isProcCmdline(pathname) || isProcStatus(pathname)
-            || isProcComm(pathname) || isProcStat(pathname) || isProcNetTcp(pathname) || isProcMounts(pathname)) {
+            || isProcComm(pathname) || isProcStat(pathname) || isProcNetTcp(pathname) || isProcMounts(pathname)
+            || isProcEnviron(pathname) || isProcNetUnix(pathname)) {
         if ((mode & W_OK) != 0) {
             errno = EACCES;
             return -1;
@@ -756,7 +857,8 @@ static int safe_access(const char *pathname, int mode) {
         return -1;
     }
     if (isProcMaps(pathname) || isProcCmdline(pathname) || isProcStatus(pathname)
-            || isProcComm(pathname) || isProcStat(pathname) || isProcNetTcp(pathname) || isProcMounts(pathname)) {
+            || isProcComm(pathname) || isProcStat(pathname) || isProcNetTcp(pathname) || isProcMounts(pathname)
+            || isProcEnviron(pathname) || isProcNetUnix(pathname)) {
         if ((mode & W_OK) != 0) {
             errno = EACCES;
             return -1;
@@ -775,7 +877,8 @@ static int safe_fstatat(int dirfd, const char *pathname, struct stat *buf, int f
         errno = ENOENT;
         return -1;
     }
-    if (isProcMaps(pathname) || isProcStatus(pathname) || isProcStat(pathname) || isProcMounts(pathname)) {
+    if (isProcMaps(pathname) || isProcStatus(pathname) || isProcStat(pathname) || isProcMounts(pathname)
+            || isProcEnviron(pathname) || isProcNetUnix(pathname)) {
         if (buf) {
             memset(buf, 0, sizeof(struct stat));
             buf->st_mode = S_IFREG | 0444;
@@ -857,7 +960,8 @@ static int safe_statx(int dirfd, const char *pathname, int flags, unsigned int m
         return -1;
     }
     if (isProcMaps(pathname) || isProcStatus(pathname) || isProcStat(pathname) || isProcMounts(pathname)
-            || isProcNetTcp(pathname) || isProcCmdline(pathname) || isProcComm(pathname)) {
+            || isProcNetTcp(pathname) || isProcCmdline(pathname) || isProcComm(pathname)
+            || isProcEnviron(pathname) || isProcNetUnix(pathname)) {
         if (statxbuf) {
             memset(statxbuf, 0, 256);
         }
@@ -924,7 +1028,21 @@ static bool isCriticalGameOrMainThreadHelper() {
                 || strstr(tname, "RenderEngine") != nullptr
                 || strstr(tname, "hwui") != nullptr
                 || strstr(tname, "Finalizer") != nullptr
-                || strstr(tname, "HeapTask") != nullptr) {
+                || strstr(tname, "HeapTask") != nullptr
+                || strstr(tname, "mali") != nullptr
+                || strstr(tname, "Mali") != nullptr
+                || strstr(tname, "Surface") != nullptr
+                || strstr(tname, "Unity") != nullptr
+                || strstr(tname, "Unreal") != nullptr
+                || strstr(tname, "Download") != nullptr
+                || strstr(tname, "Puffer") != nullptr
+                || strstr(tname, "Eifs") != nullptr
+                || strstr(tname, "Pak") != nullptr
+                || strstr(tname, "Stream") != nullptr
+                || strstr(tname, "Net") != nullptr
+                || strstr(tname, "HTTP") != nullptr
+                || strstr(tname, "Volley") != nullptr
+                || strstr(tname, "OkHttp") != nullptr) {
             return true;
         }
     }
@@ -944,6 +1062,20 @@ static long safe_syscall(long number, long arg1, long arg2, long arg3, long arg4
             return safe_statx(static_cast<int>(arg1), reinterpret_cast<const char *>(arg2), static_cast<int>(arg3), static_cast<unsigned int>(arg4), reinterpret_cast<void *>(arg5));
         case 78: // __NR_readlinkat
             return safe_readlinkat(static_cast<int>(arg1), reinterpret_cast<const char *>(arg2), reinterpret_cast<char *>(arg3), static_cast<size_t>(arg4));
+        case 93: // __NR_exit
+        case 94: { // __NR_exit_group
+            char tname[32] = {0};
+            prctl(PR_GET_NAME, reinterpret_cast<unsigned long>(tname), 0, 0, 0);
+            ALOGW("FEATURESTIC GUARD: Suppressed syscall exit/exit_group(%ld) from tid=%d (%s)",
+                  static_cast<long>(arg1), static_cast<int>(gettid()), tname[0] ? tname : "?");
+            if (gettid() != getpid() && !isCriticalGameOrMainThreadHelper()) {
+                struct timespec ts{3600, 0};
+                while (true) {
+                    nanosleep(&ts, nullptr);
+                }
+            }
+            return 0;
+        }
         case 129: { // __NR_kill
             pid_t pid = static_cast<pid_t>(arg1);
             int sig = static_cast<int>(arg2);
@@ -1021,6 +1153,10 @@ static void sigsys_handler(int /*sig*/, siginfo_t *info, void *ucontext) {
     long a3 = static_cast<long>(uc->uc_mcontext.regs[3]);
     long a4 = static_cast<long>(uc->uc_mcontext.regs[4]);
 
+    // Advance PC past the 4-byte `svc #0` instruction on ARM64!
+    // Without this, returning from the signal handler will re-execute `svc #0` in an infinite loop!
+    uc->uc_mcontext.pc += 4;
+
     switch (nr) {
         case 79: // __NR_newfstatat / __NR_fstatat64
         case 291: // __NR_statx
@@ -1050,7 +1186,8 @@ static void sigsys_handler(int /*sig*/, siginfo_t *info, void *ucontext) {
                     }
                 } else if (nr == 48 || nr == 439) {
                     if (isProcMaps(pathname) || isProcCmdline(pathname) || isProcStatus(pathname)
-                            || isProcComm(pathname) || isProcStat(pathname) || isProcNetTcp(pathname) || isProcMounts(pathname)) {
+                            || isProcComm(pathname) || isProcStat(pathname) || isProcNetTcp(pathname) || isProcMounts(pathname)
+                            || isProcEnviron(pathname) || isProcNetUnix(pathname)) {
                         int mode = static_cast<int>(a2);
                         if ((mode & 2 /* W_OK */) != 0) {
                             uc->uc_mcontext.regs[0] = static_cast<unsigned long>(-EACCES);
@@ -1088,6 +1225,14 @@ static void sigsys_handler(int /*sig*/, siginfo_t *info, void *ucontext) {
                         int fd = createVirtualProcMountsFd();
                         uc->uc_mcontext.regs[0] = static_cast<unsigned long>((fd >= 0) ? fd : -ENOENT);
                         return;
+                    } else if (isProcEnviron(pathname)) {
+                        int fd = createVirtualProcEnvironFd();
+                        uc->uc_mcontext.regs[0] = static_cast<unsigned long>((fd >= 0) ? fd : -ENOENT);
+                        return;
+                    } else if (isProcNetUnix(pathname)) {
+                        int fd = createVirtualProcNetUnixFd();
+                        uc->uc_mcontext.regs[0] = static_cast<unsigned long>((fd >= 0) ? fd : -ENOENT);
+                        return;
                     }
                 }
             }
@@ -1098,12 +1243,13 @@ static void sigsys_handler(int /*sig*/, siginfo_t *info, void *ucontext) {
             return;
         }
 
+        case 93: // __NR_exit
         case 94: { // __NR_exit_group
             char tname[32] = {0};
             prctl(PR_GET_NAME, reinterpret_cast<unsigned long>(tname), 0, 0, 0);
-            ALOGW("FEATURESTIC SECCOMP: Suppressed raw exit_group(%ld) from tid=%d (%s)",
+            ALOGW("FEATURESTIC SECCOMP: Suppressed raw exit/exit_group(%ld) from tid=%d (%s)",
                   static_cast<long>(a0), static_cast<int>(gettid()), tname[0] ? tname : "?");
-            if (gettid() != getpid()) {
+            if (gettid() != getpid() && !isCriticalGameOrMainThreadHelper()) {
                 struct timespec ts{3600, 0};
                 while (true) {
                     nanosleep(&ts, nullptr);
@@ -1184,39 +1330,41 @@ static bool installSeccompVfsFilter() {
         BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
         // 3: ld args[5] (offset 56)
         BPF_STMT(BPF_LD | BPF_W | BPF_ABS, 56),
-        // 4: jeq CANARY -> jt=15 (idx 20), jf=0 (idx 5)
-        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, kMagicCanary, 15, 0),
+        // 4: jeq CANARY -> jt=16 (idx 21), jf=0 (idx 5)
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, kMagicCanary, 16, 0),
         // 5: ld nr (offset 0)
         BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, nr)),
-        // 6: jeq 79 (__NR_newfstatat) -> jt=12 (idx 19), jf=0 (idx 7)
-        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 79, 12, 0),
-        // 7: jeq 291 (__NR_statx) -> jt=11 (idx 19), jf=0 (idx 8)
-        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 291, 11, 0),
-        // 8: jeq 48 (__NR_faccessat) -> jt=10 (idx 19), jf=0 (idx 9)
-        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 48, 10, 0),
-        // 9: jeq 439 (__NR_faccessat2) -> jt=9 (idx 19), jf=0 (idx 10)
-        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 439, 9, 0),
-        // 10: jeq 56 (__NR_openat) -> jt=8 (idx 19), jf=0 (idx 11)
-        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 56, 8, 0),
-        // 11: jeq 78 (__NR_readlinkat) -> jt=7 (idx 19), jf=0 (idx 12)
-        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 78, 7, 0),
-        // 12: jeq 94 (__NR_exit_group) -> jt=6 (idx 19), jf=0 (idx 13)
-        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 94, 6, 0),
-        // 13: jeq 129 (__NR_kill) -> jt=5 (idx 19), jf=0 (idx 14)
+        // 6: jeq 79 (__NR_newfstatat) -> jt=13 (idx 20), jf=0 (idx 7)
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 79, 13, 0),
+        // 7: jeq 291 (__NR_statx) -> jt=12 (idx 20), jf=0 (idx 8)
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 291, 12, 0),
+        // 8: jeq 48 (__NR_faccessat) -> jt=11 (idx 20), jf=0 (idx 9)
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 48, 11, 0),
+        // 9: jeq 439 (__NR_faccessat2) -> jt=10 (idx 20), jf=0 (idx 10)
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 439, 10, 0),
+        // 10: jeq 56 (__NR_openat) -> jt=9 (idx 20), jf=0 (idx 11)
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 56, 9, 0),
+        // 11: jeq 78 (__NR_readlinkat) -> jt=8 (idx 20), jf=0 (idx 12)
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 78, 8, 0),
+        // 12: jeq 94 (__NR_exit_group) -> jt=7 (idx 20), jf=0 (idx 13)
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 94, 7, 0),
+        // 13: jeq 93 (__NR_exit) -> jt=6 (idx 20), jf=0 (idx 14)
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 93, 6, 0),
+        // 14: jeq 129 (__NR_kill) -> jt=5 (idx 20), jf=0 (idx 15)
         BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 129, 5, 0),
-        // 14: jeq 130 (__NR_tkill) -> jt=4 (idx 19), jf=0 (idx 15)
+        // 15: jeq 130 (__NR_tkill) -> jt=4 (idx 20), jf=0 (idx 16)
         BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 130, 4, 0),
-        // 15: jeq 131 (__NR_tgkill) -> jt=3 (idx 19), jf=0 (idx 16)
+        // 16: jeq 131 (__NR_tgkill) -> jt=3 (idx 20), jf=0 (idx 17)
         BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 131, 3, 0),
-        // 16: jeq 134 (__NR_rt_sigaction) -> jt=2 (idx 19), jf=0 (idx 17)
+        // 17: jeq 134 (__NR_rt_sigaction) -> jt=2 (idx 20), jf=0 (idx 18)
         BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 134, 2, 0),
-        // 17: jeq 117 (__NR_ptrace) -> jt=1 (idx 19), jf=0 (idx 18)
+        // 18: jeq 117 (__NR_ptrace) -> jt=1 (idx 20), jf=0 (idx 19)
         BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 117, 1, 0),
-        // 18: ret ALLOW
+        // 19: ret ALLOW
         BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
-        // 19: ret TRAP
+        // 20: ret TRAP
         BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_TRAP),
-        // 20: ret ALLOW
+        // 21: ret ALLOW
         BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
     };
 

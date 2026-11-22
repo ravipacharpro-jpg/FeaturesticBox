@@ -142,6 +142,16 @@ public final class CrashShieldAndResourceHealer {
         } catch (Throwable ignored) {
         }
         if (isMainThread) {
+            if (fullTrace.contains("com.google.android.gms")
+                    || fullTrace.contains("com.tencent")
+                    || fullTrace.contains("com.epicgames")
+                    || fullTrace.contains("adjust")
+                    || fullTrace.contains("appsflyer")
+                    || fullTrace.contains("facebook")
+                    || fullTrace.contains("Bugly")
+                    || fullTrace.contains("CrashSight")) {
+                return true;
+            }
             return false;
         }
 
