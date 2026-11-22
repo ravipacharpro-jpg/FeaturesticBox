@@ -705,28 +705,63 @@ static void passiveNativeCrashDiagnosticsHandler(int sig, siginfo_t *info, void 
         uintptr_t currentPc = static_cast<uintptr_t>(uc->uc_mcontext.pc);
         uintptr_t lr = static_cast<uintptr_t>(uc->uc_mcontext.regs[30]);
 
-        static thread_local uintptr_t sLastFaultPc = 0;
-        static thread_local int sRepeatFaultCount = 0;
-
-        if (currentPc == sLastFaultPc) {
-            sRepeatFaultCount++;
-        } else {
-            sLastFaultPc = currentPc;
-            sRepeatFaultCount = 1;
-        }
-
-        if (currentPc < 0x10000 || sRepeatFaultCount >= 4) {
-            // Execution jumped to null/unmapped low address or is stuck in a fault loop:
-            // Return cleanly to caller via Link Register (LR)
+        // 1. Branch to null or low unmapped page (< 64KB)
+        if (currentPc < 0x10000) {
             if (lr >= 0x10000) {
                 uc->uc_mcontext.pc = lr;
                 uc->uc_mcontext.regs[0] = 0;
-                sRepeatFaultCount = 0;
-                sLastFaultPc = 0;
-                ALOGW("FEATURESTIC RESCUE: Recovered from invalid PC %p (repeat=%d) -> returned to caller LR %p on tid=%d",
-                      reinterpret_cast<void *>(currentPc), sRepeatFaultCount, reinterpret_cast<void *>(lr), static_cast<int>(gettid()));
+                ALOGW("FEATURESTIC RESCUE: Branch to NULL/bogus PC (%p) -> returned to caller LR (%p) on tid=%d",
+                      reinterpret_cast<void *>(currentPc), reinterpret_cast<void *>(lr), static_cast<int>(gettid()));
                 return;
             }
+        }
+
+        // 2. Sliding window loop & signal storm detector (ring buffer of last 8 fault PCs)
+        static thread_local uintptr_t sRecentFaults[8] = {0};
+        static thread_local int sRecentIdx = 0;
+        static thread_local int sLoopDetections = 0;
+
+        bool inLoop = false;
+        for (int i = 0; i < 8; ++i) {
+            if (sRecentFaults[i] == currentPc && currentPc != 0) {
+                inLoop = true;
+                break;
+            }
+        }
+        sRecentFaults[sRecentIdx % 8] = currentPc;
+        sRecentIdx++;
+
+        if (inLoop) {
+            sLoopDetections++;
+            if (sLoopDetections <= 2 && lr >= 0x10000) {
+                // First try: return cleanly to caller via Link Register
+                uc->uc_mcontext.pc = lr;
+                uc->uc_mcontext.regs[0] = 0;
+                ALOGW("FEATURESTIC RESCUE: Loop detected at PC %p on tid=%d (%s) -> returned to caller LR %p",
+                      reinterpret_cast<void *>(currentPc), static_cast<int>(gettid()),
+                      tname[0] ? tname : "?", reinterpret_cast<void *>(lr));
+                return;
+            }
+
+            // Loop repeats or LR return failed:
+            // For worker / anti-cheat scanner / background threads, park to stop signal storm
+            if (gettid() != getpid() && !isCriticalGameOrMainThread()) {
+                ALOGW("FEATURESTIC ISOLATION: Worker thread tid=%d (%s) stuck in unresolvable fault loop at PC %p -> isolating thread",
+                      static_cast<int>(gettid()), tname[0] ? tname : "?", reinterpret_cast<void *>(currentPc));
+                struct timespec ts{3600, 0};
+                while (true) {
+                    nanosleep(&ts, nullptr);
+                }
+                return;
+            }
+
+            if (lr >= 0x10000) {
+                uc->uc_mcontext.pc = lr;
+                uc->uc_mcontext.regs[0] = 0;
+                return;
+            }
+        } else {
+            sLoopDetections = 0;
         }
 
         // Standard load/store fault: advance PC past the 4-byte instruction
