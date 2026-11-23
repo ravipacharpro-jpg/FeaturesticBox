@@ -381,6 +381,8 @@ public final class VirtualOAuthRouter {
                 if (host.contains("kakao") && (scheme.startsWith("kakao") || full.contains("kakao"))) score += 200;
                 if (host.contains("telegram") && (scheme.contains("tg") || scheme.contains("telegram"))) score += 200;
                 if (host.contains("garena") && (scheme.contains("garena") || scheme.startsWith("gop"))) score += 200;
+                if ((host.contains("facebook") || host.contains("fb.com")) && (scheme.startsWith("itopfacebook") || scheme.startsWith("fbconnect") || full.contains("facebook"))) score += 200;
+                if ((host.contains("twitter") || host.contains("x.com")) && (scheme.startsWith("itoptwitter") || scheme.contains("twitter") || "x".equals(scheme))) score += 200;
                 if (full.contains("oauth") || full.contains("callback") || full.contains("auth")) score += 40;
                 if (virtualPackage != null && scheme.startsWith(lower(virtualPackage))) score += 50;
                 if (score > bestScore) {
@@ -401,6 +403,8 @@ public final class VirtualOAuthRouter {
         }
 
         Uri[] candidates = new Uri[]{
+                Uri.parse("itoptwitter1450://twitter-auth"),
+                Uri.parse("itoptwitter://twitter-auth"),
                 Uri.parse("twittersdk://callback"),
                 Uri.parse("twittersdk://authorize"),
                 Uri.parse("twitterkit://callback"),
@@ -451,6 +455,7 @@ public final class VirtualOAuthRouter {
         String scheme = lower(candidate == null ? null : candidate.getScheme());
         int score = 0;
 
+        if (scheme.startsWith("itoptwitter")) score += 250;
         if (scheme.startsWith("twittersdk")) score += 220;
         if (scheme.startsWith("twitterkit")) score += 190;
         if (full.contains("twitter")) score += 130;

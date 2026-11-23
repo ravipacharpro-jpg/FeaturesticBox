@@ -38,14 +38,14 @@ public final class FacebookOAuthCallbackActivity extends Activity {
     private void handleIntent(Intent intent) {
         Uri callbackUri = intent == null ? null : intent.getData();
         boolean actionOk = intent != null && Intent.ACTION_VIEW.equals(intent.getAction());
-        boolean schemeOk = callbackUri != null
-                && "fbconnect".equals(lower(callbackUri.getScheme()));
+        String scheme = callbackUri == null ? "" : lower(callbackUri.getScheme());
+        boolean schemeOk = "fbconnect".equals(scheme) || scheme.startsWith("itopfacebook") || scheme.startsWith("fb");
         String host = callbackUri == null ? "" : lower(callbackUri.getHost());
-        boolean hostOk = host.startsWith("cct.") && host.length() > 4;
+        boolean hostOk = host.startsWith("cct.") || host.equals("facebook-auth") || host.length() > 0;
 
         FacebookOAuthSessionStore.Claim claim = null;
         boolean delivered = false;
-        if (actionOk && schemeOk && hostOk) {
+        if (actionOk && schemeOk) {
             claim = FacebookOAuthSessionStore.claim(callbackUri);
             if (claim != null) {
                 delivered = VirtualOAuthBridgeActivity.dispatchFacebookCallback(
@@ -54,6 +54,13 @@ public final class FacebookOAuthCallbackActivity extends Activity {
                     FacebookOAuthSessionStore.complete(claim.generation);
                 } else {
                     FacebookOAuthSessionStore.release(claim.generation);
+                }
+            } else {
+                // Direct fallback: dispatch to running virtual package
+                String virtualPkg = com.featurestic.box.core.BActivityThread.getAppPackageName();
+                if (virtualPkg != null) {
+                    delivered = VirtualOAuthBridgeActivity.dispatchFacebookCallback(
+                            virtualPkg, 0, callbackUri);
                 }
             }
         }

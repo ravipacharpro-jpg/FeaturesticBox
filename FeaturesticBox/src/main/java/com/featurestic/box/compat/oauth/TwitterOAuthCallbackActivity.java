@@ -29,21 +29,38 @@ public final class TwitterOAuthCallbackActivity extends Activity {
     private void handle(Intent intent) {
         Uri callback = intent == null || !Intent.ACTION_VIEW.equals(intent.getAction())
                 ? null : intent.getData();
-        TwitterOAuthSessionStore.Claim claim = TwitterOAuthSessionStore.claim(callback);
-        if (claim == null) {
+        if (callback == null) {
             finish();
             return;
         }
+        TwitterOAuthSessionStore.Claim claim = TwitterOAuthSessionStore.claim(callback);
+        if (claim != null) {
+            Intent result = new Intent(Intent.ACTION_VIEW, callback);
+            result.addCategory(Intent.CATEGORY_DEFAULT);
+            result.addCategory(Intent.CATEGORY_BROWSABLE);
 
-        Intent result = new Intent(Intent.ACTION_VIEW, callback);
-        result.addCategory(Intent.CATEGORY_DEFAULT);
-        result.addCategory(Intent.CATEGORY_BROWSABLE);
-
-        boolean delivered = TwitterOAuthSessionStore.deliver(claim, RESULT_OK, result);
-        if (delivered) {
-            TwitterOAuthSessionStore.complete(claim.generation);
+            boolean delivered = TwitterOAuthSessionStore.deliver(claim, RESULT_OK, result);
+            if (delivered) {
+                TwitterOAuthSessionStore.complete(claim.generation);
+            } else {
+                TwitterOAuthSessionStore.release(claim.generation);
+            }
         } else {
-            TwitterOAuthSessionStore.release(claim.generation);
+            // Direct relay to guest container if no active session
+            try {
+                String virtualPkg = com.featurestic.box.core.BActivityThread.getAppPackageName();
+                if (virtualPkg != null) {
+                    Intent forward = new Intent(Intent.ACTION_VIEW, callback);
+                    forward.addCategory(Intent.CATEGORY_DEFAULT);
+                    forward.addCategory(Intent.CATEGORY_BROWSABLE);
+                    forward.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_SINGLE_TOP);
+                    forward.setComponent(new android.content.ComponentName(
+                            virtualPkg,
+                            "com.itop.imsdk.android.base.login.customtabs.ITOPCustomTabActivity"));
+                    com.featurestic.box.FeaturesticBoxCore.getBActivityManager().startActivity(forward, 0);
+                }
+            } catch (Throwable ignored) {
+            }
         }
         finish();
     }

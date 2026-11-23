@@ -42,7 +42,9 @@ public final class TwitterOAuthSessionStore {
             "twitterauth",
             "oauth-twitter",
             "xauth",
-            "x"
+            "x",
+            "itoptwitter",
+            "itoptwitter1450"
     ));
 
     private static final List<Session> SESSIONS = new ArrayList<>();
@@ -56,8 +58,8 @@ public final class TwitterOAuthSessionStore {
         if (redirectUri == null || redirectUri.getScheme() == null) {
             return false;
         }
-        return HOST_CAPTURE_SCHEMES.contains(
-                redirectUri.getScheme().toLowerCase(Locale.US));
+        String s = redirectUri.getScheme().toLowerCase(Locale.US);
+        return HOST_CAPTURE_SCHEMES.contains(s) || s.startsWith("itoptwitter");
     }
 
     static long begin(Intent bridgeIntent, Uri authUri, Uri expectedRedirectUri,

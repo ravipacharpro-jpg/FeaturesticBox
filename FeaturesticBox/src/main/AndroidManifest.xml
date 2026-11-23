@@ -1308,6 +1308,8 @@
                 <category android:name="android.intent.category.DEFAULT" />
                 <category android:name="android.intent.category.BROWSABLE" />
                 <data android:scheme="fbconnect" />
+                <data android:scheme="itopfacebook" />
+                <data android:scheme="itopfacebook1450" />
             </intent-filter>
         </activity>
 
@@ -1329,6 +1331,14 @@
                 <data android:scheme="oauth-twitter" />
                 <data android:scheme="xauth" />
                 <data android:scheme="x" />
+                <data android:scheme="itoptwitter" />
+                <data android:scheme="itoptwitter1450" />
+                <data android:scheme="itopdiscord" />
+                <data android:scheme="itopdiscord1450" />
+                <data android:scheme="itopapple" />
+                <data android:scheme="itopapple1450" />
+                <data android:scheme="imobile1450" />
+                <data android:scheme="igproxy1450" />
             </intent-filter>
         </activity>
     </application>

@@ -2036,12 +2036,19 @@ public final class VirtualOAuthBridgeActivity extends Activity {
                     userId);
             if (resolved == null || resolved.activityInfo == null
                     || !virtualPackage.equals(resolved.activityInfo.packageName)) {
-                return false;
+                String scheme = lower(callbackUri.getScheme());
+                if (scheme.startsWith("itop") || scheme.startsWith("imobile") || scheme.startsWith("igproxy")) {
+                    callback.setComponent(new ComponentName(
+                            virtualPackage,
+                            "com.itop.imsdk.android.base.login.customtabs.ITOPCustomTabActivity"));
+                } else {
+                    return false;
+                }
+            } else {
+                callback.setComponent(new ComponentName(
+                        resolved.activityInfo.packageName,
+                        resolved.activityInfo.name));
             }
-
-            callback.setComponent(new ComponentName(
-                    resolved.activityInfo.packageName,
-                    resolved.activityInfo.name));
             BActivityManager.get().startActivity(callback, userId);
             return true;
         } catch (Throwable ignored) {
@@ -2090,6 +2097,23 @@ public final class VirtualOAuthBridgeActivity extends Activity {
                 Log.i(TAG, "facebook stage=custom_tab_activity_handoff delivered=false");
             }
         }
+
+        if (virtualActivityExists(
+                targetPackage, "com.itop.imsdk.android.base.login.customtabs.ITOPCustomTabActivity", targetUserId)) {
+            try {
+                Intent callback = new Intent(Intent.ACTION_VIEW, callbackUri);
+                callback.setComponent(new ComponentName(
+                        targetPackage, "com.itop.imsdk.android.base.login.customtabs.ITOPCustomTabActivity"));
+                callback.addCategory(Intent.CATEGORY_DEFAULT);
+                callback.addCategory(Intent.CATEGORY_BROWSABLE);
+                callback.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP
+                        | Intent.FLAG_ACTIVITY_SINGLE_TOP);
+                BActivityManager.get().startActivity(callback, targetUserId);
+                Log.i(TAG, "facebook stage=itop_custom_tab_handoff delivered=true");
+                return true;
+            } catch (Throwable ignored) {
+            }
+        }
         return false;
     }
 
@@ -2110,7 +2134,11 @@ public final class VirtualOAuthBridgeActivity extends Activity {
         if (redirectUri == null || virtualPackage == null) return false;
         String scheme = lower(redirectUri.getScheme());
         if ("fbconnect".equals(scheme) || scheme.matches("^fb[0-9]+$")
+                || scheme.startsWith("fb")
                 || TwitterOAuthSessionStore.isHostCaptureSupported(redirectUri)
+                || scheme.startsWith("itop")
+                || scheme.startsWith("imobile")
+                || scheme.startsWith("igproxy")
                 || "discord".equals(scheme) || scheme.startsWith("discord")
                 || "twitter".equals(scheme) || "x".equals(scheme) || scheme.startsWith("twitter")
                 || scheme.startsWith("com.googleusercontent.apps")

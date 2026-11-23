@@ -152,7 +152,17 @@ static bool isCriticalGameOrMainThread() {
                 || strcasestr(tname, "finalizer") != nullptr
                 || strcasestr(tname, "heaptask") != nullptr
                 || strcasestr(tname, "jit") != nullptr
-                || strcasestr(tname, "signal") != nullptr) {
+                || strcasestr(tname, "signal") != nullptr
+                || strcasestr(tname, "queued-work") != nullptr
+                || strcasestr(tname, "work") != nullptr
+                || strcasestr(tname, "daemon") != nullptr
+                || strcasestr(tname, "referencequeue") != nullptr
+                || strcasestr(tname, "art") != nullptr
+                || strcasestr(tname, "dalvik") != nullptr
+                || strcasestr(tname, "itop") != nullptr
+                || strcasestr(tname, "imsdk") != nullptr
+                || strcasestr(tname, "timer") != nullptr
+                || strcasestr(tname, "async") != nullptr) {
             return true;
         }
     }
@@ -182,7 +192,9 @@ static bool isArtInternalDaemonThread(const char *tname) {
             || strcasestr(tname, "finalizer") != nullptr
             || strcasestr(tname, "referencequeue") != nullptr
             || strcasestr(tname, "signal catcher") != nullptr
-            || strcasestr(tname, "jit thread") != nullptr;
+            || strcasestr(tname, "jit thread") != nullptr
+            || strcasestr(tname, "queued-work") != nullptr
+            || strcasestr(tname, "daemon") != nullptr;
 }
 
 // NOTE: Removed parkFaultingBackgroundThreadForever() - parking threads
@@ -705,33 +717,6 @@ static void passiveNativeCrashDiagnosticsHandler(int sig, siginfo_t *info, void 
                       static_cast<int>(gettid()), tname[0] ? tname : "?", tConsecutiveFaults);
             }
 
-            // ART GC Daemon Threads (HeapTaskDaemon, FinalizerDaemon, etc.):
-            // Never jump across stack frames with x0=0 inside libart.so!
-            // Just advance pc += 4 to preserve GC checkpoints and prevent thread-inl.h aborts.
-            if (isArtInternalDaemonThread(tname)) {
-                if (currentPc >= 0x10000 && isPageMappedSafe(currentPc)) {
-                    uc->uc_mcontext.pc += 4;
-                    return;
-                }
-            }
-
-            // Universal Background Thread Quarantine:
-            // If ANY background thread (anti-cheat scanner, rogue worker, etc.) faults > 3 times
-            // consecutively, it is unrecoverable and will freeze or corrupt the process.
-            // Terminate it cleanly in the kernel (syscall 93) while keeping GameThread & UI alive!
-            bool isEssentialEngineThread = (gettid() == getpid())
-                    || (strcasestr(tname, "GameThread") != nullptr)
-                    || (strcasestr(tname, "RenderThread") != nullptr)
-                    || (strcasestr(tname, "MainThread") != nullptr);
-
-            if (tConsecutiveFaults > 3 && !isEssentialEngineThread) {
-                ALOGW("FEATURESTIC RESCUE: Cleanly terminating unrecoverable background thread tid=%d (%s) on signal %d [fault #%d]",
-                      static_cast<int>(gettid()), tname[0] ? tname : "?", sig, tConsecutiveFaults);
-                register long x8 __asm__("x8") = 93;
-                register long x0 __asm__("x0") = 0;
-                __asm__ __volatile__("svc #0" : "+r"(x0) : "r"(x8) : "memory", "cc");
-            }
-
             uintptr_t lr = static_cast<uintptr_t>(uc->uc_mcontext.regs[30]);
             uintptr_t fp = static_cast<uintptr_t>(uc->uc_mcontext.regs[29]);
 
@@ -753,6 +738,22 @@ static void passiveNativeCrashDiagnosticsHandler(int sig, siginfo_t *info, void 
                         uc->uc_mcontext.sp = fp + 16;
                     }
                 }
+            }
+
+            // ART GC Daemon Threads (HeapTaskDaemon, FinalizerDaemon, etc.):
+            // Advance pc += 4 to preserve GC checkpoints and prevent thread-inl.h / monitor.cc aborts.
+            if (isArtInternalDaemonThread(tname)) {
+                if (currentPc >= 0x10000 && isPageMappedSafe(currentPc)) {
+                    uc->uc_mcontext.pc += 4;
+                    return;
+                }
+                if (callerPc != 0) {
+                    uc->uc_mcontext.pc = callerPc;
+                    uc->uc_mcontext.regs[0] = 0;
+                    return;
+                }
+                usleep(10000);
+                return;
             }
 
             // 1. Universal Cascade Detection on ANY thread:
@@ -793,13 +794,14 @@ static void passiveNativeCrashDiagnosticsHandler(int sig, siginfo_t *info, void 
             }
 
             // 4. Fallback for unmapped PC & unmapped caller on rogue worker: terminate that single thread cleanly in kernel
-            if (!isCritical && isRogue) {
+            if (!isCritical && !isArtInternalDaemonThread(tname) && isRogue) {
                 ALOGW("FEATURESTIC RESCUE: Terminating unrecoverable rogue worker tid=%d (%s) on signal %d",
                       static_cast<int>(gettid()), tname[0] ? tname : "?", sig);
                 register long x8 __asm__("x8") = 93;
                 register long x0 __asm__("x0") = 0;
                 __asm__ __volatile__("svc #0" : "+r"(x0) : "r"(x8) : "memory", "cc");
             }
+            usleep(20000);
             return;
         }
     }
