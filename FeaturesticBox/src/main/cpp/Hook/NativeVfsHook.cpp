@@ -1087,14 +1087,34 @@ static long safe_syscall(long number, long arg1, long arg2, long arg3, long arg4
             return safe_statx(static_cast<int>(arg1), reinterpret_cast<const char *>(arg2), static_cast<int>(arg3), static_cast<unsigned int>(arg4), reinterpret_cast<void *>(arg5));
         case 78: // __NR_readlinkat
             return safe_readlinkat(static_cast<int>(arg1), reinterpret_cast<const char *>(arg2), reinterpret_cast<char *>(arg3), static_cast<size_t>(arg4));
-        case 93: // __NR_exit
-        case 94: { // __NR_exit_group
+        case 93: { // __NR_exit: cleanly terminate only the calling thread in kernel
+#if defined(__aarch64__)
+            register long x8 __asm__("x8") = 93;
+            register long x0 __asm__("x0") = arg1;
+            __asm__ __volatile__("svc #0" : "+r"(x0) : "r"(x8) : "memory", "cc");
+            return 0;
+#else
+            return sOrigSyscall ? sOrigSyscall(93, arg1, 0, 0, 0, 0, 0) : 0;
+#endif
+        }
+        case 94: { // __NR_exit_group: would terminate entire process
+            if (arg1 == 0) {
+                // Clean process exit (e.g. user back press or clean shutdown)
+                return sOrigSyscall ? sOrigSyscall(94, 0, 0, 0, 0, 0, 0) : 0;
+            }
             char tname[32] = {0};
             prctl(PR_GET_NAME, reinterpret_cast<unsigned long>(tname), 0, 0, 0);
-            ALOGW("FEATURESTIC GUARD: Suppressed syscall exit/exit_group(%ld) from tid=%d (%s)",
+            ALOGW("FEATURESTIC GUARD: Suppressed syscall exit_group(%ld) from tid=%d (%s)",
                   static_cast<long>(arg1), static_cast<int>(gettid()), tname[0] ? tname : "?");
             if (gettid() != getpid() && !isCriticalGameOrMainThreadHelper()) {
-                while (true) { usleep(1000000); }
+                // Cleanly terminate only this rogue background thread in kernel without killing process
+#if defined(__aarch64__)
+                register long x8 __asm__("x8") = 93;
+                register long x0 __asm__("x0") = 0;
+                __asm__ __volatile__("svc #0" : "+r"(x0) : "r"(x8) : "memory", "cc");
+#else
+                if (sOrigSyscall) sOrigSyscall(93, 0, 0, 0, 0, 0, 0);
+#endif
             }
             return 0;
         }

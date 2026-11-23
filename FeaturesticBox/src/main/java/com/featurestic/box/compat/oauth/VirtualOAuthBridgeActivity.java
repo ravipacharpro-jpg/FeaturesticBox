@@ -2111,7 +2111,11 @@ public final class VirtualOAuthBridgeActivity extends Activity {
         String scheme = lower(redirectUri.getScheme());
         if ("fbconnect".equals(scheme) || scheme.matches("^fb[0-9]+$")
                 || TwitterOAuthSessionStore.isHostCaptureSupported(redirectUri)
-                || "discord".equals(scheme) || scheme.startsWith("discord")) {
+                || "discord".equals(scheme) || scheme.startsWith("discord")
+                || "twitter".equals(scheme) || "x".equals(scheme) || scheme.startsWith("twitter")
+                || scheme.startsWith("com.googleusercontent.apps")
+                || "line".equals(scheme) || scheme.startsWith("line")
+                || "vk".equals(scheme) || scheme.startsWith("vk")) {
             return true;
         }
         try {

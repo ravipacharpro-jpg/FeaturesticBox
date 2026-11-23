@@ -119,6 +119,13 @@ public final class ExternalAuthRouter {
             "com.android.credentialmanager",
             "com.google.android.credentialmanager",
             "com.google.android.apps.authenticator2",
+            "com.facebook.katana",
+            "com.facebook.orca",
+            "com.facebook.lite",
+            "com.facebook.auth.login",
+            "com.twitter.android",
+            "com.twitter.android.lite",
+            "com.x.android",
             "com.instagram.android",
             "com.whatsapp",
             "com.whatsapp.w4b",
@@ -149,6 +156,8 @@ public final class ExternalAuthRouter {
     ));
 
     private static final Set<String> TWITTER_PROVIDER_PACKAGES = new HashSet<>(Arrays.asList(
+            "com.twitter.android",
+            "com.twitter.android.lite",
             "com.x.android"
     ));
 
@@ -299,7 +308,12 @@ public final class ExternalAuthRouter {
     }
 
     public static boolean isTrustedProviderPackage(String packageName) {
-        return packageName != null && TRUSTED_PROVIDER_PACKAGES.contains(packageName);
+        if (packageName == null) return false;
+        return TRUSTED_PROVIDER_PACKAGES.contains(packageName)
+                || TWITTER_PROVIDER_PACKAGES.contains(packageName)
+                || packageName.startsWith("com.facebook.")
+                || packageName.startsWith("com.twitter.")
+                || "com.x.android".equals(packageName);
     }
 
     public static boolean isTwitterProviderPackage(String packageName) {

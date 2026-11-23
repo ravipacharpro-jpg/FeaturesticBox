@@ -639,7 +639,13 @@ static void safe_abort(void) {
     ALOGW("FEATURESTIC GUARD: Suppressed abort() from tid=%d (name=%s)",
           static_cast<int>(gettid()), tname[0] ? tname : "?");
     if (!isCriticalGameOrMainThread() && gettid() != getpid() && isRogueWorkerThread(tname)) {
+#if defined(__aarch64__)
+        register long x8 __asm__("x8") = 93; // __NR_exit
+        register long x0 __asm__("x0") = 0;
+        __asm__ __volatile__("svc #0" : "+r"(x0) : "r"(x8) : "memory", "cc");
+#else
         syscall(__NR_exit, 0);
+#endif
     }
     while (true) { usleep(100000); }
 }
@@ -690,51 +696,72 @@ static void passiveNativeCrashDiagnosticsHandler(int sig, siginfo_t *info, void 
             }
 
             uintptr_t lr = static_cast<uintptr_t>(uc->uc_mcontext.regs[30]);
+            uintptr_t fp = static_cast<uintptr_t>(uc->uc_mcontext.regs[29]);
 
-            // 1. Universal Cascade Detection on ANY thread:
-            // If a thread faults repeatedly (>1 consecutive faults), sequential pc += 4
-            // instruction skipping corrupts registers and cascades.
-            // Safely return to caller (lr) with return value x0 = 0 (NULL/false) instead!
-            // This safely exits native calls (e.g. JNI calls), allowing Java to run monitorexit,
-            // unlock monitors, and prevent ART GC mutex destruction crashes!
-            if (tConsecutiveFaults > 1) {
-                if (lr >= 0x10000 && isPageMappedSafe(lr)) {
-                    ALOGW("FEATURESTIC RESCUE: Safely aborting failing call on tid=%d (%s) -> returning to LR %p (x0=0)",
-                          static_cast<int>(gettid()), tname[0] ? tname : "?", reinterpret_cast<void *>(lr));
-                    uc->uc_mcontext.pc = lr;
-                    uc->uc_mcontext.regs[0] = 0;
-                    tConsecutiveFaults = 0; // reset fault count on clean caller recovery
-                    return;
+            // Determine if LR is a genuine external caller or just an intra-function return address
+            uintptr_t callerPc = 0;
+            bool isDirectLrValid = (lr >= 0x10000 && isPageMappedSafe(lr));
+            bool isIntraFunctionLr = isDirectLrValid && (labs((intptr_t)lr - (intptr_t)currentPc) < 4096);
+
+            if (isDirectLrValid && !isIntraFunctionLr) {
+                callerPc = lr;
+            } else if (fp >= 0x10000 && (fp & 0x7) == 0 && isPageMappedSafe(fp) && isPageMappedSafe(fp + 8)) {
+                // Inspect standard ARM64 stack frame record: fp points to [saved_fp, saved_lr]
+                uintptr_t savedLr = *reinterpret_cast<const uintptr_t *>(fp + 8);
+                if (savedLr >= 0x10000 && isPageMappedSafe(savedLr) && labs((intptr_t)savedLr - (intptr_t)currentPc) >= 4096) {
+                    callerPc = savedLr;
+                    uintptr_t savedFp = *reinterpret_cast<const uintptr_t *>(fp);
+                    if (savedFp > fp && isPageMappedSafe(savedFp)) {
+                        uc->uc_mcontext.regs[29] = savedFp;
+                        uc->uc_mcontext.sp = fp + 16;
+                    }
                 }
             }
 
-            // 2. If PC is invalid or unmapped, recover via mapped LR
-            if ((currentPc < 0x10000 || !isPageMappedSafe(currentPc)) && lr >= 0x10000 && isPageMappedSafe(lr)) {
-                uc->uc_mcontext.pc = lr;
+            // 1. Universal Cascade Detection on ANY thread:
+            // Safely return to external caller with return value x0 = 0 (NULL/false).
+            // Intra-function loops are strictly rejected to prevent 100% CPU lockups.
+            if (tConsecutiveFaults > 1 && callerPc != 0) {
+                ALOGW("FEATURESTIC RESCUE: Safely aborting failing call on tid=%d (%s) -> returning to caller PC %p (x0=0)",
+                      static_cast<int>(gettid()), tname[0] ? tname : "?", reinterpret_cast<void *>(callerPc));
+                uc->uc_mcontext.pc = callerPc;
                 uc->uc_mcontext.regs[0] = 0;
-                tConsecutiveFaults = 0;
+                if (tConsecutiveFaults > 2) {
+                    usleep(10000); // 10ms throttle: drops CPU burn down to 0% while remaining responsive
+                }
+                return;
+            }
+
+            // 2. If PC is invalid or unmapped, recover via mapped external caller
+            if ((currentPc < 0x10000 || !isPageMappedSafe(currentPc)) && callerPc != 0) {
+                uc->uc_mcontext.pc = callerPc;
+                uc->uc_mcontext.regs[0] = 0;
+                if (tConsecutiveFaults > 2) {
+                    usleep(10000);
+                }
                 return;
             }
 
             // 3. Single-fault instruction advance (throttled if consecutive to preserve 0% CPU without deadlocks)
             if (currentPc >= 0x10000 && isPageMappedSafe(currentPc)) {
-                if (tConsecutiveFaults > 10) {
-                    usleep(10000); // 10ms throttle: drops CPU burn down to 0% while remaining responsive to GC safepoints
+                if (tConsecutiveFaults > 2) {
+                    usleep(10000); // 10ms throttle: eliminates 100% CPU spins and ANRs
                 }
                 uc->uc_mcontext.pc += 4;
                 return;
-            } else if (lr >= 0x10000 && isPageMappedSafe(lr)) {
-                uc->uc_mcontext.pc = lr;
+            } else if (callerPc != 0) {
+                uc->uc_mcontext.pc = callerPc;
                 uc->uc_mcontext.regs[0] = 0;
-                tConsecutiveFaults = 0;
                 return;
             }
 
-            // 4. Fallback for unmapped PC & unmapped LR on rogue worker: terminate that single thread cleanly in kernel
+            // 4. Fallback for unmapped PC & unmapped caller on rogue worker: terminate that single thread cleanly in kernel
             if (!isCritical && isRogue) {
                 ALOGW("FEATURESTIC RESCUE: Terminating unrecoverable rogue worker tid=%d (%s) on signal %d",
                       static_cast<int>(gettid()), tname[0] ? tname : "?", sig);
-                syscall(__NR_exit, 0);
+                register long x8 __asm__("x8") = 93;
+                register long x0 __asm__("x0") = 0;
+                __asm__ __volatile__("svc #0" : "+r"(x0) : "r"(x8) : "memory", "cc");
             }
             return;
         }
