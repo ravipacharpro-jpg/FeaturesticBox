@@ -125,7 +125,11 @@ static bool isCriticalGameOrMainThread() {
                 || strstr(tname, "Net") != nullptr
                 || strstr(tname, "HTTP") != nullptr
                 || strstr(tname, "Volley") != nullptr
-                || strstr(tname, "OkHttp") != nullptr) {
+                || strstr(tname, "OkHttp") != nullptr
+                || strstr(tname, "facebook") != nullptr
+                || strstr(tname, "Facebook") != nullptr
+                || strstr(tname, "Adjust") != nullptr
+                || strstr(tname, "Firebase") != nullptr) {
             return true;
         }
     }
@@ -646,9 +650,22 @@ static void passiveNativeCrashDiagnosticsHandler(int sig, siginfo_t *info, void 
         }
 
         if (sig == SIGBUS || sig == SIGSEGV) {
-            ALOGW("FEATURESTIC RESCUE: Rescuing signal %d at PC %p (addr=%p) on tid=%d (%s)",
-                  sig, reinterpret_cast<void *>(currentPc), reinterpret_cast<void *>(fAddr),
-                  static_cast<int>(gettid()), tname[0] ? tname : "?");
+            static __thread int tConsecutiveFaults = 0;
+            tConsecutiveFaults++;
+
+            if (!isCriticalGameOrMainThread() && gettid() != getpid()) {
+                if (tConsecutiveFaults > 10) {
+                    ALOGW("FEATURESTIC RESCUE: Freezing runaway crashing worker tid=%d (%s) at PC %p after %d faults (0%% CPU preserved)",
+                          static_cast<int>(gettid()), tname[0] ? tname : "?", reinterpret_cast<void *>(currentPc), tConsecutiveFaults);
+                    while (true) { usleep(1000000); }
+                }
+            }
+
+            if (tConsecutiveFaults <= 5) {
+                ALOGW("FEATURESTIC RESCUE: Rescuing signal %d at PC %p (addr=%p) on tid=%d (%s) [fault #%d]",
+                      sig, reinterpret_cast<void *>(currentPc), reinterpret_cast<void *>(fAddr),
+                      static_cast<int>(gettid()), tname[0] ? tname : "?", tConsecutiveFaults);
+            }
             uintptr_t lr = static_cast<uintptr_t>(uc->uc_mcontext.regs[30]);
             if ((currentPc < 0x10000 || !isPageMappedSafe(currentPc)) && lr >= 0x10000 && isPageMappedSafe(lr)) {
                 uc->uc_mcontext.pc = lr;
