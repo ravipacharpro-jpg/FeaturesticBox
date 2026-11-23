@@ -3,6 +3,7 @@ package com.featurestic.box.core;
 import android.database.sqlite.SQLiteException;
 import android.os.Build;
 import android.os.DeadObjectException;
+import android.os.Handler;
 import android.os.Looper;
 import android.os.RemoteException;
 import com.featurestic.box.FeaturesticBoxCore;
