@@ -120,7 +120,7 @@ static bool isCriticalGameOrMainThread() {
                 || strcasestr(tname, "taskgraph") != nullptr
                 || strcasestr(tname, "fasync") != nullptr
                 || strcasestr(tname, "audio") != nullptr
-                || strcasestr(tname, "binder") != nullptr
+                || ((strncmp(tname, "binder:", 7) == 0 || strncmp(tname, "Binder:", 7) == 0) && isdigit(tname[7]))
                 || strcasestr(tname, "hwui") != nullptr
                 || strcasestr(tname, "surface") != nullptr
                 || strcasestr(tname, "mali") != nullptr
@@ -167,12 +167,22 @@ static bool isRogueWorkerThread(const char *tname) {
             || strcasestr(tname, "anogs") != nullptr
             || strcasestr(tname, "tersafe") != nullptr
             || strcasestr(tname, "tp_") != nullptr
+            || strcasestr(tname, "guard") != nullptr
             || strcasestr(tname, "turing") != nullptr
             || strcasestr(tname, "gcloud") != nullptr
             || strcasestr(tname, "hdmpve") != nullptr) {
         return true;
     }
     return false;
+}
+
+static bool isArtInternalDaemonThread(const char *tname) {
+    if (!tname || tname[0] == '\0') return false;
+    return strcasestr(tname, "heaptask") != nullptr
+            || strcasestr(tname, "finalizer") != nullptr
+            || strcasestr(tname, "referencequeue") != nullptr
+            || strcasestr(tname, "signal catcher") != nullptr
+            || strcasestr(tname, "jit thread") != nullptr;
 }
 
 // NOTE: Removed parkFaultingBackgroundThreadForever() - parking threads
@@ -693,6 +703,33 @@ static void passiveNativeCrashDiagnosticsHandler(int sig, siginfo_t *info, void 
                 ALOGW("FEATURESTIC RESCUE: Rescuing signal %d at PC %p (addr=%p) on tid=%d (%s) [fault #%d]",
                       sig, reinterpret_cast<void *>(currentPc), reinterpret_cast<void *>(fAddr),
                       static_cast<int>(gettid()), tname[0] ? tname : "?", tConsecutiveFaults);
+            }
+
+            // ART GC Daemon Threads (HeapTaskDaemon, FinalizerDaemon, etc.):
+            // Never jump across stack frames with x0=0 inside libart.so!
+            // Just advance pc += 4 to preserve GC checkpoints and prevent thread-inl.h aborts.
+            if (isArtInternalDaemonThread(tname)) {
+                if (currentPc >= 0x10000 && isPageMappedSafe(currentPc)) {
+                    uc->uc_mcontext.pc += 4;
+                    return;
+                }
+            }
+
+            // Universal Background Thread Quarantine:
+            // If ANY background thread (anti-cheat scanner, rogue worker, etc.) faults > 3 times
+            // consecutively, it is unrecoverable and will freeze or corrupt the process.
+            // Terminate it cleanly in the kernel (syscall 93) while keeping GameThread & UI alive!
+            bool isEssentialEngineThread = (gettid() == getpid())
+                    || (strcasestr(tname, "GameThread") != nullptr)
+                    || (strcasestr(tname, "RenderThread") != nullptr)
+                    || (strcasestr(tname, "MainThread") != nullptr);
+
+            if (tConsecutiveFaults > 3 && !isEssentialEngineThread) {
+                ALOGW("FEATURESTIC RESCUE: Cleanly terminating unrecoverable background thread tid=%d (%s) on signal %d [fault #%d]",
+                      static_cast<int>(gettid()), tname[0] ? tname : "?", sig, tConsecutiveFaults);
+                register long x8 __asm__("x8") = 93;
+                register long x0 __asm__("x0") = 0;
+                __asm__ __volatile__("svc #0" : "+r"(x0) : "r"(x8) : "memory", "cc");
             }
 
             uintptr_t lr = static_cast<uintptr_t>(uc->uc_mcontext.regs[30]);
