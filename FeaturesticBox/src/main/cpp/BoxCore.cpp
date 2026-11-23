@@ -596,7 +596,7 @@ static int (*sOrigRaise)(int) = nullptr;
 static void (*sOrigAbort)(void) = nullptr;
 
 static int safe_kill(pid_t pid, int sig) {
-    if ((sig == SIGSEGV || sig == SIGBUS || sig == SIGABRT || sig == SIGKILL || sig == SIGSYS || sig == SIGILL || sig == SIGTERM || sig == SIGQUIT)
+    if ((sig == SIGSEGV || sig == SIGBUS || sig == SIGABRT || sig == SIGKILL || sig == SIGSYS || sig == SIGILL || sig == SIGTERM)
             && (pid == getpid() || pid == 0 || pid == -1)) {
         ALOGW("FEATURESTIC GUARD: Suppressed kill(pid=%d, sig=%d) from tid=%d", static_cast<int>(pid), sig, static_cast<int>(gettid()));
         return 0;
@@ -605,7 +605,7 @@ static int safe_kill(pid_t pid, int sig) {
 }
 
 static int safe_tgkill(pid_t tgid, pid_t tid, int sig) {
-    if ((sig == SIGSEGV || sig == SIGBUS || sig == SIGABRT || sig == SIGKILL || sig == SIGSYS || sig == SIGILL || sig == SIGTERM || sig == SIGQUIT)
+    if ((sig == SIGSEGV || sig == SIGBUS || sig == SIGABRT || sig == SIGKILL || sig == SIGSYS || sig == SIGILL || sig == SIGTERM)
             && (tgid == getpid() || tgid == 0 || tgid == -1)) {
         ALOGW("FEATURESTIC GUARD: Suppressed tgkill(tgid=%d, tid=%d, sig=%d) from tid=%d",
               static_cast<int>(tgid), static_cast<int>(tid), sig, static_cast<int>(gettid()));
@@ -615,7 +615,7 @@ static int safe_tgkill(pid_t tgid, pid_t tid, int sig) {
 }
 
 static int safe_raise(int sig) {
-    if (sig == SIGSEGV || sig == SIGBUS || sig == SIGABRT || sig == SIGSYS || sig == SIGILL || sig == SIGTERM || sig == SIGQUIT) {
+    if (sig == SIGSEGV || sig == SIGBUS || sig == SIGABRT || sig == SIGSYS || sig == SIGILL || sig == SIGTERM) {
         ALOGW("FEATURESTIC GUARD: Suppressed raise(sig=%d) from tid=%d", sig, static_cast<int>(gettid()));
         return 0;
     }

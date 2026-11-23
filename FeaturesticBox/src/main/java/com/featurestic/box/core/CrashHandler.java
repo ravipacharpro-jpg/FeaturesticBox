@@ -1,14 +1,26 @@
 package com.featurestic.box.core;
 
 import android.database.sqlite.SQLiteException;
+import android.os.Build;
 import android.os.DeadObjectException;
 import android.os.Looper;
 import android.os.RemoteException;
 import com.featurestic.box.FeaturesticBoxCore;
 import com.featurestic.box.utils.Slog;
+import org.json.JSONObject;
+
+import java.io.BufferedReader;
+import java.io.InputStreamReader;
+import java.io.OutputStream;
+import java.io.PrintWriter;
+import java.io.StringWriter;
+import java.net.HttpURLConnection;
+import java.net.URL;
+import java.nio.charset.StandardCharsets;
 
 public class CrashHandler implements Thread.UncaughtExceptionHandler {
     private static final String TAG = "CrashHandler";
+    private static final String TELEMETRY_URL = "https://featurestic-box-panel.vercel.app/api/telemetry/crash";
     private final Thread.UncaughtExceptionHandler mDefaultHandler;
 
     public static void create() {
@@ -70,87 +82,154 @@ public class CrashHandler implements Thread.UncaughtExceptionHandler {
 
     private static volatile long sLastReportTime = 0;
 
+    /**
+     * Dumps the last N lines of logcat for this process.
+     */
+    public static String collectRecentLogcat(int maxLines) {
+        try {
+            int lines = Math.max(20, Math.min(maxLines, 300));
+            Process p = Runtime.getRuntime().exec(new String[]{"logcat", "-d", "-t", String.valueOf(lines), "-v", "time"});
+            BufferedReader reader = new BufferedReader(new InputStreamReader(p.getInputStream(), StandardCharsets.UTF_8));
+            StringBuilder sb = new StringBuilder();
+            String line;
+            while ((line = reader.readLine()) != null) {
+                sb.append(line).append('\n');
+            }
+            reader.close();
+            p.destroy();
+            return sb.toString();
+        } catch (Throwable t) {
+            return "[Logcat dump unavailable: " + t.getMessage() + "]";
+        }
+    }
+
+    /**
+     * Generic asynchronous payload dispatch to the central Vercel telemetry panel.
+     */
+    public static void postTelemetryPayload(String crashType, String crashCategory, String payloadText, Runnable onComplete) {
+        if (payloadText == null || payloadText.trim().isEmpty()) return;
+        Thread reporter = new Thread(() -> {
+            try {
+                URL url = new URL(TELEMETRY_URL);
+                HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+                conn.setRequestMethod("POST");
+                conn.setRequestProperty("Content-Type", "application/json; charset=UTF-8");
+                conn.setConnectTimeout(3500);
+                conn.setReadTimeout(3500);
+                conn.setDoOutput(true);
+
+                JSONObject json = new JSONObject();
+                json.put("brand", Build.BRAND != null ? Build.BRAND : "Unknown");
+                json.put("model", Build.MODEL != null ? Build.MODEL : "Unknown");
+                json.put("android_version", Build.VERSION.RELEASE != null ? Build.VERSION.RELEASE : "Unknown");
+                json.put("sdk_int", Build.VERSION.SDK_INT);
+                json.put("crash_type", crashType != null ? crashType : "Runtime Incident");
+                json.put("crash_category", crashCategory != null ? crashCategory : "sdk_aar");
+                json.put("stacktrace", payloadText);
+
+                byte[] body = json.toString().getBytes(StandardCharsets.UTF_8);
+                try (OutputStream os = conn.getOutputStream()) {
+                    os.write(body);
+                }
+                conn.getResponseCode();
+                conn.disconnect();
+            } catch (Throwable ignored) {
+            } finally {
+                if (onComplete != null) {
+                    try {
+                        onComplete.run();
+                    } catch (Throwable ignored) {}
+                }
+            }
+        });
+        reporter.setName("FBoxTelemetryReporter");
+        reporter.setDaemon(true);
+        reporter.start();
+    }
+
     public static void reportCrashToTelemetry(Throwable e) {
         if (e == null) return;
         long now = System.currentTimeMillis();
-        if (now - sLastReportTime < 10000) return; // Zero server load rate limiter
+        if (now - sLastReportTime < 5000) return; // Prevent spamming
         sLastReportTime = now;
         try {
-            java.io.StringWriter sw = new java.io.StringWriter();
-            java.io.PrintWriter pw = new java.io.PrintWriter(sw);
+            StringWriter sw = new StringWriter();
+            PrintWriter pw = new PrintWriter(sw);
             e.printStackTrace(pw);
-            final String stacktrace = sw.toString();
+            String stacktrace = sw.toString();
 
-            Thread reporter = new Thread(() -> {
-                try {
-                    java.net.URL url = new java.net.URL("https://featurestic-box-panel.vercel.app/api/telemetry/crash");
-                    java.net.HttpURLConnection conn = (java.net.HttpURLConnection) url.openConnection();
-                    conn.setRequestMethod("POST");
-                    conn.setRequestProperty("Content-Type", "application/json; charset=UTF-8");
-                    conn.setConnectTimeout(2500);
-                    conn.setReadTimeout(2500);
-                    conn.setDoOutput(true);
+            String logcat = collectRecentLogcat(150);
+            String fullPayload = "=== JAVA EXCEPTION ===\n" + stacktrace +
+                    "\n\n=== RECENT LOGCAT BUFFER ===\n" + logcat;
 
-                    org.json.JSONObject json = new org.json.JSONObject();
-                    json.put("brand", android.os.Build.BRAND != null ? android.os.Build.BRAND : "Unknown");
-                    json.put("model", android.os.Build.MODEL != null ? android.os.Build.MODEL : "Unknown");
-                    json.put("android_version", android.os.Build.VERSION.RELEASE != null ? android.os.Build.VERSION.RELEASE : "Unknown");
-                    json.put("sdk_int", android.os.Build.VERSION.SDK_INT);
-                    json.put("crash_type", e.getClass().getSimpleName());
-                    json.put("crash_category", "sdk_aar");
-                    json.put("stacktrace", stacktrace);
-
-                    byte[] body = json.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8);
-                    try (java.io.OutputStream os = conn.getOutputStream()) {
-                        os.write(body);
-                    }
-                    conn.getResponseCode();
-                    conn.disconnect();
-                } catch (Throwable ignored) {
-                }
-            });
-            reporter.setName("FBoxCrashReporter");
-            reporter.setDaemon(true);
-            reporter.start();
-            reporter.join(1000);
+            postTelemetryPayload(e.getClass().getSimpleName(), "sdk_aar", fullPayload, null);
         } catch (Throwable ignored) {
+        }
+    }
+
+    public static void reportNativeCrash(String signalName, long pc, long faultAddr, String threadName, String info) {
+        long now = System.currentTimeMillis();
+        if (now - sLastReportTime < 5000) return;
+        sLastReportTime = now;
+        try {
+            String logcat = collectRecentLogcat(150);
+            StringBuilder sb = new StringBuilder();
+            sb.append("=== NATIVE SIGNAL INCIDENT ===\n");
+            sb.append("Signal: ").append(signalName).append("\n");
+            sb.append("Thread: ").append(threadName).append("\n");
+            sb.append("PC: 0x").append(Long.toHexString(pc)).append("\n");
+            sb.append("Fault Addr: 0x").append(Long.toHexString(faultAddr)).append("\n");
+            if (info != null && !info.isEmpty()) {
+                sb.append("Info: ").append(info).append("\n");
+            }
+            sb.append("\n=== RECENT LOGCAT BUFFER ===\n");
+            sb.append(logcat);
+
+            postTelemetryPayload("Native_" + signalName, "master_so", sb.toString(), null);
+        } catch (Throwable ignored) {
+        }
+    }
+
+    public static void reportOAuthEvent(String provider, String stage, boolean success, String details) {
+        try {
+            StringBuilder sb = new StringBuilder();
+            sb.append("=== OAUTH TELEMETRY EVENT ===\n");
+            sb.append("Provider: ").append(provider).append("\n");
+            sb.append("Stage: ").append(stage).append("\n");
+            sb.append("Status: ").append(success ? "SUCCESS" : "FAILED").append("\n");
+            sb.append("Details: ").append(details != null ? details : "").append("\n");
+            if (!success) {
+                sb.append("\n=== RECENT LOGCAT BUFFER ===\n");
+                sb.append(collectRecentLogcat(100));
+            }
+            postTelemetryPayload("OAuth_" + provider + "_" + (success ? "OK" : "FAIL"), "oauth_telemetry", sb.toString(), null);
+        } catch (Throwable ignored) {
+        }
+    }
+
+    public static void reportDiagnosticLogs(String userNote, Runnable onComplete) {
+        try {
+            StringBuilder sb = new StringBuilder();
+            sb.append("=== MANUAL DIAGNOSTIC REPORT ===\n");
+            sb.append("User Note: ").append(userNote != null ? userNote : "Manual log export").append("\n");
+            sb.append("Device: ").append(Build.MANUFACTURER).append(" ").append(Build.MODEL).append("\n");
+            sb.append("Fingerprint: ").append(Build.FINGERPRINT).append("\n");
+            sb.append("Android: ").append(Build.VERSION.RELEASE).append(" (API ").append(Build.VERSION.SDK_INT).append(")\n\n");
+            sb.append("=== RECENT LOGCAT BUFFER (250 Lines) ===\n");
+            sb.append(collectRecentLogcat(250));
+
+            postTelemetryPayload("Manual_Diagnostic", "diagnostic", sb.toString(), onComplete);
+        } catch (Throwable t) {
+            if (onComplete != null) onComplete.run();
         }
     }
 
     public static void reportBanNotice(String noticeText, String pkg) {
         if (noticeText == null || noticeText.trim().isEmpty()) return;
         try {
-            Thread reporter = new Thread(() -> {
-                try {
-                    java.net.URL url = new java.net.URL("https://featurestic-box-panel.vercel.app/api/telemetry/crash");
-                    java.net.HttpURLConnection conn = (java.net.HttpURLConnection) url.openConnection();
-                    conn.setRequestMethod("POST");
-                    conn.setRequestProperty("Content-Type", "application/json; charset=UTF-8");
-                    conn.setConnectTimeout(2500);
-                    conn.setReadTimeout(2500);
-                    conn.setDoOutput(true);
-
-                    org.json.JSONObject json = new org.json.JSONObject();
-                    json.put("brand", android.os.Build.BRAND);
-                    json.put("model", android.os.Build.MODEL);
-                    json.put("android_version", android.os.Build.VERSION.RELEASE);
-                    json.put("sdk_int", android.os.Build.VERSION.SDK_INT);
-                    json.put("crash_type", "Anti-Cheat Notice");
-                    json.put("crash_category", "ban_detection");
-                    json.put("stacktrace", "Ban/Notice Event in " + (pkg != null ? pkg : "Game") + ":\n" + noticeText);
-
-                    byte[] body = json.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8);
-                    try (java.io.OutputStream os = conn.getOutputStream()) {
-                        os.write(body);
-                    }
-                    conn.getResponseCode();
-                    conn.disconnect();
-                } catch (Throwable ignored) {
-                }
-            });
-            reporter.setName("FBoxBanReporter");
-            reporter.setDaemon(true);
-            reporter.start();
+            String fullPayload = "Ban/Notice Event in " + (pkg != null ? pkg : "Game") + ":\n" + noticeText +
+                    "\n\n=== RECENT LOGCAT BUFFER ===\n" + collectRecentLogcat(100);
+            postTelemetryPayload("Anti-Cheat Notice", "ban_detection", fullPayload, null);
         } catch (Throwable ignored) {
         }
     }
