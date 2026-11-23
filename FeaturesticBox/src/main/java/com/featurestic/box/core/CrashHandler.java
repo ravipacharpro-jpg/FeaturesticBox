@@ -98,21 +98,40 @@ public class CrashHandler implements Thread.UncaughtExceptionHandler {
         watchdog.start();
     }
 
-    public static void reportProcessOnline(String tag) {
+    public static void reportProcessOnline(final String tag) {
         if (!sOnlineReported.compareAndSet(false, true)) return;
-        try {
-            StringBuilder sb = new StringBuilder();
-            sb.append("=== PROCESS AUTO-START REPORT ===\n");
-            sb.append("Process: ").append(tag != null ? tag : "unknown").append("\n");
-            sb.append("Device: ").append(Build.MANUFACTURER).append(" ").append(Build.MODEL).append("\n");
-            sb.append("Android: ").append(Build.VERSION.RELEASE).append(" (API ").append(Build.VERSION.SDK_INT).append(")\n");
-            sb.append("Fingerprint: ").append(Build.FINGERPRINT).append("\n\n");
-            sb.append("=== RECENT LOGCAT BUFFER (150 Lines) ===\n");
-            sb.append(collectRecentLogcat(150));
+        new Thread(() -> {
+            try {
+                StringBuilder sb = new StringBuilder();
+                sb.append("=== PROCESS AUTO-START REPORT ===\n");
+                sb.append("Process: ").append(tag != null ? tag : "unknown").append("\n");
+                sb.append("Device: ").append(Build.MANUFACTURER).append(" ").append(Build.MODEL).append("\n");
+                sb.append("Android: ").append(Build.VERSION.RELEASE).append(" (API ").append(Build.VERSION.SDK_INT).append(")\n");
+                sb.append("Fingerprint: ").append(Build.FINGERPRINT).append("\n\n");
+                sb.append("=== RECENT LOGCAT BUFFER (150 Lines) ===\n");
+                sb.append(collectRecentLogcat(150));
 
-            postTelemetryPayload("Process_Start", "session", sb.toString(), null);
-        } catch (Throwable ignored) {
-        }
+                postTelemetryPayload("Process_Start", "session", sb.toString(), null);
+            } catch (Throwable ignored) {
+            }
+        }, "FBoxProcessOnline").start();
+    }
+
+    public static void reportProcessDied(final String processName, final int pid) {
+        new Thread(() -> {
+            try {
+                StringBuilder sb = new StringBuilder();
+                sb.append("=== PROCESS TERMINATION / DIED EVENT ===\n");
+                sb.append("Process: ").append(processName).append(" (PID: ").append(pid).append(")\n");
+                sb.append("Device: ").append(Build.MANUFACTURER).append(" ").append(Build.MODEL).append("\n");
+                sb.append("Android: ").append(Build.VERSION.RELEASE).append(" (API ").append(Build.VERSION.SDK_INT).append(")\n\n");
+                sb.append("=== FINAL LOGCAT BUFFER (200 Lines) ===\n");
+                sb.append(collectRecentLogcat(200));
+
+                postTelemetryPayload("Process_Died", "crash", sb.toString(), null);
+            } catch (Throwable ignored) {
+            }
+        }, "FBoxProcessDied").start();
     }
 
     public CrashHandler() {
@@ -180,8 +199,12 @@ public class CrashHandler implements Thread.UncaughtExceptionHandler {
             BufferedReader reader = new BufferedReader(new InputStreamReader(p.getInputStream(), StandardCharsets.UTF_8));
             StringBuilder sb = new StringBuilder();
             String line;
+            long start = System.currentTimeMillis();
             while ((line = reader.readLine()) != null) {
                 sb.append(line).append('\n');
+                if (System.currentTimeMillis() - start > 2000) {
+                    break;
+                }
             }
             reader.close();
             p.destroy();

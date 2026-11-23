@@ -577,7 +577,19 @@ static void chainPreviousSignal(int sig, siginfo_t *info, void *ucontext) {
             : ((sig == SIGILL) ? &sOldSigillAction : &sOldSigabrtAction));
     if (prev->sa_flags & SA_SIGINFO) {
         if (prev->sa_sigaction != nullptr
-                && reinterpret_cast<void *>(prev->sa_sigaction) != reinterpret_cast<void *>(&chainPreviousSignal)) {
+                && reinterpret_cast<void *>(prev->sa_sigaction) != reinterpret_cast<void *>(&chainPreviousSignal)
+                && reinterpret_cast<void *>(prev->sa_sigaction) != reinterpret_cast<void *>(&passiveNativeCrashDiagnosticsHandler)) {
+            void *targetFn = reinterpret_cast<void *>(prev->sa_sigaction);
+            xdl_info_t fnInfo{};
+            void *cache = nullptr;
+            if (xdl_addr(targetFn, &fnInfo, &cache) != 0 && fnInfo.dli_fname != nullptr) {
+                if (strstr(fnInfo.dli_fname, "CrashKit") != nullptr || strstr(fnInfo.dli_fname, "Bugly") != nullptr) {
+                    ALOGW("FEATURESTIC GUARD: Suppressed chaining signal %d to anti-cheat reporter (%s)", sig, fnInfo.dli_fname);
+                    if (cache) xdl_addr_clean(&cache);
+                    return;
+                }
+            }
+            if (cache) xdl_addr_clean(&cache);
             prev->sa_sigaction(sig, info, ucontext);
             return;
         }
@@ -924,13 +936,19 @@ static int safe_sigaction_common(int sig,
                 // Do not allow anti-cheat to reset protective signal handlers to SIG_DFL
                 return 0;
             }
-            if ((act->sa_flags & SA_SIGINFO) && act->sa_sigaction != nullptr) {
-                *savedSlot = *act;
-            } else if (!(act->sa_flags & SA_SIGINFO)
-                    && act->sa_handler != SIG_DFL
-                    && act->sa_handler != SIG_IGN
-                    && act->sa_handler != nullptr) {
-                *savedSlot = *act;
+            // Only capture initial system/ART handler before our guards are installed.
+            // Never allow third-party anti-cheat crash reporters (CrashKit, Bugly, anort)
+            // to overwrite savedSlot; otherwise ART CMC GC signals get routed to CrashKit,
+            // which hangs the process for 10 seconds!
+            if (!sSignalGuardInstalled) {
+                if ((act->sa_flags & SA_SIGINFO) && act->sa_sigaction != nullptr) {
+                    *savedSlot = *act;
+                } else if (!(act->sa_flags & SA_SIGINFO)
+                        && act->sa_handler != SIG_DFL
+                        && act->sa_handler != SIG_IGN
+                        && act->sa_handler != nullptr) {
+                    *savedSlot = *act;
+                }
             }
             if (origFn != nullptr) {
                 struct sigaction sa{};

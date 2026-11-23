@@ -30,27 +30,28 @@ public class ActivityCompat {
 
         Context baseContext = activity.getBaseContext();
 
-        try {
-            TypedArray typedArray = activity.obtainStyledAttributes(BRRstyleable.get().Window());
-            if (typedArray != null) {
-                if (typedArray.getBoolean(BRRstyleable.get().Window_windowShowWallpaper(), false)) {
-                    try {
-                        Drawable wallpaper = WallpaperManager.getInstance(activity).getDrawable();
-                        if (wallpaper != null) {
-                            activity.getWindow().setBackgroundDrawable(wallpaper);
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            try {
+                TypedArray typedArray = activity.obtainStyledAttributes(BRRstyleable.get().Window());
+                if (typedArray != null) {
+                    if (typedArray.getBoolean(BRRstyleable.get().Window_windowShowWallpaper(), false)) {
+                        try {
+                            Drawable wallpaper = WallpaperManager.getInstance(activity).getDrawable();
+                            if (wallpaper != null) {
+                                activity.getWindow().setBackgroundDrawable(wallpaper);
+                            }
+                        } catch (Throwable ignore) {
                         }
-                    } catch (Throwable ignore) {
                     }
-                }
 
-                if (typedArray.getBoolean(BRRstyleable.get().Window_windowFullscreen(), false)) {
-                    activity.getWindow().addFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN);
-                }
+                    if (typedArray.getBoolean(BRRstyleable.get().Window_windowFullscreen(), false)) {
+                        activity.getWindow().addFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN);
+                    }
 
-                typedArray.recycle();
+                    typedArray.recycle();
+                }
+            } catch (Throwable ignored) {
             }
-        } catch (Throwable e) {
-            e.printStackTrace();
         }
 
         // Enable Fullscreen Notch/Punch-Hole Cutout & High Refresh Rate (90Hz / 120Hz / 144Hz)

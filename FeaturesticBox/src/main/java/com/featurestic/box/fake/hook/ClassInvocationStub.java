@@ -143,9 +143,10 @@ public abstract class ClassInvocationStub implements InvocationHandler, IInjectH
                 return method.invoke(mBase, args);
             } catch (InvocationTargetException e) {
                 Throwable cause = e.getTargetException() != null ? e.getTargetException() : e;
-                // Re-throw ErrnoException so Os.open() callers can handle missing
-                // files properly (e.g. IoUtils.canOpenReadOnly returns false).
-                if (cause instanceof android.system.ErrnoException) {
+                // Re-throw ErrnoException and GaiException so Os callers can handle missing
+                // files and DNS resolution properly (e.g. android_getaddrinfo in iTOP SDK).
+                if (cause instanceof android.system.ErrnoException
+                        || cause.getClass().getName().contains("GaiException")) {
                     throw cause;
                 }
                 // Swallow all other exceptions so they never become pending
@@ -156,7 +157,8 @@ public abstract class ClassInvocationStub implements InvocationHandler, IInjectH
                 return defaultValueForReturnType(method != null ? method.getReturnType() : null);
             } catch (Throwable e) {
                 Throwable cause = e.getCause() != null ? e.getCause() : e;
-                if (cause instanceof android.system.ErrnoException) {
+                if (cause instanceof android.system.ErrnoException
+                        || cause.getClass().getName().contains("GaiException")) {
                     throw cause;
                 }
                 sanitizeStackTrace(cause).printStackTrace();
@@ -174,7 +176,8 @@ public abstract class ClassInvocationStub implements InvocationHandler, IInjectH
             return result;
         } catch (InvocationTargetException e) {
             Throwable cause = e.getTargetException() != null ? e.getTargetException() : e;
-            if (cause instanceof android.system.ErrnoException) {
+            if (cause instanceof android.system.ErrnoException
+                    || cause.getClass().getName().contains("GaiException")) {
                 throw cause;
             }
             // Swallow exceptions from hook methods so they never become pending

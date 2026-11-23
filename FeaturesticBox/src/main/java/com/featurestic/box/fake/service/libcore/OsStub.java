@@ -70,6 +70,10 @@ public class OsStub extends ClassInvocationStub {
             // and returning null breaks those callers and causes NPEs.
             throw e;
         } catch (Throwable e) {
+            if (e.getClass().getName().contains("GaiException")
+                    || (e.getCause() != null && e.getCause().getClass().getName().contains("GaiException"))) {
+                throw e;
+            }
             // Prevent other exceptions from Os methods from becoming pending
             // JNI exceptions that cause SIGABRT in cloned games.
             e.printStackTrace();
