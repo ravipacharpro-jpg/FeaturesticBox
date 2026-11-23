@@ -45,18 +45,18 @@ public class CrashHandler implements Thread.UncaughtExceptionHandler {
 
             while (true) {
                 try {
-                    Thread.sleep(3000);
+                    Thread.sleep(5000);
                 } catch (InterruptedException e) {
                     break;
                 }
                 int curTick = tick[0];
                 mainHandler.post(tickRunnable);
                 try {
-                    Thread.sleep(3000);
+                    Thread.sleep(5000);
                 } catch (InterruptedException e) {
                     break;
                 }
-                // If tick didn't advance in 3000ms after posting, the main looper is blocked!
+                // If tick didn't advance in 5000ms after posting, the main looper is blocked!
                 if (tick[0] == curTick) {
                     long now = System.currentTimeMillis();
                     if (now - lastAnrReport > 45000) { // Limit to 1 ANR report per 45 seconds

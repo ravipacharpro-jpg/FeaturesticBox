@@ -6,9 +6,9 @@ import android.os.RemoteException;
 import android.os.storage.StorageVolume;
 
 import java.io.File;
+import java.lang.reflect.Field;
 
 import black.android.os.storage.BRStorageManager;
-import black.android.os.storage.BRStorageVolume;
 import com.featurestic.box.FeaturesticBoxCore;
 import com.featurestic.box.core.env.BEnvironment;
 import com.featurestic.box.core.system.ISystemService;
@@ -38,16 +38,48 @@ public class BStorageManagerService extends IBStorageManagerService.Stub impleme
             if (storageVolumes == null)
                 return null;
             for (StorageVolume storageVolume : storageVolumes) {
-                BRStorageVolume.get(storageVolume)._set_mPath(BEnvironment.getExternalStorageDirectory());
-                if (BuildCompat.isPie()) {
-                    BRStorageVolume.get(storageVolume)._set_mInternalPath(BEnvironment.getExternalStorageDirectory());
-                }
+                setStorageVolumePath(storageVolume, BEnvironment.getExternalStorageDirectory());
             }
             return storageVolumes;
         } catch (Exception e) {
             e.printStackTrace();
         }
         return null;
+    }
+
+    private static volatile Field sFieldPath = null;
+    private static volatile Field sFieldInternalPath = null;
+    private static volatile boolean sFieldLookedUp = false;
+
+    private static void setStorageVolumePath(StorageVolume volume, File path) {
+        if (volume == null || path == null) return;
+        if (!sFieldLookedUp) {
+            synchronized (BStorageManagerService.class) {
+                if (!sFieldLookedUp) {
+                    try {
+                        sFieldPath = StorageVolume.class.getDeclaredField("mPath");
+                        sFieldPath.setAccessible(true);
+                    } catch (Throwable ignored) {}
+                    if (BuildCompat.isPie()) {
+                        try {
+                            sFieldInternalPath = StorageVolume.class.getDeclaredField("mInternalPath");
+                            sFieldInternalPath.setAccessible(true);
+                        } catch (Throwable ignored) {}
+                    }
+                    sFieldLookedUp = true;
+                }
+            }
+        }
+        try {
+            if (sFieldPath != null) {
+                sFieldPath.set(volume, path);
+            }
+        } catch (Throwable ignored) {}
+        try {
+            if (sFieldInternalPath != null) {
+                sFieldInternalPath.set(volume, path);
+            }
+        } catch (Throwable ignored) {}
     }
 
     @Override

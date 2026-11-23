@@ -5,6 +5,7 @@ import android.os.IInterface;
 import android.os.storage.StorageVolume;
 
 import java.io.File;
+import java.lang.reflect.Field;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 
@@ -112,16 +113,7 @@ public class IStorageManagerProxy extends BinderInvocationStub {
                     FileUtils.mkdirs(virtualExt);
                     for (StorageVolume volume : volumes) {
                         if (volume == null) continue;
-                        try {
-                            BRStorageVolume.get(volume)._set_mPath(virtualExt);
-                        } catch (Throwable ignored) {
-                        }
-                        if (BuildCompat.isPie()) {
-                            try {
-                                BRStorageVolume.get(volume)._set_mInternalPath(virtualExt);
-                            } catch (Throwable ignored) {
-                            }
-                        }
+                        setStorageVolumePath(volume, virtualExt);
                     }
                     return volumes;
                 }
@@ -129,6 +121,41 @@ public class IStorageManagerProxy extends BinderInvocationStub {
             } finally {
                 sInGetVolumeList.remove();
             }
+        }
+
+        private static volatile Field sFieldPath = null;
+        private static volatile Field sFieldInternalPath = null;
+        private static volatile boolean sFieldLookedUp = false;
+
+        private static void setStorageVolumePath(StorageVolume volume, File path) {
+            if (volume == null || path == null) return;
+            if (!sFieldLookedUp) {
+                synchronized (GetVolumeList.class) {
+                    if (!sFieldLookedUp) {
+                        try {
+                            sFieldPath = StorageVolume.class.getDeclaredField("mPath");
+                            sFieldPath.setAccessible(true);
+                        } catch (Throwable ignored) {}
+                        if (BuildCompat.isPie()) {
+                            try {
+                                sFieldInternalPath = StorageVolume.class.getDeclaredField("mInternalPath");
+                                sFieldInternalPath.setAccessible(true);
+                            } catch (Throwable ignored) {}
+                        }
+                        sFieldLookedUp = true;
+                    }
+                }
+            }
+            try {
+                if (sFieldPath != null) {
+                    sFieldPath.set(volume, path);
+                }
+            } catch (Throwable ignored) {}
+            try {
+                if (sFieldInternalPath != null) {
+                    sFieldInternalPath.set(volume, path);
+                }
+            } catch (Throwable ignored) {}
         }
     }
 
