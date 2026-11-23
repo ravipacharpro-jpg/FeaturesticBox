@@ -888,11 +888,7 @@ public class BActivityThread extends IBActivityThread.Stub {
                 Context hostCtx = FeaturesticBoxCore.getContext();
                 if (hostCtx != null) {
                     Intent p0Service = new Intent(hostCtx, com.featurestic.box.proxy.ProxyService.P0.class);
-                    if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
-                        hostCtx.startForegroundService(p0Service);
-                    } else {
-                        hostCtx.startService(p0Service);
-                    }
+                    hostCtx.startService(p0Service);
                 }
             } catch (Throwable ignored) {
             }

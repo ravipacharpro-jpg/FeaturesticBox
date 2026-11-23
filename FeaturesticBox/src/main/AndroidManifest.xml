@@ -879,127 +879,102 @@
         <service
             android:name=".proxy.ProxyService$P0"
             android:exported="true"
-            android:foregroundServiceType="specialUse"
             android:process=":p0" />
         <service
             android:name=".proxy.ProxyService$P1"
             android:exported="true"
-            android:foregroundServiceType="specialUse"
             android:process=":p1" />
         <service
             android:name=".proxy.ProxyService$P2"
             android:exported="true"
-            android:foregroundServiceType="specialUse"
             android:process=":p2" />
         <service
             android:name=".proxy.ProxyService$P3"
             android:exported="true"
-            android:foregroundServiceType="specialUse"
             android:process=":p3" />
         <service
             android:name=".proxy.ProxyService$P4"
             android:exported="true"
-            android:foregroundServiceType="specialUse"
             android:process=":p4" />
         <service
             android:name=".proxy.ProxyService$P5"
             android:exported="true"
-            android:foregroundServiceType="specialUse"
             android:process=":p5" />
         <service
             android:name=".proxy.ProxyService$P6"
             android:exported="true"
-            android:foregroundServiceType="specialUse"
             android:process=":p6" />
         <service
             android:name=".proxy.ProxyService$P7"
             android:exported="true"
-            android:foregroundServiceType="specialUse"
             android:process=":p7" />
         <service
             android:name=".proxy.ProxyService$P8"
             android:exported="true"
-            android:foregroundServiceType="specialUse"
             android:process=":p8" />
         <service
             android:name=".proxy.ProxyService$P9"
             android:exported="true"
-            android:foregroundServiceType="specialUse"
             android:process=":p9" />
         <service
             android:name=".proxy.ProxyService$P10"
             android:exported="true"
-            android:foregroundServiceType="specialUse"
             android:process=":p10" />
         <service
             android:name=".proxy.ProxyService$P11"
             android:exported="true"
-            android:foregroundServiceType="specialUse"
             android:process=":p11" />
         <service
             android:name=".proxy.ProxyService$P12"
             android:exported="true"
-            android:foregroundServiceType="specialUse"
             android:process=":p12" />
         <service
             android:name=".proxy.ProxyService$P13"
             android:exported="true"
-            android:foregroundServiceType="specialUse"
             android:process=":p13" />
         <service
             android:name=".proxy.ProxyService$P14"
             android:exported="true"
-            android:foregroundServiceType="specialUse"
             android:process=":p14" />
         <service
             android:name=".proxy.ProxyService$P15"
             android:exported="true"
-            android:foregroundServiceType="specialUse"
             android:process=":p15" />
         <service
             android:name=".proxy.ProxyService$P16"
             android:exported="true"
-            android:foregroundServiceType="specialUse"
             android:process=":p16" />
         <service
             android:name=".proxy.ProxyService$P17"
             android:exported="true"
-            android:foregroundServiceType="specialUse"
             android:process=":p17" />
         <service
             android:name=".proxy.ProxyService$P18"
             android:exported="true"
-            android:foregroundServiceType="specialUse"
             android:process=":p18" />
         <service
             android:name=".proxy.ProxyService$P19"
             android:exported="true"
-            android:foregroundServiceType="specialUse"
             android:process=":p19" />
         <service
             android:name=".proxy.ProxyService$P20"
             android:exported="true"
-            android:foregroundServiceType="specialUse"
             android:process=":p20" />
         <service
             android:name=".proxy.ProxyService$P21"
             android:exported="true"
-            android:foregroundServiceType="specialUse"
             android:process=":p21" />
         <service
             android:name=".proxy.ProxyService$P22"
             android:exported="true"
-            android:foregroundServiceType="specialUse"
             android:process=":p22" />
         <service
             android:name=".proxy.ProxyService$P23"
             android:exported="true"
-            android:foregroundServiceType="specialUse"
             android:process=":p23" />
         <service
             android:name=".proxy.ProxyService$P24"
             android:exported="true"
-            android:foregroundServiceType="specialUse"
             android:process=":p24" />
 
         <provider

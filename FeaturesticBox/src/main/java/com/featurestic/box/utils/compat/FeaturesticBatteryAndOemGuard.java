@@ -89,11 +89,7 @@ public final class FeaturesticBatteryAndOemGuard {
                 ctx.startService(intent);
             }
             Intent p0 = new Intent(ctx, com.featurestic.box.proxy.ProxyService.P0.class);
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                ctx.startForegroundService(p0);
-            } else {
-                ctx.startService(p0);
-            }
+            ctx.startService(p0);
         } catch (Throwable ignored) {
         }
     }

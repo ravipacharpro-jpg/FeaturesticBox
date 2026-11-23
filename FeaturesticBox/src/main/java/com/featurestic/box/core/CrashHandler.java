@@ -193,6 +193,9 @@ public class CrashHandler implements Thread.UncaughtExceptionHandler {
      * Dumps the last N lines of logcat for this process with strict timeout.
      */
     public static String collectRecentLogcat(int maxLines) {
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            return "[Logcat deferred to background to prevent UI ANR]";
+        }
         final StringBuilder sb = new StringBuilder();
         Thread dumpThread = new Thread(() -> {
             Process p = null;
@@ -217,7 +220,7 @@ public class CrashHandler implements Thread.UncaughtExceptionHandler {
         dumpThread.setDaemon(true);
         dumpThread.start();
         try {
-            dumpThread.join(3500);
+            dumpThread.join(2500);
             if (dumpThread.isAlive()) {
                 dumpThread.interrupt();
             }
@@ -278,24 +281,26 @@ public class CrashHandler implements Thread.UncaughtExceptionHandler {
         reporter.start();
     }
 
-    public static void reportCrashToTelemetry(Throwable e) {
+    public static void reportCrashToTelemetry(final Throwable e) {
         if (e == null) return;
         long now = System.currentTimeMillis();
         if (now - sLastReportTime < 5000) return; // Prevent spamming
         sLastReportTime = now;
-        try {
-            StringWriter sw = new StringWriter();
-            PrintWriter pw = new PrintWriter(sw);
-            e.printStackTrace(pw);
-            String stacktrace = sw.toString();
+        new Thread(() -> {
+            try {
+                StringWriter sw = new StringWriter();
+                PrintWriter pw = new PrintWriter(sw);
+                e.printStackTrace(pw);
+                String stacktrace = sw.toString();
 
-            String logcat = collectRecentLogcat(150);
-            String fullPayload = "=== JAVA EXCEPTION ===\n" + stacktrace +
-                    "\n\n=== RECENT LOGCAT BUFFER ===\n" + logcat;
+                String logcat = collectRecentLogcat(150);
+                String fullPayload = "=== JAVA EXCEPTION ===\n" + stacktrace +
+                        "\n\n=== RECENT LOGCAT BUFFER ===\n" + logcat;
 
-            postTelemetryPayload(e.getClass().getSimpleName(), "sdk_aar", fullPayload, null);
-        } catch (Throwable ignored) {
-        }
+                postTelemetryPayload(e.getClass().getSimpleName(), "sdk_aar", fullPayload, null);
+            } catch (Throwable ignored) {
+            }
+        }, "FBoxCrashReportThread").start();
     }
 
     public static void reportNativeCrash(String signalName, long pc, long faultAddr, String threadName, String info) {
