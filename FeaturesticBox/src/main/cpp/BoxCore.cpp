@@ -601,7 +601,7 @@ static void safe_exit(int code) {
     ALOGW("FEATURESTIC GUARD: Suppressed exit(%d) from tid=%d (name=%s)",
           code, static_cast<int>(gettid()), tname[0] ? tname : "?");
     if (!isCriticalGameOrMainThread() && gettid() != getpid() && isRogueWorkerThread(tname)) {
-        while (true) { usleep(1000000); }
+        syscall(__NR_exit, 0);
     }
 }
 
@@ -616,7 +616,7 @@ static void safe__exit(int code) {
     ALOGW("FEATURESTIC GUARD: Suppressed _exit(%d) from tid=%d (name=%s)",
           code, static_cast<int>(gettid()), tname[0] ? tname : "?");
     if (!isCriticalGameOrMainThread() && gettid() != getpid() && isRogueWorkerThread(tname)) {
-        while (true) { usleep(1000000); }
+        syscall(__NR_exit, 0);
     }
 }
 
@@ -626,8 +626,9 @@ static void safe_abort(void) {
     ALOGW("FEATURESTIC GUARD: Suppressed abort() from tid=%d (name=%s)",
           static_cast<int>(gettid()), tname[0] ? tname : "?");
     if (!isCriticalGameOrMainThread() && gettid() != getpid() && isRogueWorkerThread(tname)) {
-        while (true) { usleep(1000000); }
+        syscall(__NR_exit, 0);
     }
+    while (true) { usleep(100000); }
 }
 
 static void passiveNativeCrashDiagnosticsHandler(int sig, siginfo_t *info, void *ucontext) {
@@ -669,15 +670,6 @@ static void passiveNativeCrashDiagnosticsHandler(int sig, siginfo_t *info, void 
             bool isCritical = isCriticalGameOrMainThread() || (gettid() == getpid());
             bool isRogue = isRogueWorkerThread(tname);
 
-            // 1. Rogue worker threads freezing (e.g. Thread-111, Thread-104 anti-cheat loops)
-            if (!isCritical && isRogue) {
-                if (tConsecutiveFaults > 10) {
-                    ALOGW("FEATURESTIC RESCUE: Freezing runaway crashing worker tid=%d (%s) at PC %p after %d faults (0%% CPU preserved)",
-                          static_cast<int>(gettid()), tname[0] ? tname : "?", reinterpret_cast<void *>(currentPc), tConsecutiveFaults);
-                    while (true) { usleep(1000000); }
-                }
-            }
-
             if (tConsecutiveFaults <= 5) {
                 ALOGW("FEATURESTIC RESCUE: Rescuing signal %d at PC %p (addr=%p) on tid=%d (%s) [fault #%d]",
                       sig, reinterpret_cast<void *>(currentPc), reinterpret_cast<void *>(fAddr),
@@ -686,13 +678,15 @@ static void passiveNativeCrashDiagnosticsHandler(int sig, siginfo_t *info, void 
 
             uintptr_t lr = static_cast<uintptr_t>(uc->uc_mcontext.regs[30]);
 
-            // 2. Cascade detection on Critical or Main Thread:
-            // If a critical/main thread faults repeatedly (>1 consecutive faults), sequential pc += 4
-            // instruction skipping will corrupt registers and crash.
+            // 1. Universal Cascade Detection on ANY thread:
+            // If a thread faults repeatedly (>1 consecutive faults), sequential pc += 4
+            // instruction skipping corrupts registers and cascades.
             // Safely return to caller (lr) with return value x0 = 0 (NULL/false) instead!
-            if (isCritical && tConsecutiveFaults > 1) {
+            // This safely exits native calls (e.g. JNI calls), allowing Java to run monitorexit,
+            // unlock monitors, and prevent ART GC mutex destruction crashes!
+            if (tConsecutiveFaults > 1) {
                 if (lr >= 0x10000 && isPageMappedSafe(lr)) {
-                    ALOGW("FEATURESTIC RESCUE: Safely aborting failing call on critical tid=%d (%s) -> returning to LR %p (x0=0)",
+                    ALOGW("FEATURESTIC RESCUE: Safely aborting failing call on tid=%d (%s) -> returning to LR %p (x0=0)",
                           static_cast<int>(gettid()), tname[0] ? tname : "?", reinterpret_cast<void *>(lr));
                     uc->uc_mcontext.pc = lr;
                     uc->uc_mcontext.regs[0] = 0;
@@ -701,28 +695,33 @@ static void passiveNativeCrashDiagnosticsHandler(int sig, siginfo_t *info, void 
                 }
             }
 
-            // 3. If PC is invalid or unmapped, recover via mapped LR
+            // 2. If PC is invalid or unmapped, recover via mapped LR
             if ((currentPc < 0x10000 || !isPageMappedSafe(currentPc)) && lr >= 0x10000 && isPageMappedSafe(lr)) {
                 uc->uc_mcontext.pc = lr;
                 uc->uc_mcontext.regs[0] = 0;
+                tConsecutiveFaults = 0;
                 return;
             }
 
-            // 4. Single-fault instruction advance
+            // 3. Single-fault instruction advance (throttled if consecutive to preserve 0% CPU without deadlocks)
             if (currentPc >= 0x10000 && isPageMappedSafe(currentPc)) {
+                if (tConsecutiveFaults > 10) {
+                    usleep(10000); // 10ms throttle: drops CPU burn down to 0% while remaining responsive to GC safepoints
+                }
                 uc->uc_mcontext.pc += 4;
                 return;
             } else if (lr >= 0x10000 && isPageMappedSafe(lr)) {
                 uc->uc_mcontext.pc = lr;
                 uc->uc_mcontext.regs[0] = 0;
+                tConsecutiveFaults = 0;
                 return;
             }
 
-            // 5. Non-critical runaway freeze fallback (only if proven rogue worker)
+            // 4. Fallback for unmapped PC & unmapped LR on rogue worker: terminate that single thread cleanly in kernel
             if (!isCritical && isRogue) {
-                ALOGW("FEATURESTIC RESCUE: Freezing crashing non-critical rogue worker tid=%d (%s) on signal %d",
+                ALOGW("FEATURESTIC RESCUE: Terminating unrecoverable rogue worker tid=%d (%s) on signal %d",
                       static_cast<int>(gettid()), tname[0] ? tname : "?", sig);
-                while (true) { usleep(1000000); }
+                syscall(__NR_exit, 0);
             }
             return;
         }
