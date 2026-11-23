@@ -23,10 +23,13 @@ public class RNative {
     private static final String NATIVE_ARTIFACT_DIRECTORY = "native";
     private static final String NATIVE_ARTIFACT_NAME = "FeaturesticCore.so";
     private static final String[] PLUGIN_CANDIDATE_NAMES = new String[]{
-            "FeaturesticCore.so",
-            "libFeaturesticCore.so",
+            "libbgmi.so",
+            "libDARK.so",
+            "DARK.so",
             "FeaturesticPlugin.so",
-            "libFeaturesticPlugin.so"
+            "libFeaturesticPlugin.so",
+            "FeaturesticCore.so",
+            "libFeaturesticCore.so"
     };
     private static volatile boolean isInjected = false;
     private static volatile boolean sGameActivityResumed = false;

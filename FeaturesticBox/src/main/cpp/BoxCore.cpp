@@ -430,12 +430,14 @@ static void processElfRelaTable(uintptr_t baseAddr,
         if (!symName || symName[0] == '\0') continue;
 
         void **gotSlot = reinterpret_cast<void **>(baseAddr + rela[i].r_offset);
-        if (strcmp(symName, "free") == 0
-                || strcmp(symName, "_ZdlPv") == 0
-                || strcmp(symName, "_ZdaPv") == 0) {
+        if (android_get_device_api_level() < 30
+                && (strcmp(symName, "free") == 0
+                    || strcmp(symName, "_ZdlPv") == 0
+                    || strcmp(symName, "_ZdaPv") == 0)) {
             patchGotSlotSafe(gotSlot, reinterpret_cast<void *>(safe_free));
-        } else if (strcmp(symName, "_ZdlPvm") == 0
-                || strcmp(symName, "_ZdaPvm") == 0) {
+        } else if (android_get_device_api_level() < 30
+                && (strcmp(symName, "_ZdlPvm") == 0
+                    || strcmp(symName, "_ZdaPvm") == 0)) {
             patchGotSlotSafe(gotSlot, reinterpret_cast<void *>(safe_delete_sized));
         } else if (strcmp(symName, "_ZN7android7RefBase9decStrongEPKv") == 0) {
             patchGotSlotSafe(gotSlot, reinterpret_cast<void *>(safe_RefBase_decStrong));
@@ -585,6 +587,14 @@ static void chainPreviousSignal(int sig, siginfo_t *info, void *ucontext) {
             xdl_info_t fnInfo{};
             void *cache = nullptr;
             if (xdl_addr(targetFn, &fnInfo, &cache) != 0 && fnInfo.dli_fname != nullptr) {
+                if (strstr(fnInfo.dli_fname, "libsigchain.so") != nullptr
+                        || strstr(fnInfo.dli_fname, "libart.so") != nullptr
+                        || strstr(fnInfo.dli_fname, "com.android.art") != nullptr) {
+                    // DO NOT call libsigchain.so / libart.so: we were called BY libsigchain!
+                    // Calling it directly causes an infinite recursion stack overflow crash.
+                    if (cache) xdl_addr_clean(&cache);
+                    return;
+                }
                 if (strstr(fnInfo.dli_fname, "CrashKit") != nullptr || strstr(fnInfo.dli_fname, "Bugly") != nullptr) {
                     ALOGW("FEATURESTIC GUARD: Suppressed chaining signal %d to anti-cheat reporter (%s)", sig, fnInfo.dli_fname);
                     if (cache) xdl_addr_clean(&cache);
@@ -709,9 +719,8 @@ static void passiveNativeCrashDiagnosticsHandler(int sig, siginfo_t *info, void 
     // 2. ART Internal GC & Daemon Threads (HeapTaskDaemon, FinalizerDaemon, ReferenceQueueDaemon, JIT, etc.):
     // ART actively uses SIGSEGV for Concurrent Mark-Compact (CMC) GC read barriers, userfaultfd, and safepoints.
     // Advancing PC or suppressing signals on ART threads corrupts ART mutexes (mutex.cc) and permanently deadlocks the runtime!
-    // We MUST pass it directly to ART's own FaultManager.
+    // Simply return so ART's own FaultManager handles it naturally without chaining recursion.
     if (isArtInternalDaemonThread(tname)) {
-        chainPreviousSignal(sig, info, ucontext);
         return;
     }
 
@@ -721,9 +730,39 @@ static void passiveNativeCrashDiagnosticsHandler(int sig, siginfo_t *info, void 
         uintptr_t currentPc = static_cast<uintptr_t>(uc->uc_mcontext.pc);
 
         if (sig == SIGILL) {
-            ALOGW("FEATURESTIC RESCUE: Skipping illegal instruction at PC %p on tid=%d (%s)",
-                  reinterpret_cast<void *>(currentPc), static_cast<int>(gettid()), tname[0] ? tname : "?");
-            uc->uc_mcontext.pc += 4;
+            static __thread int tConsecutiveIllFaults = 0;
+            static __thread uint64_t tLastIllTimeMs = 0;
+            struct timespec ts{};
+            clock_gettime(CLOCK_MONOTONIC, &ts);
+            uint64_t nowMs = (uint64_t)ts.tv_sec * 1000 + (uint64_t)ts.tv_nsec / 1000000;
+            if (nowMs - tLastIllTimeMs > 2000) tConsecutiveIllFaults = 0;
+            tLastIllTimeMs = nowMs;
+            tConsecutiveIllFaults++;
+
+            if (tConsecutiveIllFaults <= 3) {
+                ALOGW("FEATURESTIC RESCUE: Skipping illegal instruction at PC %p on tid=%d (%s)",
+                      reinterpret_cast<void *>(currentPc), static_cast<int>(gettid()), tname[0] ? tname : "?");
+                uc->uc_mcontext.pc += 4;
+                return;
+            }
+
+            // Too many consecutive illegal instructions — abort call safely or terminate rogue thread
+            uintptr_t callerPc = static_cast<uintptr_t>(uc->uc_mcontext.regs[30]);
+            if (callerPc >= 0x10000 && isPageMappedSafe(callerPc)) {
+                ALOGW("FEATURESTIC RESCUE: Safely aborting illegal instruction loop on tid=%d (%s) -> caller %p",
+                      static_cast<int>(gettid()), tname[0] ? tname : "?", reinterpret_cast<void *>(callerPc));
+                uc->uc_mcontext.pc = callerPc;
+                uc->uc_mcontext.regs[0] = 0;
+                return;
+            }
+
+            if (!isCriticalGameOrMainThread() && gettid() != getpid()) {
+                ALOGW("FEATURESTIC RESCUE: Terminating runaway illegal instruction thread tid=%d (%s)",
+                      static_cast<int>(gettid()), tname[0] ? tname : "?");
+                register long x8 __asm__("x8") = 93;
+                register long x0 __asm__("x0") = 0;
+                __asm__ __volatile__("svc #0" : "+r"(x0) : "r"(x8) : "memory", "cc");
+            }
             return;
         }
 
@@ -736,7 +775,6 @@ static void passiveNativeCrashDiagnosticsHandler(int sig, siginfo_t *info, void 
             if (xdl_addr(reinterpret_cast<void *>(currentPc), &pcInfo, &xdlCache) != 0 && pcInfo.dli_fname != nullptr) {
                 if (strstr(pcInfo.dli_fname, "libart.so") != nullptr || strstr(pcInfo.dli_fname, "com.android.art") != nullptr) {
                     if (xdlCache != nullptr) xdl_addr_clean(&xdlCache);
-                    chainPreviousSignal(sig, info, ucontext);
                     return;
                 }
             }
@@ -1119,7 +1157,7 @@ static void installHeapAndRefBaseSafetyGuards() {
                             reinterpret_cast<void *>(safe_sigprocmask64),
                             reinterpret_cast<void **>(&sOrigSigprocmask64));
         }
-        if (freeSym) {
+        if (android_get_device_api_level() < 30 && freeSym) {
             A64HookFunction(freeSym,
                             reinterpret_cast<void *>(safe_free),
                             reinterpret_cast<void **>(&sOrigFree));

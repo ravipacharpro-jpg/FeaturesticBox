@@ -302,12 +302,15 @@ static int createAnonymousMemFd(const char *name) {
 
 static bool shouldFilterMapsLine(const char *line) {
     if (!line) return false;
+    // CRITICAL: NEVER filter out game libraries or plugin libraries!
+    if (strstr(line, "libbgmi.so") != nullptr) return false;
+    if (strstr(line, "libDARK.so") != nullptr) return false;
+    if (strstr(line, "libUE4.so") != nullptr) return false;
+    if (strstr(line, "libanogs.so") != nullptr) return false;
+
     if (strstr(line, "libFeaturesticCore.so") != nullptr) return true;
-    if (strstr(line, "libFeaturesticPlugin.so") != nullptr) return true;
     if (strstr(line, "libboxcore.so") != nullptr) return true;
     if (strstr(line, "libloader.so") != nullptr) return true;
-    if (strstr(line, "FeaturesticBox") != nullptr) return true;
-    if (strstr(line, "featurestic") != nullptr) return true;
     if (strstr(line, "libdobby.so") != nullptr) return true;
     if (strstr(line, "libSandHook.so") != nullptr) return true;
     if (strstr(line, "sandhook") != nullptr) return true;
@@ -325,6 +328,8 @@ static bool shouldFilterMapsLine(const char *line) {
     if (strstr(line, "dev/pts") != nullptr) return true;
     if (strstr(line, "antigem") != nullptr) return true;
     if (strstr(line, "termux") != nullptr) return true;
+    if (strstr(line, "FeaturesticBox") != nullptr) return true;
+    if (strstr(line, "featurestic") != nullptr) return true;
     return false;
 }
 
