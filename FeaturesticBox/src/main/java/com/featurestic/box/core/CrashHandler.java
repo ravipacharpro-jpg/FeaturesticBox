@@ -190,28 +190,39 @@ public class CrashHandler implements Thread.UncaughtExceptionHandler {
     private static volatile long sLastReportTime = 0;
 
     /**
-     * Dumps the last N lines of logcat for this process.
+     * Dumps the last N lines of logcat for this process with strict timeout.
      */
     public static String collectRecentLogcat(int maxLines) {
-        try {
-            int lines = Math.max(20, Math.min(maxLines, 300));
-            Process p = Runtime.getRuntime().exec(new String[]{"logcat", "-d", "-t", String.valueOf(lines), "-v", "time"});
-            BufferedReader reader = new BufferedReader(new InputStreamReader(p.getInputStream(), StandardCharsets.UTF_8));
-            StringBuilder sb = new StringBuilder();
-            String line;
-            long start = System.currentTimeMillis();
-            while ((line = reader.readLine()) != null) {
-                sb.append(line).append('\n');
-                if (System.currentTimeMillis() - start > 2000) {
-                    break;
+        final StringBuilder sb = new StringBuilder();
+        Thread dumpThread = new Thread(() -> {
+            Process p = null;
+            try {
+                int lines = Math.max(20, Math.min(maxLines, 250));
+                p = Runtime.getRuntime().exec(new String[]{"logcat", "-d", "-t", String.valueOf(lines), "-v", "time"});
+                try (BufferedReader reader = new BufferedReader(new InputStreamReader(p.getInputStream(), StandardCharsets.UTF_8))) {
+                    String line;
+                    while ((line = reader.readLine()) != null) {
+                        sb.append(line).append('\n');
+                    }
+                }
+            } catch (Throwable ignored) {
+            } finally {
+                if (p != null) {
+                    try {
+                        p.destroy();
+                    } catch (Throwable ignored) {}
                 }
             }
-            reader.close();
-            p.destroy();
-            return sb.toString();
-        } catch (Throwable t) {
-            return "[Logcat dump unavailable: " + t.getMessage() + "]";
-        }
+        }, "FBoxLogcatDump");
+        dumpThread.setDaemon(true);
+        dumpThread.start();
+        try {
+            dumpThread.join(1200);
+            if (dumpThread.isAlive()) {
+                dumpThread.interrupt();
+            }
+        } catch (Throwable ignored) {}
+        return sb.length() > 0 ? sb.toString() : "[Logcat buffer empty or permission restricted]";
     }
 
     /**
@@ -234,6 +245,15 @@ public class CrashHandler implements Thread.UncaughtExceptionHandler {
                 json.put("model", Build.MODEL != null ? Build.MODEL : "Unknown");
                 json.put("android_version", Build.VERSION.RELEASE != null ? Build.VERSION.RELEASE : "Unknown");
                 json.put("sdk_int", Build.VERSION.SDK_INT);
+                try {
+                    android.content.Context ctx = FeaturesticBoxCore.getContext();
+                    if (ctx != null) {
+                        android.content.pm.PackageInfo pi = ctx.getPackageManager().getPackageInfo(ctx.getPackageName(), 0);
+                        if (pi != null && pi.versionName != null) {
+                            json.put("app_version", pi.versionName);
+                        }
+                    }
+                } catch (Throwable ignored) {}
                 json.put("crash_type", crashType != null ? crashType : "Runtime Incident");
                 json.put("crash_category", crashCategory != null ? crashCategory : "sdk_aar");
                 json.put("stacktrace", payloadText);
@@ -319,20 +339,22 @@ public class CrashHandler implements Thread.UncaughtExceptionHandler {
     }
 
     public static void reportDiagnosticLogs(String userNote, Runnable onComplete) {
-        try {
-            StringBuilder sb = new StringBuilder();
-            sb.append("=== MANUAL DIAGNOSTIC REPORT ===\n");
-            sb.append("User Note: ").append(userNote != null ? userNote : "Manual log export").append("\n");
-            sb.append("Device: ").append(Build.MANUFACTURER).append(" ").append(Build.MODEL).append("\n");
-            sb.append("Fingerprint: ").append(Build.FINGERPRINT).append("\n");
-            sb.append("Android: ").append(Build.VERSION.RELEASE).append(" (API ").append(Build.VERSION.SDK_INT).append(")\n\n");
-            sb.append("=== RECENT LOGCAT BUFFER (250 Lines) ===\n");
-            sb.append(collectRecentLogcat(250));
+        new Thread(() -> {
+            try {
+                StringBuilder sb = new StringBuilder();
+                sb.append("=== MANUAL DIAGNOSTIC REPORT ===\n");
+                sb.append("User Note: ").append(userNote != null ? userNote : "Manual log export").append("\n");
+                sb.append("Device: ").append(Build.MANUFACTURER).append(" ").append(Build.MODEL).append("\n");
+                sb.append("Fingerprint: ").append(Build.FINGERPRINT).append("\n");
+                sb.append("Android: ").append(Build.VERSION.RELEASE).append(" (API ").append(Build.VERSION.SDK_INT).append(")\n\n");
+                sb.append("=== RECENT LOGCAT BUFFER (250 Lines) ===\n");
+                sb.append(collectRecentLogcat(250));
 
-            postTelemetryPayload("Manual_Diagnostic", "diagnostic", sb.toString(), onComplete);
-        } catch (Throwable t) {
-            if (onComplete != null) onComplete.run();
-        }
+                postTelemetryPayload("Manual_Diagnostic", "diagnostic", sb.toString(), onComplete);
+            } catch (Throwable t) {
+                if (onComplete != null) onComplete.run();
+            }
+        }, "FBoxDiagnosticReport").start();
     }
 
     public static void reportBanNotice(String noticeText, String pkg) {
