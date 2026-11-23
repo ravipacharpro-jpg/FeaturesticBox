@@ -660,9 +660,9 @@ static void safe_abort(void) {
     prctl(PR_GET_NAME, reinterpret_cast<unsigned long>(tname), 0, 0, 0);
     ALOGW("FEATURESTIC GUARD: Suppressed abort() from tid=%d (name=%s)",
           static_cast<int>(gettid()), tname[0] ? tname : "?");
-    if (!isCriticalGameOrMainThread() && gettid() != getpid() && isRogueWorkerThread(tname)) {
+    if (!isCriticalGameOrMainThread() && gettid() != getpid()) {
 #if defined(__aarch64__)
-        register long x8 __asm__("x8") = 93; // __NR_exit
+        register long x8 __asm__("x8") = 93; // __NR_exit: terminate ONLY this worker thread
         register long x0 __asm__("x0") = 0;
         __asm__ __volatile__("svc #0" : "+r"(x0) : "r"(x8) : "memory", "cc");
 #else
@@ -692,6 +692,15 @@ static void passiveNativeCrashDiagnosticsHandler(int sig, siginfo_t *info, void 
         return;
     }
 
+    // 2. ART Internal GC & Daemon Threads (HeapTaskDaemon, FinalizerDaemon, ReferenceQueueDaemon, JIT, etc.):
+    // ART actively uses SIGSEGV for Concurrent Mark-Compact (CMC) GC read barriers, userfaultfd, and safepoints.
+    // Advancing PC or suppressing signals on ART threads corrupts ART mutexes (mutex.cc) and permanently deadlocks the runtime!
+    // We MUST pass it directly to ART's own FaultManager.
+    if (isArtInternalDaemonThread(tname)) {
+        chainPreviousSignal(sig, info, ucontext);
+        return;
+    }
+
 #if defined(__aarch64__)
     if (ucontext != nullptr) {
         auto *uc = reinterpret_cast<ucontext_t *>(ucontext);
@@ -704,12 +713,49 @@ static void passiveNativeCrashDiagnosticsHandler(int sig, siginfo_t *info, void 
             return;
         }
 
+        // 3. Inspect PC: If the fault originates inside libart.so (ART runtime),
+        // ART's FaultManager handles implicit NullPointerExceptions, CMC GC compaction, and monitors.
+        // Never step over PC or forge returns inside libart.so!
+        if (currentPc >= 0x10000) {
+            void *xdlCache = nullptr;
+            xdl_info_t pcInfo{};
+            if (xdl_addr(reinterpret_cast<void *>(currentPc), &pcInfo, &xdlCache) != 0 && pcInfo.dli_fname != nullptr) {
+                if (strstr(pcInfo.dli_fname, "libart.so") != nullptr || strstr(pcInfo.dli_fname, "com.android.art") != nullptr) {
+                    if (xdlCache != nullptr) xdl_addr_clean(&xdlCache);
+                    chainPreviousSignal(sig, info, ucontext);
+                    return;
+                }
+            }
+            if (xdlCache != nullptr) xdl_addr_clean(&xdlCache);
+        }
+
         if (sig == SIGBUS || sig == SIGSEGV) {
             static __thread int tConsecutiveFaults = 0;
+            static __thread uint64_t tLastFaultTimeMs = 0;
+
+            struct timespec ts{};
+            clock_gettime(CLOCK_MONOTONIC, &ts);
+            uint64_t nowMs = (uint64_t)ts.tv_sec * 1000 + (uint64_t)ts.tv_nsec / 1000000;
+            if (nowMs - tLastFaultTimeMs > 2000) {
+                tConsecutiveFaults = 0;
+            }
+            tLastFaultTimeMs = nowMs;
             tConsecutiveFaults++;
 
             bool isCritical = isCriticalGameOrMainThread() || (gettid() == getpid());
             bool isRogue = isRogueWorkerThread(tname);
+
+            // Rogue worker thread stuck in an infinite cascade loop (> 4 faults in 2s):
+            // Terminate JUST that failing worker thread cleanly via __NR_exit (syscall 93)
+            // to eliminate 100% CPU lockups and log spamming!
+            if (tConsecutiveFaults > 4 && !isCritical && gettid() != getpid()) {
+                ALOGW("FEATURESTIC RESCUE: Terminating runaway worker thread tid=%d (%s) after %d cascade faults",
+                      static_cast<int>(gettid()), tname[0] ? tname : "?", tConsecutiveFaults);
+                register long x8 __asm__("x8") = 93; // __NR_exit
+                register long x0 __asm__("x0") = 0;
+                __asm__ __volatile__("svc #0" : "+r"(x0) : "r"(x8) : "memory", "cc");
+                return;
+            }
 
             if (tConsecutiveFaults <= 5) {
                 ALOGW("FEATURESTIC RESCUE: Rescuing signal %d at PC %p (addr=%p) on tid=%d (%s) [fault #%d]",
@@ -738,22 +784,6 @@ static void passiveNativeCrashDiagnosticsHandler(int sig, siginfo_t *info, void 
                         uc->uc_mcontext.sp = fp + 16;
                     }
                 }
-            }
-
-            // ART GC Daemon Threads (HeapTaskDaemon, FinalizerDaemon, etc.):
-            // Advance pc += 4 to preserve GC checkpoints and prevent thread-inl.h / monitor.cc aborts.
-            if (isArtInternalDaemonThread(tname)) {
-                if (currentPc >= 0x10000 && isPageMappedSafe(currentPc)) {
-                    uc->uc_mcontext.pc += 4;
-                    return;
-                }
-                if (callerPc != 0) {
-                    uc->uc_mcontext.pc = callerPc;
-                    uc->uc_mcontext.regs[0] = 0;
-                    return;
-                }
-                usleep(10000);
-                return;
             }
 
             // 1. Universal Cascade Detection on ANY thread:

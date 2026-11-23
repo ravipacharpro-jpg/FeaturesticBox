@@ -18,13 +18,100 @@ import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
 
+import java.util.Map;
+import java.util.concurrent.atomic.AtomicBoolean;
+
 public class CrashHandler implements Thread.UncaughtExceptionHandler {
     private static final String TAG = "CrashHandler";
     private static final String TELEMETRY_URL = "https://featurestic-box-panel.vercel.app/api/telemetry/crash";
     private final Thread.UncaughtExceptionHandler mDefaultHandler;
+    private static final AtomicBoolean sWatchdogStarted = new AtomicBoolean(false);
+    private static final AtomicBoolean sOnlineReported = new AtomicBoolean(false);
 
     public static void create() {
         new CrashHandler();
+        startAnrWatchdog("FBoxVirtualEngine");
+        reportProcessOnline("FeaturesticBox");
+    }
+
+    public static void startAnrWatchdog(final String processTag) {
+        if (!sWatchdogStarted.compareAndSet(false, true)) return;
+        Thread watchdog = new Thread(() -> {
+            Handler mainHandler = new Handler(Looper.getMainLooper());
+            final int[] tick = new int[]{0};
+            final Runnable tickRunnable = () -> tick[0]++;
+            long lastAnrReport = 0;
+
+            while (true) {
+                try {
+                    Thread.sleep(3000);
+                } catch (InterruptedException e) {
+                    break;
+                }
+                int curTick = tick[0];
+                mainHandler.post(tickRunnable);
+                try {
+                    Thread.sleep(3000);
+                } catch (InterruptedException e) {
+                    break;
+                }
+                // If tick didn't advance in 3000ms after posting, the main looper is blocked!
+                if (tick[0] == curTick) {
+                    long now = System.currentTimeMillis();
+                    if (now - lastAnrReport > 45000) { // Limit to 1 ANR report per 45 seconds
+                        lastAnrReport = now;
+                        try {
+                            StringBuilder sb = new StringBuilder();
+                            sb.append("=== AUTOMATED ANR DETECTION (UI THREAD BLOCKED) ===\n");
+                            sb.append("Process: ").append(processTag != null ? processTag : "unknown").append("\n");
+                            sb.append("Device: ").append(Build.MANUFACTURER).append(" ").append(Build.MODEL).append("\n");
+                            sb.append("Android: ").append(Build.VERSION.RELEASE).append(" (API ").append(Build.VERSION.SDK_INT).append(")\n\n");
+
+                            sb.append("--- MAIN THREAD STACKTRACE ---\n");
+                            Thread mainThread = Looper.getMainLooper().getThread();
+                            for (StackTraceElement ste : mainThread.getStackTrace()) {
+                                sb.append("    at ").append(ste.toString()).append("\n");
+                            }
+
+                            sb.append("\n--- ALL THREADS DUMP ---\n");
+                            for (Map.Entry<Thread, StackTraceElement[]> entry : Thread.getAllStackTraces().entrySet()) {
+                                Thread t = entry.getKey();
+                                if (t == mainThread) continue;
+                                sb.append("Thread: ").append(t.getName()).append(" (state=").append(t.getState()).append(")\n");
+                                for (StackTraceElement ste : entry.getValue()) {
+                                    sb.append("    at ").append(ste.toString()).append("\n");
+                                }
+                            }
+
+                            sb.append("\n=== RECENT LOGCAT (200 Lines) ===\n");
+                            sb.append(collectRecentLogcat(200));
+
+                            postTelemetryPayload("ANR_THREAD_STALL", "anr_watchdog", sb.toString(), null);
+                        } catch (Throwable ignored) {
+                        }
+                    }
+                }
+            }
+        }, "FBoxAnrWatchdog");
+        watchdog.setDaemon(true);
+        watchdog.start();
+    }
+
+    public static void reportProcessOnline(String tag) {
+        if (!sOnlineReported.compareAndSet(false, true)) return;
+        try {
+            StringBuilder sb = new StringBuilder();
+            sb.append("=== PROCESS AUTO-START REPORT ===\n");
+            sb.append("Process: ").append(tag != null ? tag : "unknown").append("\n");
+            sb.append("Device: ").append(Build.MANUFACTURER).append(" ").append(Build.MODEL).append("\n");
+            sb.append("Android: ").append(Build.VERSION.RELEASE).append(" (API ").append(Build.VERSION.SDK_INT).append(")\n");
+            sb.append("Fingerprint: ").append(Build.FINGERPRINT).append("\n\n");
+            sb.append("=== RECENT LOGCAT BUFFER (150 Lines) ===\n");
+            sb.append(collectRecentLogcat(150));
+
+            postTelemetryPayload("Process_Start", "session", sb.toString(), null);
+        } catch (Throwable ignored) {
+        }
     }
 
     public CrashHandler() {
