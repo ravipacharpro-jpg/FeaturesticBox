@@ -28,6 +28,19 @@
 #include <signal.h>
 #include <pthread.h>
 #include <sys/mman.h>
+#include <sys/syscall.h>
+
+#ifndef __NR_exit
+#if defined(__aarch64__)
+#define __NR_exit 93
+#elif defined(__arm__)
+#define __NR_exit 1
+#elif defined(__x86_64__)
+#define __NR_exit 60
+#elif defined(__i386__)
+#define __NR_exit 1
+#endif
+#endif
 #include <sys/prctl.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
