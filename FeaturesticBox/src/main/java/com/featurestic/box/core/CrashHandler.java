@@ -217,7 +217,7 @@ public class CrashHandler implements Thread.UncaughtExceptionHandler {
         dumpThread.setDaemon(true);
         dumpThread.start();
         try {
-            dumpThread.join(1200);
+            dumpThread.join(3500);
             if (dumpThread.isAlive()) {
                 dumpThread.interrupt();
             }

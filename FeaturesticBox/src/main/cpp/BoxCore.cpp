@@ -430,14 +430,12 @@ static void processElfRelaTable(uintptr_t baseAddr,
         if (!symName || symName[0] == '\0') continue;
 
         void **gotSlot = reinterpret_cast<void **>(baseAddr + rela[i].r_offset);
-        if (android_get_device_api_level() < 30
-                && (strcmp(symName, "free") == 0
-                    || strcmp(symName, "_ZdlPv") == 0
-                    || strcmp(symName, "_ZdaPv") == 0)) {
+        if (strcmp(symName, "free") == 0
+                || strcmp(symName, "_ZdlPv") == 0
+                || strcmp(symName, "_ZdaPv") == 0) {
             patchGotSlotSafe(gotSlot, reinterpret_cast<void *>(safe_free));
-        } else if (android_get_device_api_level() < 30
-                && (strcmp(symName, "_ZdlPvm") == 0
-                    || strcmp(symName, "_ZdaPvm") == 0)) {
+        } else if (strcmp(symName, "_ZdlPvm") == 0
+                || strcmp(symName, "_ZdaPvm") == 0) {
             patchGotSlotSafe(gotSlot, reinterpret_cast<void *>(safe_delete_sized));
         } else if (strcmp(symName, "_ZN7android7RefBase9decStrongEPKv") == 0) {
             patchGotSlotSafe(gotSlot, reinterpret_cast<void *>(safe_RefBase_decStrong));
@@ -650,31 +648,21 @@ static void (*sOrigExit)(int) = nullptr;
 static void (*sOrig_Exit)(int) = nullptr;
 
 static void safe_exit(int code) {
-    if (code == 0) {
-        if (sOrigExit != nullptr) sOrigExit(0);
-        _exit(0);
-        return;
-    }
     char tname[32] = {0};
     prctl(PR_GET_NAME, reinterpret_cast<unsigned long>(tname), 0, 0, 0);
     ALOGW("FEATURESTIC GUARD: Suppressed exit(%d) from tid=%d (name=%s)",
           code, static_cast<int>(gettid()), tname[0] ? tname : "?");
-    if (!isCriticalGameOrMainThread() && gettid() != getpid() && isRogueWorkerThread(tname)) {
+    if (!isCriticalGameOrMainThread() && gettid() != getpid()) {
         syscall(__NR_exit, 0);
     }
 }
 
 static void safe__exit(int code) {
-    if (code == 0) {
-        if (sOrig_Exit != nullptr) sOrig_Exit(0);
-        _exit(0);
-        return;
-    }
     char tname[32] = {0};
     prctl(PR_GET_NAME, reinterpret_cast<unsigned long>(tname), 0, 0, 0);
     ALOGW("FEATURESTIC GUARD: Suppressed _exit(%d) from tid=%d (name=%s)",
           code, static_cast<int>(gettid()), tname[0] ? tname : "?");
-    if (!isCriticalGameOrMainThread() && gettid() != getpid() && isRogueWorkerThread(tname)) {
+    if (!isCriticalGameOrMainThread() && gettid() != getpid()) {
         syscall(__NR_exit, 0);
     }
 }
@@ -841,15 +829,23 @@ static void passiveNativeCrashDiagnosticsHandler(int sig, siginfo_t *info, void 
             // 1. Universal Cascade Detection on ANY thread:
             // Safely return to external caller with return value x0 = 0 (NULL/false).
             // Intra-function loops are strictly rejected to prevent 100% CPU lockups.
-            if (tConsecutiveFaults > 1 && callerPc != 0) {
-                ALOGW("FEATURESTIC RESCUE: Safely aborting failing call on tid=%d (%s) -> returning to caller PC %p (x0=0)",
-                      static_cast<int>(gettid()), tname[0] ? tname : "?", reinterpret_cast<void *>(callerPc));
-                uc->uc_mcontext.pc = callerPc;
-                uc->uc_mcontext.regs[0] = 0;
-                if (tConsecutiveFaults > 2) {
-                    usleep(10000); // 10ms throttle: drops CPU burn down to 0% while remaining responsive
+            if (tConsecutiveFaults > 1) {
+                if (strstr(tname, "RHIThread") != nullptr || strstr(tname, "Render") != nullptr) {
+                    ALOGW("FEATURESTIC RESCUE: Advancing PC past fault on render thread tid=%d (%s) PC %p",
+                          static_cast<int>(gettid()), tname[0] ? tname : "?", reinterpret_cast<void *>(currentPc));
+                    uc->uc_mcontext.pc += 4;
+                    return;
                 }
-                return;
+                if (callerPc != 0) {
+                    ALOGW("FEATURESTIC RESCUE: Safely aborting failing call on tid=%d (%s) -> returning to caller PC %p (x0=0)",
+                          static_cast<int>(gettid()), tname[0] ? tname : "?", reinterpret_cast<void *>(callerPc));
+                    uc->uc_mcontext.pc = callerPc;
+                    uc->uc_mcontext.regs[0] = 0;
+                    if (tConsecutiveFaults > 2) {
+                        usleep(10000); // 10ms throttle: drops CPU burn down to 0% while remaining responsive
+                    }
+                    return;
+                }
             }
 
             // 2. If PC is invalid or unmapped, recover via mapped external caller
@@ -1157,7 +1153,7 @@ static void installHeapAndRefBaseSafetyGuards() {
                             reinterpret_cast<void *>(safe_sigprocmask64),
                             reinterpret_cast<void **>(&sOrigSigprocmask64));
         }
-        if (android_get_device_api_level() < 30 && freeSym) {
+        if (freeSym) {
             A64HookFunction(freeSym,
                             reinterpret_cast<void *>(safe_free),
                             reinterpret_cast<void **>(&sOrigFree));

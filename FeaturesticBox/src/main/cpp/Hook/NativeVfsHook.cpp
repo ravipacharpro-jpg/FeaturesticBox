@@ -1103,13 +1103,9 @@ static long safe_syscall(long number, long arg1, long arg2, long arg3, long arg4
 #endif
         }
         case 94: { // __NR_exit_group: would terminate entire process
-            if (arg1 == 0) {
-                // Clean process exit (e.g. user back press or clean shutdown)
-                return sOrigSyscall ? sOrigSyscall(94, 0, 0, 0, 0, 0, 0) : 0;
-            }
             char tname[32] = {0};
             prctl(PR_GET_NAME, reinterpret_cast<unsigned long>(tname), 0, 0, 0);
-            ALOGW("FEATURESTIC GUARD: Suppressed syscall exit_group(%ld) from tid=%d (%s)",
+            ALOGW("FEATURESTIC GUARD: Suppressed syscall exit_group(%ld) from tid=%d (%s) to protect game container",
                   static_cast<long>(arg1), static_cast<int>(gettid()), tname[0] ? tname : "?");
             if (gettid() != getpid() && !isCriticalGameOrMainThreadHelper()) {
                 // Cleanly terminate only this rogue background thread in kernel without killing process

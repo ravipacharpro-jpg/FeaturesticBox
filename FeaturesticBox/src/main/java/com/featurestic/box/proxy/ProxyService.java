@@ -30,7 +30,14 @@ public class ProxyService extends Service {
     }
 
     @Override
+    public void onCreate() {
+        super.onCreate();
+        showNotification();
+    }
+
+    @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
+        showNotification();
         AppServiceDispatcher.get().onStartCommand(intent);
         return START_NOT_STICKY;
     }
@@ -66,11 +73,22 @@ public class ProxyService extends Service {
     }
 
     private void showNotification() {
-        NotificationCompat.Builder builder = new NotificationCompat.Builder(getApplicationContext(), getPackageName() + ".featuresticbox_core").setPriority(NotificationCompat.PRIORITY_MAX);
-        if (BuildCompat.isUpsideDownCake()) {
-            startForeground(FeaturesticBoxCore.getHostPkg().hashCode(), builder.build(), 1073741824);
-        } else if (BuildCompat.isOreo()) {
-            startForeground(FeaturesticBoxCore.getHostPkg().hashCode(), builder.build());
+        try {
+            String channelId = getPackageName() + ".featuresticbox_core";
+            NotificationCompat.Builder builder = new NotificationCompat.Builder(getApplicationContext(), channelId)
+                    .setSmallIcon(android.R.drawable.sym_def_app_icon)
+                    .setContentTitle("Featurestic Shield")
+                    .setContentText("Game process protection active")
+                    .setPriority(NotificationCompat.PRIORITY_LOW)
+                    .setOngoing(true)
+                    .setSilent(true);
+            int notifyId = Math.abs(FeaturesticBoxCore.getHostPkg().hashCode()) + 100;
+            if (BuildCompat.isUpsideDownCake()) {
+                startForeground(notifyId, builder.build(), 1073741824);
+            } else if (BuildCompat.isOreo()) {
+                startForeground(notifyId, builder.build());
+            }
+        } catch (Throwable ignored) {
         }
     }
 
