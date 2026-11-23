@@ -571,6 +571,8 @@ static void recordNativeCrashOffsetLog(int sig, int siCode, uintptr_t faultAddr,
     logCurrentThreadBacktrace();
 }
 
+static void passiveNativeCrashDiagnosticsHandler(int sig, siginfo_t *info, void *ucontext);
+
 static void chainPreviousSignal(int sig, siginfo_t *info, void *ucontext) {
     struct sigaction *prev = (sig == SIGSEGV) ? &sOldSigsegvAction
             : ((sig == SIGBUS) ? &sOldSigbusAction
