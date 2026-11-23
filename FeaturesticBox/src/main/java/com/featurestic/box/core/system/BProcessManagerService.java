@@ -258,7 +258,7 @@ public class BProcessManagerService implements ISystemService {
                 public void binderDied() {
                     Log.d(TAG, "App Died: " + app.processName);
                     appThread.unlinkToDeath(this, 0);
-                    if (app.processName != null && !app.processName.contains(":")) {
+                    if (app.processName != null) {
                         try {
                             com.featurestic.box.core.CrashHandler.reportProcessDied(app.processName, app.pid);
                         } catch (Throwable ignored) {

@@ -879,7 +879,12 @@
         <service
             android:name=".proxy.ProxyService$P0"
             android:exported="true"
-            android:process=":p0" />
+            android:foregroundServiceType="specialUse"
+            android:process=":p0">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Keep FeaturesticBox container core alive" />
+        </service>
         <service
             android:name=".proxy.ProxyService$P1"
             android:exported="true"

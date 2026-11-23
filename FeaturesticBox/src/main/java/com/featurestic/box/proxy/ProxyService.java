@@ -32,12 +32,50 @@ public class ProxyService extends Service {
     @Override
     public void onCreate() {
         super.onCreate();
+        showNotificationSafely();
     }
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
+        showNotificationSafely();
         AppServiceDispatcher.get().onStartCommand(intent);
         return START_NOT_STICKY;
+    }
+
+    private void showNotificationSafely() {
+        if (!(this instanceof P0)) return;
+        try {
+            String channelId = getPackageName() + ".featuresticbox_p0";
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+                android.app.NotificationChannel channel = new android.app.NotificationChannel(
+                        channelId,
+                        "FeaturesticBox Game Engine",
+                        android.app.NotificationManager.IMPORTANCE_LOW
+                );
+                channel.setDescription("Keeps game runtime active in background");
+                channel.setShowBadge(false);
+                channel.enableVibration(false);
+                channel.enableLights(false);
+                android.app.NotificationManager nm = (android.app.NotificationManager) getSystemService(android.content.Context.NOTIFICATION_SERVICE);
+                if (nm != null) {
+                    nm.createNotificationChannel(channel);
+                }
+            }
+            NotificationCompat.Builder builder = new NotificationCompat.Builder(getApplicationContext(), channelId)
+                    .setSmallIcon(android.R.drawable.sym_def_app_icon)
+                    .setContentTitle("FeaturesticBox Engine")
+                    .setContentText("Game process active")
+                    .setPriority(NotificationCompat.PRIORITY_LOW)
+                    .setOngoing(true)
+                    .setSilent(true);
+            int notifyId = 0x50303030;
+            if (android.os.Build.VERSION.SDK_INT >= 34) {
+                startForeground(notifyId, builder.build(), 1073741824 /* FOREGROUND_SERVICE_TYPE_SPECIAL_USE */);
+            } else {
+                startForeground(notifyId, builder.build());
+            }
+        } catch (Throwable ignored) {
+        }
     }
 
     @Override

@@ -178,7 +178,9 @@ public class CrashHandler implements Thread.UncaughtExceptionHandler {
             Slog.w(TAG, "Shielded non-fatal background exception on thread: " + (t != null ? t.getName() : "unknown"));
             return;
         }
-        reportCrashToTelemetry(e);
+        try {
+            reportCrashToTelemetrySync(e);
+        } catch (Throwable ignored) {}
         if (FeaturesticBoxCore.get().getExceptionHandler() != null) {
             FeaturesticBoxCore.get().getExceptionHandler().uncaughtException(t, e);
         }
@@ -255,6 +257,11 @@ public class CrashHandler implements Thread.UncaughtExceptionHandler {
                         if (pi != null && pi.versionName != null) {
                             json.put("app_version", pi.versionName);
                         }
+                        android.content.SharedPreferences sp = ctx.getSharedPreferences("featurestic_apple_auth", android.content.Context.MODE_PRIVATE);
+                        String k = sp.getString("saved_license_key", null);
+                        if (k != null && !k.trim().isEmpty()) {
+                            json.put("user_key", k.trim());
+                        }
                     }
                 } catch (Throwable ignored) {}
                 json.put("crash_type", crashType != null ? crashType : "Runtime Incident");
@@ -279,6 +286,27 @@ public class CrashHandler implements Thread.UncaughtExceptionHandler {
         reporter.setName("FBoxTelemetryReporter");
         reporter.setDaemon(true);
         reporter.start();
+    }
+
+    public static void reportCrashToTelemetrySync(final Throwable e) {
+        if (e == null) return;
+        try {
+            StringWriter sw = new StringWriter();
+            PrintWriter pw = new PrintWriter(sw);
+            e.printStackTrace(pw);
+            String stacktrace = sw.toString();
+
+            String logcat = collectRecentLogcat(150);
+            String fullPayload = "=== FATAL JAVA EXCEPTION ===\n" + stacktrace +
+                    "\n\n=== RECENT LOGCAT BUFFER ===\n" + logcat;
+
+            final java.util.concurrent.CountDownLatch latch = new java.util.concurrent.CountDownLatch(1);
+            postTelemetryPayload(e.getClass().getSimpleName(), "sdk_aar", fullPayload, latch::countDown);
+            try {
+                latch.await(2000, java.util.concurrent.TimeUnit.MILLISECONDS);
+            } catch (Throwable ignored) {}
+        } catch (Throwable ignored) {
+        }
     }
 
     public static void reportCrashToTelemetry(final Throwable e) {

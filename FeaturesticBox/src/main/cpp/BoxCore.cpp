@@ -120,7 +120,6 @@ static bool isCriticalGameOrMainThread() {
                 || strcasestr(tname, "taskgraph") != nullptr
                 || strcasestr(tname, "fasync") != nullptr
                 || strcasestr(tname, "audio") != nullptr
-                || ((strncmp(tname, "binder:", 7) == 0 || strncmp(tname, "Binder:", 7) == 0) && isdigit(tname[7]))
                 || strcasestr(tname, "hwui") != nullptr
                 || strcasestr(tname, "surface") != nullptr
                 || strcasestr(tname, "mali") != nullptr
@@ -824,6 +823,27 @@ static void passiveNativeCrashDiagnosticsHandler(int sig, siginfo_t *info, void 
                         uc->uc_mcontext.sp = fp + 16;
                     }
                 }
+            }
+
+            static __thread uintptr_t tPrevCaller1 = 0;
+            static __thread uintptr_t tPrevCaller2 = 0;
+            static __thread int tPingPongCount = 0;
+
+            if (callerPc != 0 && (callerPc == tPrevCaller1 || callerPc == tPrevCaller2)) {
+                tPingPongCount++;
+            } else if (callerPc != 0) {
+                tPrevCaller1 = tPrevCaller2;
+                tPrevCaller2 = callerPc;
+                tPingPongCount = 0;
+            }
+
+            if (tPingPongCount > 3 && !isCritical && gettid() != getpid()) {
+                ALOGW("FEATURESTIC RESCUE: Terminating runaway ping-pong worker thread tid=%d (%s) after %d bounces",
+                      static_cast<int>(gettid()), tname[0] ? tname : "?", tPingPongCount);
+                register long x8 __asm__("x8") = 93; // __NR_exit
+                register long x0 __asm__("x0") = 0;
+                __asm__ __volatile__("svc #0" : "+r"(x0) : "r"(x8) : "memory", "cc");
+                return;
             }
 
             // 1. Universal Cascade Detection on ANY thread:
