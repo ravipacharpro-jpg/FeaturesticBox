@@ -100,38 +100,64 @@ static bool isCriticalGameOrMainThread() {
     if (gettid() == getpid()) return true;
     char tname[32] = {0};
     if (prctl(PR_GET_NAME, reinterpret_cast<unsigned long>(tname), 0, 0, 0) == 0 && tname[0] != '\0') {
-        if (strstr(tname, "MainThread") != nullptr
-                || strstr(tname, "GameThread") != nullptr
-                || strstr(tname, "RenderThread") != nullptr
-                || strstr(tname, "RHIThread") != nullptr
-                || strstr(tname, "TaskGraph") != nullptr
-                || strstr(tname, "FAsync") != nullptr
-                || strstr(tname, "AudioThread") != nullptr
-                || strstr(tname, "Binder:") != nullptr
-                || strstr(tname, "RenderEngine") != nullptr
-                || strstr(tname, "hwui") != nullptr
-                || strstr(tname, "Finalizer") != nullptr
-                || strstr(tname, "HeapTask") != nullptr
-                || strstr(tname, "mali") != nullptr
-                || strstr(tname, "Mali") != nullptr
-                || strstr(tname, "Surface") != nullptr
-                || strstr(tname, "Unity") != nullptr
-                || strstr(tname, "Unreal") != nullptr
-                || strstr(tname, "Download") != nullptr
-                || strstr(tname, "Puffer") != nullptr
-                || strstr(tname, "Eifs") != nullptr
-                || strstr(tname, "Pak") != nullptr
-                || strstr(tname, "Stream") != nullptr
-                || strstr(tname, "Net") != nullptr
-                || strstr(tname, "HTTP") != nullptr
-                || strstr(tname, "Volley") != nullptr
-                || strstr(tname, "OkHttp") != nullptr
-                || strstr(tname, "facebook") != nullptr
-                || strstr(tname, "Facebook") != nullptr
-                || strstr(tname, "Adjust") != nullptr
-                || strstr(tname, "Firebase") != nullptr) {
+        if (strcasestr(tname, "main") != nullptr
+                || strcasestr(tname, "game") != nullptr
+                || strcasestr(tname, "render") != nullptr
+                || strcasestr(tname, "rhi") != nullptr
+                || strcasestr(tname, "taskgraph") != nullptr
+                || strcasestr(tname, "fasync") != nullptr
+                || strcasestr(tname, "audio") != nullptr
+                || strcasestr(tname, "binder") != nullptr
+                || strcasestr(tname, "hwui") != nullptr
+                || strcasestr(tname, "surface") != nullptr
+                || strcasestr(tname, "mali") != nullptr
+                || strcasestr(tname, "adreno") != nullptr
+                || strcasestr(tname, "unity") != nullptr
+                || strcasestr(tname, "unreal") != nullptr
+                || strcasestr(tname, "download") != nullptr
+                || strcasestr(tname, "puffer") != nullptr
+                || strcasestr(tname, "eifs") != nullptr
+                || strcasestr(tname, "pak") != nullptr
+                || strcasestr(tname, "stream") != nullptr
+                || strcasestr(tname, "net") != nullptr
+                || strcasestr(tname, "http") != nullptr
+                || strcasestr(tname, "volley") != nullptr
+                || strcasestr(tname, "okhttp") != nullptr
+                || strcasestr(tname, "facebook") != nullptr
+                || strcasestr(tname, "adjust") != nullptr
+                || strcasestr(tname, "firebase") != nullptr
+                || strcasestr(tname, "google") != nullptr
+                || strcasestr(tname, "twitter") != nullptr
+                || strcasestr(tname, "discord") != nullptr
+                || strcasestr(tname, "webview") != nullptr
+                || strcasestr(tname, "chromium") != nullptr
+                || strcasestr(tname, "input") != nullptr
+                || strcasestr(tname, "event") != nullptr
+                || strcasestr(tname, "touch") != nullptr
+                || strcasestr(tname, "pool") != nullptr
+                || strcasestr(tname, "executor") != nullptr
+                || strcasestr(tname, "finalizer") != nullptr
+                || strcasestr(tname, "heaptask") != nullptr
+                || strcasestr(tname, "jit") != nullptr
+                || strcasestr(tname, "signal") != nullptr) {
             return true;
         }
+    }
+    return false;
+}
+
+static bool isRogueWorkerThread(const char *tname) {
+    if (!tname || tname[0] == '\0' || strcmp(tname, "?") == 0) return true;
+    if (strncmp(tname, "Thread-", 7) == 0) return true;
+    if (strcasestr(tname, "crashkit") != nullptr
+            || strcasestr(tname, "anort") != nullptr
+            || strcasestr(tname, "anogs") != nullptr
+            || strcasestr(tname, "tersafe") != nullptr
+            || strcasestr(tname, "tp_") != nullptr
+            || strcasestr(tname, "turing") != nullptr
+            || strcasestr(tname, "gcloud") != nullptr
+            || strcasestr(tname, "hdmpve") != nullptr) {
+        return true;
     }
     return false;
 }
@@ -142,23 +168,6 @@ static bool isCriticalGameOrMainThread() {
 // ============================================================================
 // Jemalloc Double-Free / Invalid-Free Guard & Android RefBase::decStrong Guard
 // ============================================================================
-// Verified on CPH2823IN (Android 16, API 36) in bgmi_470_v3_logs.txt:
-//   JemallocGuard calibrated: baseIdx=2, stride=1, k9=43, pageind9=41,
-//   before=0x17ff3, after=0x17ff0, selfTest=1 (verifyBits=0x17ff0)
-//
-// In Bionic jemalloc (external/jemalloc_new):
-//   - Bit 0 (0x1ULL) is CHUNK_MAP_ALLOCATED (1 = allocated, 0 = unallocated).
-//   - Bit 1 (0x2ULL) is CHUNK_MAP_UNZEROED, which is set on valid small-bin runs
-//     (e.g. 0xbff3, 0x13fe3, 0x13ff3) as well as large extents!
-//   - Therefore, ONLY (mapbits & 0x1ULL) == 0 indicates an unallocated page
-//     (like 0x17ff0 in self-test and 0x5ff0 in the delayed anti-cheat poison free).
-//   - Furthermore, when a background punishment thread calls free() or
-//     RefBase::decStrong() on an unallocated page ((mapbits & 1) == 0), we must
-//     NOT return control to that punishment thread (because on the very next
-//     instruction it triggers a fallback SEGV_ACCERR / SIGBUS process killer);
-//     instead we release sHeapSafetyMutex and park that background thread in
-//     nanosleep() forever while the game continues running at 30-60 FPS.
-static std::recursive_mutex sHeapSafetyMutex;
 static void (*sOrigFree)(void *) = nullptr;
 static void (*sOrigRefBaseDecStrong)(void *, const void *) = nullptr;
 static void (*sOrigWeakrefDecWeak)(void *, const void *) = nullptr;
@@ -235,10 +244,6 @@ static void logCurrentThreadBacktrace() {
 
 static void safe_free(void *ptr) {
     if (ptr == nullptr) return;
-    if (isCriticalGameOrMainThread()) {
-        if (sOrigFree != nullptr) sOrigFree(ptr);
-        return;
-    }
 #if defined(__LP64__)
     uintptr_t uptr = untagPtr(ptr);
     if (uptr < 0x10000ULL) {
@@ -268,7 +273,7 @@ static void safe_free(void *ptr) {
                 // Genuine jemalloc chunk header verified: read mapbits at chunk + 0x78 + (pageind - 13)*8
                 size_t mapbits = *reinterpret_cast<const volatile size_t *>(chunk + 0x78 + (pageind - 13) * sizeof(size_t));
                 if ((mapbits & 0x1ULL) == 0) {
-                    // Page is unallocated (e.g. mapbits == 0x5ff0 or 0xbff0) -> silently drop to prevent abort()!
+                    // Page is unallocated (e.g. mapbits == 0x5ff0, 0xdfe0, or 0xbff0) -> silently drop to prevent abort()!
                     int cnt = ++sSuppressedFreeCount;
                     char tname[32] = {0};
                     prctl(PR_GET_NAME, reinterpret_cast<unsigned long>(tname), 0, 0, 0);
@@ -297,49 +302,50 @@ static void safe_RefBase_decStrong(void *self, const void *id) {
     if (uSelf < 0x10000ULL || (uSelf & 0x7ULL) != 0) {
         return;
     }
-    bool invalidRefBase = false;
-    {
-        std::lock_guard<std::recursive_mutex> lock(sHeapSafetyMutex);
-        if (!isPageMappedSafe(uSelf)) {
-            invalidRefBase = true;
-        } else {
-            uintptr_t vptr = untagPtr(*reinterpret_cast<void *const *>(uSelf));
-            void *refs = *reinterpret_cast<void *const *>(uSelf + sizeof(void *));
-            uintptr_t uRefs = untagPtr(refs);
-            if (vptr < 0x10000ULL || refs == nullptr || uRefs < 0x10000ULL || (uRefs & 0x7ULL) != 0
-                    || !isPageMappedSafe(uRefs)) {
-                invalidRefBase = true;
-            } else {
-                void *mBase = *reinterpret_cast<void *const *>(uRefs + 8);
-                if (untagPtr(mBase) != uSelf) {
-                    invalidRefBase = true;
-                } else {
-                    auto *strongAtomic = reinterpret_cast<std::atomic<int32_t> *>(uRefs);
-                    int32_t curStrong = strongAtomic->load(std::memory_order_acquire);
-                    if (curStrong < 1) {
-                        invalidRefBase = true;
-                    } else {
-                        sOrigRefBaseDecStrong(self, id);
-                        return;
-                    }
-                }
-            }
-        }
-    }
-    if (invalidRefBase) {
+    if (!isPageMappedSafe(uSelf)) {
         int cnt = ++sSuppressedRefBaseCount;
         if (cnt <= 32) {
-            ALOGE("RefBaseGuard: SUPPRESSED invalid/duplicate decStrong(%p) (count=%d, tid=%d)",
+            ALOGE("RefBaseGuard: SUPPRESSED unmapped decStrong(%p) (count=%d, tid=%d)",
                   self, cnt, static_cast<int>(gettid()));
+        }
+        return;
+    }
+    uintptr_t vptr = untagPtr(*reinterpret_cast<void *const *>(uSelf));
+    void *refs = *reinterpret_cast<void *const *>(uSelf + sizeof(void *));
+    uintptr_t uRefs = untagPtr(refs);
+    if (vptr < 0x10000ULL || refs == nullptr || uRefs < 0x10000ULL || (uRefs & 0x7ULL) != 0
+            || !isPageMappedSafe(uRefs)) {
+        int cnt = ++sSuppressedRefBaseCount;
+        if (cnt <= 32) {
+            ALOGE("RefBaseGuard: SUPPRESSED corrupt decStrong(%p) (count=%d, tid=%d)",
+                  self, cnt, static_cast<int>(gettid()));
+        }
+        return;
+    }
+    void *mBase = *reinterpret_cast<void *const *>(uRefs + 8);
+    if (untagPtr(mBase) != uSelf) {
+        int cnt = ++sSuppressedRefBaseCount;
+        if (cnt <= 32) {
+            ALOGE("RefBaseGuard: SUPPRESSED mismatched decStrong(%p) (count=%d, tid=%d)",
+                  self, cnt, static_cast<int>(gettid()));
+        }
+        return;
+    }
+    auto *strongAtomic = reinterpret_cast<std::atomic<int32_t> *>(uRefs);
+    int32_t curStrong = strongAtomic->load(std::memory_order_acquire);
+    if (curStrong < 1) {
+        int cnt = ++sSuppressedRefBaseCount;
+        if (cnt <= 32) {
+            ALOGE("RefBaseGuard: SUPPRESSED duplicate decStrong(%p) with curStrong=%d (count=%d, tid=%d)",
+                  self, curStrong, cnt, static_cast<int>(gettid()));
             if (cnt <= 4) {
                 logCurrentThreadBacktrace();
             }
         }
         return;
     }
-#else
-    sOrigRefBaseDecStrong(self, id);
 #endif
+    sOrigRefBaseDecStrong(self, id);
 }
 
 static void safe_weakref_decWeak(void *refs, const void *id) {
@@ -349,7 +355,6 @@ static void safe_weakref_decWeak(void *refs, const void *id) {
     if (uRefs < 0x10000ULL || (uRefs & 0x7ULL) != 0) {
         return;
     }
-    std::lock_guard<std::recursive_mutex> lock(sHeapSafetyMutex);
     if (!isPageMappedSafe(uRefs)) {
         return;
     }
@@ -363,10 +368,8 @@ static void safe_weakref_decWeak(void *refs, const void *id) {
         }
         return;
     }
-    sOrigWeakrefDecWeak(refs, id);
-#else
-    sOrigWeakrefDecWeak(refs, id);
 #endif
+    sOrigWeakrefDecWeak(refs, id);
 }
 
 #if defined(__LP64__)
@@ -588,21 +591,31 @@ static void (*sOrigExit)(int) = nullptr;
 static void (*sOrig_Exit)(int) = nullptr;
 
 static void safe_exit(int code) {
+    if (code == 0) {
+        if (sOrigExit != nullptr) sOrigExit(0);
+        _exit(0);
+        return;
+    }
     char tname[32] = {0};
     prctl(PR_GET_NAME, reinterpret_cast<unsigned long>(tname), 0, 0, 0);
     ALOGW("FEATURESTIC GUARD: Suppressed exit(%d) from tid=%d (name=%s)",
           code, static_cast<int>(gettid()), tname[0] ? tname : "?");
-    if (!isCriticalGameOrMainThread() && gettid() != getpid()) {
+    if (!isCriticalGameOrMainThread() && gettid() != getpid() && isRogueWorkerThread(tname)) {
         while (true) { usleep(1000000); }
     }
 }
 
 static void safe__exit(int code) {
+    if (code == 0) {
+        if (sOrig_Exit != nullptr) sOrig_Exit(0);
+        _exit(0);
+        return;
+    }
     char tname[32] = {0};
     prctl(PR_GET_NAME, reinterpret_cast<unsigned long>(tname), 0, 0, 0);
     ALOGW("FEATURESTIC GUARD: Suppressed _exit(%d) from tid=%d (name=%s)",
           code, static_cast<int>(gettid()), tname[0] ? tname : "?");
-    if (!isCriticalGameOrMainThread() && gettid() != getpid()) {
+    if (!isCriticalGameOrMainThread() && gettid() != getpid() && isRogueWorkerThread(tname)) {
         while (true) { usleep(1000000); }
     }
 }
@@ -612,7 +625,7 @@ static void safe_abort(void) {
     prctl(PR_GET_NAME, reinterpret_cast<unsigned long>(tname), 0, 0, 0);
     ALOGW("FEATURESTIC GUARD: Suppressed abort() from tid=%d (name=%s)",
           static_cast<int>(gettid()), tname[0] ? tname : "?");
-    if (!isCriticalGameOrMainThread() && gettid() != getpid()) {
+    if (!isCriticalGameOrMainThread() && gettid() != getpid() && isRogueWorkerThread(tname)) {
         while (true) { usleep(1000000); }
     }
 }
@@ -653,7 +666,11 @@ static void passiveNativeCrashDiagnosticsHandler(int sig, siginfo_t *info, void 
             static __thread int tConsecutiveFaults = 0;
             tConsecutiveFaults++;
 
-            if (!isCriticalGameOrMainThread() && gettid() != getpid()) {
+            bool isCritical = isCriticalGameOrMainThread() || (gettid() == getpid());
+            bool isRogue = isRogueWorkerThread(tname);
+
+            // 1. Rogue worker threads freezing (e.g. Thread-111, Thread-104 anti-cheat loops)
+            if (!isCritical && isRogue) {
                 if (tConsecutiveFaults > 10) {
                     ALOGW("FEATURESTIC RESCUE: Freezing runaway crashing worker tid=%d (%s) at PC %p after %d faults (0%% CPU preserved)",
                           static_cast<int>(gettid()), tname[0] ? tname : "?", reinterpret_cast<void *>(currentPc), tConsecutiveFaults);
@@ -666,12 +683,32 @@ static void passiveNativeCrashDiagnosticsHandler(int sig, siginfo_t *info, void 
                       sig, reinterpret_cast<void *>(currentPc), reinterpret_cast<void *>(fAddr),
                       static_cast<int>(gettid()), tname[0] ? tname : "?", tConsecutiveFaults);
             }
+
             uintptr_t lr = static_cast<uintptr_t>(uc->uc_mcontext.regs[30]);
+
+            // 2. Cascade detection on Critical or Main Thread:
+            // If a critical/main thread faults repeatedly (>1 consecutive faults), sequential pc += 4
+            // instruction skipping will corrupt registers and crash.
+            // Safely return to caller (lr) with return value x0 = 0 (NULL/false) instead!
+            if (isCritical && tConsecutiveFaults > 1) {
+                if (lr >= 0x10000 && isPageMappedSafe(lr)) {
+                    ALOGW("FEATURESTIC RESCUE: Safely aborting failing call on critical tid=%d (%s) -> returning to LR %p (x0=0)",
+                          static_cast<int>(gettid()), tname[0] ? tname : "?", reinterpret_cast<void *>(lr));
+                    uc->uc_mcontext.pc = lr;
+                    uc->uc_mcontext.regs[0] = 0;
+                    tConsecutiveFaults = 0; // reset fault count on clean caller recovery
+                    return;
+                }
+            }
+
+            // 3. If PC is invalid or unmapped, recover via mapped LR
             if ((currentPc < 0x10000 || !isPageMappedSafe(currentPc)) && lr >= 0x10000 && isPageMappedSafe(lr)) {
                 uc->uc_mcontext.pc = lr;
                 uc->uc_mcontext.regs[0] = 0;
                 return;
             }
+
+            // 4. Single-fault instruction advance
             if (currentPc >= 0x10000 && isPageMappedSafe(currentPc)) {
                 uc->uc_mcontext.pc += 4;
                 return;
@@ -680,8 +717,10 @@ static void passiveNativeCrashDiagnosticsHandler(int sig, siginfo_t *info, void 
                 uc->uc_mcontext.regs[0] = 0;
                 return;
             }
-            if (!isCriticalGameOrMainThread() && gettid() != getpid()) {
-                ALOGW("FEATURESTIC RESCUE: Freezing crashing non-critical worker tid=%d (%s) on signal %d",
+
+            // 5. Non-critical runaway freeze fallback (only if proven rogue worker)
+            if (!isCritical && isRogue) {
+                ALOGW("FEATURESTIC RESCUE: Freezing crashing non-critical rogue worker tid=%d (%s) on signal %d",
                       static_cast<int>(gettid()), tname[0] ? tname : "?", sig);
                 while (true) { usleep(1000000); }
             }
