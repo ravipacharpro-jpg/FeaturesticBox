@@ -171,6 +171,7 @@ static bool isCriticalGameOrMainThread() {
 static bool isRogueWorkerThread(const char *tname) {
     if (!tname || tname[0] == '\0' || strcmp(tname, "?") == 0) return true;
     if (strncmp(tname, "Thread-", 7) == 0) return true;
+    if (strncmp(tname, "pool-", 5) == 0) return true;
     if (strcasestr(tname, "crashkit") != nullptr
             || strcasestr(tname, "anort") != nullptr
             || strcasestr(tname, "anogs") != nullptr
@@ -649,27 +650,43 @@ static void (*sOrig_Exit)(int) = nullptr;
 static void safe_exit(int code) {
     char tname[32] = {0};
     prctl(PR_GET_NAME, reinterpret_cast<unsigned long>(tname), 0, 0, 0);
-    ALOGW("FEATURESTIC GUARD: Suppressed exit(%d) from tid=%d (name=%s)",
+    ALOGW("FEATURESTIC GUARD: Intercepted exit(%d) from tid=%d (name=%s)",
           code, static_cast<int>(gettid()), tname[0] ? tname : "?");
     if (!isCriticalGameOrMainThread() && gettid() != getpid()) {
         syscall(__NR_exit, 0);
     }
+#if defined(__aarch64__)
+    register long x8 __asm__("x8") = 94; // __NR_exit_group: cleanly terminate process without hang
+    register long x0 __asm__("x0") = static_cast<long>(code);
+    __asm__ __volatile__("svc #0" : "+r"(x0) : "r"(x8) : "memory", "cc");
+#else
+    syscall(SYS_exit_group, code);
+#endif
+    if (sOrigExit) sOrigExit(code);
 }
 
 static void safe__exit(int code) {
     char tname[32] = {0};
     prctl(PR_GET_NAME, reinterpret_cast<unsigned long>(tname), 0, 0, 0);
-    ALOGW("FEATURESTIC GUARD: Suppressed _exit(%d) from tid=%d (name=%s)",
+    ALOGW("FEATURESTIC GUARD: Intercepted _exit(%d) from tid=%d (name=%s)",
           code, static_cast<int>(gettid()), tname[0] ? tname : "?");
     if (!isCriticalGameOrMainThread() && gettid() != getpid()) {
         syscall(__NR_exit, 0);
     }
+#if defined(__aarch64__)
+    register long x8 __asm__("x8") = 94; // __NR_exit_group: cleanly terminate process without hang
+    register long x0 __asm__("x0") = static_cast<long>(code);
+    __asm__ __volatile__("svc #0" : "+r"(x0) : "r"(x8) : "memory", "cc");
+#else
+    syscall(SYS_exit_group, code);
+#endif
+    if (sOrig_Exit) sOrig_Exit(code);
 }
 
 static void safe_abort(void) {
     char tname[32] = {0};
     prctl(PR_GET_NAME, reinterpret_cast<unsigned long>(tname), 0, 0, 0);
-    ALOGW("FEATURESTIC GUARD: Suppressed abort() from tid=%d (name=%s)",
+    ALOGW("FEATURESTIC GUARD: Intercepted abort() from tid=%d (name=%s)",
           static_cast<int>(gettid()), tname[0] ? tname : "?");
     if (!isCriticalGameOrMainThread() && gettid() != getpid()) {
 #if defined(__aarch64__)
@@ -680,7 +697,16 @@ static void safe_abort(void) {
         syscall(__NR_exit, 0);
 #endif
     }
-    while (true) { usleep(100000); }
+    // Cleanly exit via exit_group instead of an infinite while(true) usleep() freeze!
+#if defined(__aarch64__)
+    register long x8 __asm__("x8") = 94; // __NR_exit_group
+    register long x0 __asm__("x0") = 0;
+    __asm__ __volatile__("svc #0" : "+r"(x0) : "r"(x8) : "memory", "cc");
+#else
+    syscall(SYS_exit_group, 0);
+#endif
+    if (sOrigAbort) sOrigAbort();
+    _exit(0);
 }
 
 static void passiveNativeCrashDiagnosticsHandler(int sig, siginfo_t *info, void *ucontext) {
@@ -770,6 +796,7 @@ static void passiveNativeCrashDiagnosticsHandler(int sig, siginfo_t *info, void 
 
         if (sig == SIGBUS || sig == SIGSEGV) {
             static __thread int tConsecutiveFaults = 0;
+            static __thread int tTotalFaults = 0;
             static __thread uint64_t tLastFaultTimeMs = 0;
 
             struct timespec ts{};
@@ -780,16 +807,17 @@ static void passiveNativeCrashDiagnosticsHandler(int sig, siginfo_t *info, void 
             }
             tLastFaultTimeMs = nowMs;
             tConsecutiveFaults++;
+            tTotalFaults++;
 
             bool isCritical = isCriticalGameOrMainThread() || (gettid() == getpid());
             bool isRogue = isRogueWorkerThread(tname);
 
-            // Rogue worker thread stuck in an infinite cascade loop (> 4 faults in 2s):
+            // Rogue worker thread stuck in an infinite cascade loop (> 4 faults in 2s or > 8 lifetime faults):
             // Terminate JUST that failing worker thread cleanly via __NR_exit (syscall 93)
-            // to eliminate 100% CPU lockups and log spamming!
-            if (tConsecutiveFaults > 4 && !isCritical && gettid() != getpid()) {
-                ALOGW("FEATURESTIC RESCUE: Terminating runaway worker thread tid=%d (%s) after %d cascade faults",
-                      static_cast<int>(gettid()), tname[0] ? tname : "?", tConsecutiveFaults);
+            // to eliminate 100% CPU lockups, rescue spamming, and memory freezes!
+            if ((tConsecutiveFaults > 4 || tTotalFaults > 8) && !isCritical && gettid() != getpid()) {
+                ALOGW("FEATURESTIC RESCUE: Terminating runaway worker thread tid=%d (%s) after %d cascade faults (total=%d)",
+                      static_cast<int>(gettid()), tname[0] ? tname : "?", tConsecutiveFaults, tTotalFaults);
                 register long x8 __asm__("x8") = 93; // __NR_exit
                 register long x0 __asm__("x0") = 0;
                 __asm__ __volatile__("svc #0" : "+r"(x0) : "r"(x8) : "memory", "cc");
