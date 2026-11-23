@@ -48,7 +48,7 @@ public final class TwitterOAuthCallbackActivity extends Activity {
         } else {
             // Direct relay to guest container if no active session
             try {
-                String virtualPkg = com.featurestic.box.core.BActivityThread.getAppPackageName();
+                String virtualPkg = com.featurestic.box.app.BActivityThread.getAppPackageName();
                 if (virtualPkg != null) {
                     Intent forward = new Intent(Intent.ACTION_VIEW, callback);
                     forward.addCategory(Intent.CATEGORY_DEFAULT);

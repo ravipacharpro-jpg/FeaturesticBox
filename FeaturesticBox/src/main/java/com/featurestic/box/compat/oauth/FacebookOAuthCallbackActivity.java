@@ -57,7 +57,7 @@ public final class FacebookOAuthCallbackActivity extends Activity {
                 }
             } else {
                 // Direct fallback: dispatch to running virtual package
-                String virtualPkg = com.featurestic.box.core.BActivityThread.getAppPackageName();
+                String virtualPkg = com.featurestic.box.app.BActivityThread.getAppPackageName();
                 if (virtualPkg != null) {
                     delivered = VirtualOAuthBridgeActivity.dispatchFacebookCallback(
                             virtualPkg, 0, callbackUri);
