@@ -12,8 +12,6 @@
 #include <cstring>
 #include <atomic>
 
-namespace {
-
 static std::map<std::string, std::string> sPropMap;
 static std::mutex sPropMutex;
 static std::atomic<bool> sNativeHooksInstalled{false};
@@ -36,7 +34,7 @@ static bool isQemuOrVirtualProp(const char *name) {
     return false;
 }
 
-int safe_system_property_get(const char *name, char *value) {
+extern "C" int safe_system_property_get(const char *name, char *value) {
     if (name == nullptr || name[0] == '\0' || value == nullptr) {
         if (value) value[0] = '\0';
         return 0;
@@ -99,7 +97,7 @@ int safe_system_property_get(const char *name, char *value) {
     return 0;
 }
 
-const prop_info *safe_system_property_find(const char *name) {
+extern "C" const prop_info *safe_system_property_find(const char *name) {
     if (name == nullptr || name[0] == '\0') {
         return nullptr;
     }
@@ -182,7 +180,7 @@ HOOK_JNI(jstring, native_get, JNIEnv *env, jobject obj, jstring key, jstring def
     return orig_native_get(env, obj, key, def);
 }
 
-} // anonymous namespace
+
 
 void SystemPropertiesHook::setProp(const char *key, const char *value) {
     if (key != nullptr && value != nullptr) {

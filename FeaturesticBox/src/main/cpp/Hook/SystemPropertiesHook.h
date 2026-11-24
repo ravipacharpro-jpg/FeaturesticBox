@@ -12,8 +12,10 @@ public:
     static void setProp(const char *key, const char *value);
 };
 
+extern "C" {
 int safe_system_property_get(const char *name, char *value);
 const prop_info *safe_system_property_find(const char *name);
+}
 
 #endif // FEATURESTICBOX_SYSTEMPROPERTIESHOOK_H
 
