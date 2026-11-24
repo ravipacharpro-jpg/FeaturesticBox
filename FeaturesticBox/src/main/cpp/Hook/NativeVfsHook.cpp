@@ -1237,9 +1237,196 @@ static long safe_syscall(long number, long arg1, long arg2, long arg3, long arg4
 }
 
 #if defined(__aarch64__)
+static void seccompSigsysHandler(int sig, siginfo_t *info, void *ucontext) {
+    if (sig != SIGSYS || !ucontext) return;
+    static thread_local bool sInSigsys = false;
+    if (sInSigsys) return;
+    struct Guard {
+        bool &b;
+        explicit Guard(bool &v) : b(v) { b = true; }
+        ~Guard() { b = false; }
+    } g(sInSigsys);
+
+    auto *uc = reinterpret_cast<ucontext_t *>(ucontext);
+    long nr = (info && info->si_syscall != 0) ? info->si_syscall : static_cast<long>(uc->uc_mcontext.regs[8]);
+    long a0 = static_cast<long>(uc->uc_mcontext.regs[0]);
+    long a1 = static_cast<long>(uc->uc_mcontext.regs[1]);
+    long a2 = static_cast<long>(uc->uc_mcontext.regs[2]);
+    long a3 = static_cast<long>(uc->uc_mcontext.regs[3]);
+
+    // Advance PC past the 4-byte svc #0 instruction on ARM64
+    uc->uc_mcontext.pc += 4;
+    sigdelset(&uc->uc_sigmask, SIGSYS);
+
+    switch (nr) {
+        case 94: { // __NR_exit_group
+            char tname[32] = {0};
+            prctl(PR_GET_NAME, reinterpret_cast<unsigned long>(tname), 0, 0, 0);
+            ALOGW("FEATURESTIC SECCOMP: Intercepted inline exit_group(%ld) tid=%d (%s)",
+                  a0, static_cast<int>(gettid()), tname[0] ? tname : "?");
+            if (gettid() != getpid() && !isCriticalGameOrMainThreadHelper()) {
+                raw_real_syscall(93 /* __NR_exit */, 0, 0, 0, 0, 0, 0x5afe5afe);
+            }
+            uc->uc_mcontext.regs[0] = 0;
+            return;
+        }
+        case 129: { // __NR_kill
+            pid_t pid = static_cast<pid_t>(a0);
+            if (pid == getpid() || pid == 0 || pid == -1) {
+                ALOGW("FEATURESTIC SECCOMP: Suppressed inline kill(pid=%d, sig=%ld) tid=%d",
+                      static_cast<int>(pid), a1, static_cast<int>(gettid()));
+                uc->uc_mcontext.regs[0] = 0;
+                return;
+            }
+            uc->uc_mcontext.regs[0] = static_cast<unsigned long>(
+                    raw_real_syscall(129, a0, a1, 0, 0, 0, 0x5afe5afe));
+            return;
+        }
+        case 130: // __NR_tkill
+        case 131: { // __NR_tgkill
+            pid_t tgid = (nr == 131) ? static_cast<pid_t>(a0) : getpid();
+            long sigNum = (nr == 131) ? a2 : a1;
+            if (tgid == getpid() || tgid == 0 || tgid == -1) {
+                ALOGW("FEATURESTIC SECCOMP: Suppressed inline %s(tgid=%d, tid=%ld, sig=%ld) from tid=%d",
+                      (nr == 131) ? "tgkill" : "tkill",
+                      static_cast<int>(tgid), (nr == 131) ? a1 : a0, sigNum, static_cast<int>(gettid()));
+                uc->uc_mcontext.regs[0] = 0;
+                return;
+            }
+            uc->uc_mcontext.regs[0] = static_cast<unsigned long>(
+                    raw_real_syscall(nr, a0, a1, a2, 0, 0, 0x5afe5afe));
+            return;
+        }
+        case 132: { // __NR_sigaltstack
+            if (a0 != 0) {
+                const auto *ss = reinterpret_cast<const stack_t *>(a0);
+                if ((ss->ss_flags & 2 /* SS_DISABLE */) || ss->ss_sp == nullptr || ss->ss_size < MINSIGSTKSZ) {
+                    if (a1 != 0) {
+                        uc->uc_mcontext.regs[0] = static_cast<unsigned long>(
+                                raw_real_syscall(132, 0, a1, 0, 0, 0, 0x5afe5afe));
+                    } else {
+                        uc->uc_mcontext.regs[0] = 0;
+                    }
+                    return;
+                }
+            }
+            uc->uc_mcontext.regs[0] = static_cast<unsigned long>(
+                    raw_real_syscall(132, a0, a1, 0, 0, 0, 0x5afe5afe));
+            return;
+        }
+        case 134: { // __NR_rt_sigaction
+            if (a1 == 0) {
+                uc->uc_mcontext.regs[0] = static_cast<unsigned long>(
+                        raw_real_syscall(134, a0, 0, a2, a3 ? a3 : 8, 0, 0x5afe5afe));
+                return;
+            }
+            void *handler = *reinterpret_cast<void *const *>(a1);
+            if (a2 != 0) {
+                raw_real_syscall(134, a0, 0, a2, a3 ? a3 : 8, 0, 0x5afe5afe);
+            }
+            ALOGW("FEATURESTIC SECCOMP: Blocked inline rt_sigaction(sig=%ld, handler=%p) from tid=%d",
+                  a0, handler, static_cast<int>(gettid()));
+            uc->uc_mcontext.regs[0] = 0;
+            return;
+        }
+        case 135: { // __NR_rt_sigprocmask
+            if (a1 != 0 && (a0 == 0 /* SIG_BLOCK */ || a0 == 2 /* SIG_SETMASK */)) {
+                uint64_t mask = *reinterpret_cast<const uint64_t *>(a1);
+                constexpr uint64_t DANGEROUS_MASK = (1ULL << (SIGSEGV - 1)) |
+                                                    (1ULL << (SIGBUS - 1))  |
+                                                    (1ULL << (SIGSYS - 1))  |
+                                                    (1ULL << (SIGILL - 1))  |
+                                                    (1ULL << (SIGABRT - 1)) |
+                                                    (1ULL << (SIGQUIT - 1));
+                mask &= ~DANGEROUS_MASK;
+                uc->uc_mcontext.regs[0] = static_cast<unsigned long>(
+                        raw_real_syscall(135, a0, reinterpret_cast<long>(&mask), a2, a3 ? a3 : 8, 0, 0x5afe5afe));
+                return;
+            }
+            uc->uc_mcontext.regs[0] = static_cast<unsigned long>(
+                    raw_real_syscall(135, a0, a1, a2, a3 ? a3 : 8, 0, 0x5afe5afe));
+            return;
+        }
+        default:
+            break;
+    }
+}
+
 static bool installSeccompVfsFilter() {
-    // Disabled: SECCOMP BPF filter intercepting rt_sigaction/tgkill breaks ART implicit suspend checks & Adreno/Mali Vulkan drivers
-    return false;
+    static std::atomic<bool> sInstalled{false};
+    if (sInstalled.exchange(true)) return true;
+
+    gOurSigsysHandler = reinterpret_cast<void *>(seccompSigsysHandler);
+    struct sigaction sa{};
+    sa.sa_sigaction = seccompSigsysHandler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = SA_SIGINFO | SA_NODEFER;
+    if (sigaction(SIGSYS, &sa, nullptr) != 0) {
+        ALOGW("NativeVfsHook: Failed to install SIGSYS handler for seccomp guard");
+        return false;
+    }
+
+    sigset_t unblock{};
+    sigemptyset(&unblock);
+    sigaddset(&unblock, SIGSYS);
+    pthread_sigmask(SIG_UNBLOCK, &unblock, nullptr);
+
+    // Surgical BPF filter: traps ONLY signal-tampering & process-killing syscalls.
+    // Never traps openat, statx, ioctl, mmap, or any VFS/ART/Vulkan syscalls.
+    struct sock_filter filter[] = {
+        /* 00 */ BPF_STMT(BPF_LD | BPF_W | BPF_ABS, 4),
+        /* 01 */ BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 0xc00000b7U, 1, 0),
+        /* 02 */ BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
+
+        /* 03 */ BPF_STMT(BPF_LD | BPF_W | BPF_ABS, 56),
+        /* 04 */ BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 0x5afe5afeU, 0, 1),
+        /* 05 */ BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
+
+        /* 06 */ BPF_STMT(BPF_LD | BPF_W | BPF_ABS, 0),
+        /* 07 */ BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 94,  25, 0),  // __NR_exit_group -> 33
+        /* 08 */ BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 132, 24, 0),  // __NR_sigaltstack -> 33
+        /* 09 */ BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 134, 4,  0),  // __NR_rt_sigaction -> 14
+        /* 10 */ BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 135, 10, 0),  // __NR_rt_sigprocmask -> 21
+        /* 11 */ BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 129, 12, 0),  // __NR_kill -> 24
+        /* 12 */ BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 130, 11, 0),  // __NR_tkill -> 24
+        /* 13 */ BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 131, 12, 20), // __NR_tgkill -> 26 else 34
+
+        /* 14 */ BPF_STMT(BPF_LD | BPF_W | BPF_ABS, 16),           // rt_sigaction sig
+        /* 15 */ BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 11, 17, 0),   // SIGSEGV -> 33
+        /* 16 */ BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 7,  16, 0),   // SIGBUS -> 33
+        /* 17 */ BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 6,  15, 0),   // SIGABRT -> 33
+        /* 18 */ BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 4,  14, 0),   // SIGILL -> 33
+        /* 19 */ BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 3,  13, 0),   // SIGQUIT -> 33
+        /* 20 */ BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 31, 12, 13),  // SIGSYS -> 33 else 34
+
+        /* 21 */ BPF_STMT(BPF_LD | BPF_W | BPF_ABS, 16),           // rt_sigprocmask how
+        /* 22 */ BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 0,  10, 0),   // SIG_BLOCK -> 33
+        /* 23 */ BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 2,  9,  10),  // SIG_SETMASK -> 33 else 34
+
+        /* 24 */ BPF_STMT(BPF_LD | BPF_W | BPF_ABS, 24),           // kill/tkill args[1]
+        /* 25 */ BPF_JUMP(BPF_JMP | BPF_JA, 1, 0, 0),              // skip to 27
+        /* 26 */ BPF_STMT(BPF_LD | BPF_W | BPF_ABS, 32),           // tgkill args[2]
+        /* 27 */ BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 11, 5,  0),   // SIGSEGV -> 33
+        /* 28 */ BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 7,  4,  0),   // SIGBUS -> 33
+        /* 29 */ BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 6,  3,  0),   // SIGABRT -> 33
+        /* 30 */ BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 4,  2,  0),   // SIGILL -> 33
+        /* 31 */ BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 9,  1,  0),   // SIGKILL -> 33
+        /* 32 */ BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 15, 0,  1),   // SIGTERM -> 33 else 34
+        /* 33 */ BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_TRAP),
+        /* 34 */ BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
+    };
+
+    struct sock_fprog prog{};
+    prog.len = static_cast<unsigned short>(sizeof(filter) / sizeof(filter[0]));
+    prog.filter = filter;
+
+    prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
+    if (prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &prog) != 0) {
+        ALOGW("NativeVfsHook: Failed to install surgical SECCOMP signal guard (errno=%d)", errno);
+        return false;
+    }
+    ALOGI("NativeVfsHook: Surgical SECCOMP-BPF signal guard active (zero VFS/ART/Vulkan traps)");
+    return true;
 }
 #else
 static bool installSeccompVfsFilter() {
@@ -1313,6 +1500,7 @@ void init() {
     if (readlinkSym) sOrigReadlink = reinterpret_cast<readlink_fn_t>(readlinkSym);
 
     ALOGI("NativeVfsHook: Libc inline hooks safely disabled: zero tampering on libc.so text segment for Tencent Anti-Cheat");
+    installSeccompVfsFilter();
 #endif
 }
 

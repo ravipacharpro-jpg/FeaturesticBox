@@ -556,6 +556,7 @@ static DIR *safe_opendir(const char *name);
 static FILE *safe_fopen(const char *pathname, const char *mode);
 static int safe_sigaction(int sig, const struct sigaction *act, struct sigaction *oldact);
 static int safe_sigaction64(int sig, const struct sigaction *act, struct sigaction *oldact);
+static void (*safe_signal(int sig, void (*handler)(int)))(int);
 static int safe_pthread_sigmask(int how, const sigset_t *set, sigset_t *oldset);
 static int safe_sigprocmask(int how, const sigset_t *set, sigset_t *oldset);
 static int safe_sigprocmask64(int how, const sigset64_t *set, sigset64_t *oldset);
@@ -634,6 +635,11 @@ static void processElfRelaTable(uintptr_t baseAddr,
             patchGotSlotSafe(gotSlot, reinterpret_cast<void *>(safe_sigaction));
         } else if (strcmp(symName, "sigaction64") == 0) {
             patchGotSlotSafe(gotSlot, reinterpret_cast<void *>(safe_sigaction64));
+        } else if (strcmp(symName, "signal") == 0
+                || strcmp(symName, "bsd_signal") == 0
+                || strcmp(symName, "sysv_signal") == 0
+                || strcmp(symName, "__sysv_signal") == 0) {
+            patchGotSlotSafe(gotSlot, reinterpret_cast<void *>(safe_signal));
         } else if (strcmp(symName, "pthread_sigmask") == 0) {
             patchGotSlotSafe(gotSlot, reinterpret_cast<void *>(safe_pthread_sigmask));
         } else if (strcmp(symName, "sigprocmask") == 0) {
@@ -1530,6 +1536,13 @@ static FILE *safe_fopen(const char *pathname, const char *mode) {
 }
 
 static void passiveNativeCrashDiagnosticsHandler(int sig, siginfo_t *info, void *ucontext) {
+    static __thread int tHandlerDepth = 0;
+    struct DepthGuard {
+        int &d;
+        explicit DepthGuard(int &v) : d(v) { ++d; }
+        ~DepthGuard() { --d; }
+    } depthGuard(tHandlerDepth);
+
     int siCode = (info != nullptr) ? info->si_code : 0;
     uintptr_t fAddr = (info != nullptr) ? reinterpret_cast<uintptr_t>(info->si_addr) : 0;
     uintptr_t pcAddr = 0;
@@ -1541,6 +1554,19 @@ static void passiveNativeCrashDiagnosticsHandler(int sig, siginfo_t *info, void 
 
     char tname[32] = {0};
     prctl(PR_GET_NAME, reinterpret_cast<unsigned long>(tname), 0, 0, 0);
+
+    if (tHandlerDepth > 1) {
+        if (gettid() != getpid() && !isArtInternalDaemonThread(tname)) {
+            terminateCallingThreadCleanly(0);
+            return;
+        }
+#if defined(__aarch64__)
+        if (ucontext != nullptr && (sig == SIGSEGV || sig == SIGBUS || sig == SIGILL)) {
+            reinterpret_cast<ucontext_t *>(ucontext)->uc_mcontext.pc += 4;
+        }
+#endif
+        return;
+    }
 
     // Suppress SIGQUIT (Signal 3) from screenshot gestures or ANR traces
     if (sig == SIGQUIT) {
@@ -1569,7 +1595,10 @@ static void passiveNativeCrashDiagnosticsHandler(int sig, siginfo_t *info, void 
         return;
     }
 
-    // 3. Log crash offset diagnostics for every real fault
+    // 3. Immediate zero-alloc raw diagnostic before xdl/unwind (never lose a crash log!)
+    ALOGW("FEATURESTIC SIGNAL: sig=%d code=%d fault=%p pc=%p tid=%d (%s)",
+          sig, siCode, reinterpret_cast<void *>(fAddr), reinterpret_cast<void *>(pcAddr),
+          static_cast<int>(gettid()), tname[0] ? tname : "?");
     recordNativeCrashOffsetLog(sig, siCode, fAddr, ucontext);
 
     // 4. Special dedicated handling for SIGBUS (Bus error):
@@ -1819,6 +1848,7 @@ extern "C" {
 
 static void installOrReassertPassiveNativeCrashDiagnostics() {
     initRealLibcProcessFunctions();
+    gOurSignalHandler = reinterpret_cast<void *>(passiveNativeCrashDiagnosticsHandler);
     struct sigaction sa{};
     sa.sa_sigaction = passiveNativeCrashDiagnosticsHandler;
     sigemptyset(&sa.sa_mask);
@@ -1893,6 +1923,23 @@ static int safe_sigaction(int sig, const struct sigaction *act, struct sigaction
 
 static int safe_sigaction64(int sig, const struct sigaction *act, struct sigaction *oldact) {
     return safe_sigaction_common(sig, act, oldact, sOrigSigaction64 ? sOrigSigaction64 : sOrigSigaction);
+}
+
+static void (*safe_signal(int sig, void (*handler)(int)))(int) {
+    if (sig == SIGSEGV || sig == SIGBUS || sig == SIGABRT || sig == SIGILL || sig == SIGQUIT || sig == SIGSYS) {
+        ALOGW("FEATURESTIC GUARD: Blocked signal(%d, %p) override from tid=%d",
+              sig, reinterpret_cast<void *>(handler), static_cast<int>(gettid()));
+        return reinterpret_cast<void (*)(int)>(passiveNativeCrashDiagnosticsHandler);
+    }
+    struct sigaction sa{};
+    struct sigaction oldSa{};
+    sa.sa_handler = handler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = SA_RESTART;
+    if (safe_sigaction(sig, &sa, &oldSa) == 0) {
+        return oldSa.sa_handler;
+    }
+    return SIG_ERR;
 }
 
 static int safe_pthread_sigmask(int how, const sigset_t *set, sigset_t *oldset) {
@@ -2530,6 +2577,7 @@ void init(JNIEnv *env, jobject clazz, jint api_level) {
     sCachedHostUid.store(static_cast<int>(getuid()), std::memory_order_relaxed);
     sanitizeInheritedPtyFileDescriptors();
     installOrReassertPassiveNativeCrashDiagnostics();
+    NativeVfsHook::init();
 #if defined(__LP64__)
     startHdmpveWatcherThread();
 #endif
