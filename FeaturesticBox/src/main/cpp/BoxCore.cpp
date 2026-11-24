@@ -507,9 +507,12 @@ static void safe_free(void *ptr);
 static void safe_delete_sized(void *ptr, size_t size);
 static int safe_kill(pid_t pid, int sig);
 static int safe_tgkill(pid_t tgid, pid_t tid, int sig);
+static int safe_raise(int sig);
+static int safe_pthread_kill(pthread_t thread, int sig);
 static void safe_exit(int code);
 static void safe__exit(int code);
 static void safe_abort(void);
+static long safe_syscall(long number, long a1 = 0, long a2 = 0, long a3 = 0, long a4 = 0, long a5 = 0, long a6 = 0);
 static void initRealLibcProcessFunctions();
 
 static void patchGotSlotSafe(void **slot, void *replacement) {
@@ -519,7 +522,7 @@ static void patchGotSlotSafe(void **slot, void *replacement) {
     uintptr_t pageStart = reinterpret_cast<uintptr_t>(slot) & pageMask;
     if (mprotect(reinterpret_cast<void *>(pageStart), pageSize, PROT_READ | PROT_WRITE) == 0) {
         *slot = replacement;
-        mprotect(reinterpret_cast<void *>(pageStart), pageSize, PROT_READ);
+        // Keep PROT_READ | PROT_WRITE so dynamic linker and library can write other data/GOT slots safely
     }
 }
 
@@ -556,10 +559,20 @@ static void processElfRelaTable(uintptr_t baseAddr,
             patchGotSlotSafe(gotSlot, reinterpret_cast<void *>(safe__exit));
         } else if (strcmp(symName, "kill") == 0) {
             patchGotSlotSafe(gotSlot, reinterpret_cast<void *>(safe_kill));
-        } else if (strcmp(symName, "tgkill") == 0) {
+        } else if (strcmp(symName, "tgkill") == 0 || strcmp(symName, "tkill") == 0) {
             patchGotSlotSafe(gotSlot, reinterpret_cast<void *>(safe_tgkill));
+        } else if (strcmp(symName, "raise") == 0) {
+            patchGotSlotSafe(gotSlot, reinterpret_cast<void *>(safe_raise));
+        } else if (strcmp(symName, "pthread_kill") == 0) {
+            patchGotSlotSafe(gotSlot, reinterpret_cast<void *>(safe_pthread_kill));
         } else if (strcmp(symName, "abort") == 0) {
             patchGotSlotSafe(gotSlot, reinterpret_cast<void *>(safe_abort));
+        } else if (strcmp(symName, "syscall") == 0) {
+            patchGotSlotSafe(gotSlot, reinterpret_cast<void *>(safe_syscall));
+        } else if (strcmp(symName, "__system_property_get") == 0) {
+            patchGotSlotSafe(gotSlot, reinterpret_cast<void *>(safe_system_property_get));
+        } else if (strcmp(symName, "__system_property_find") == 0) {
+            patchGotSlotSafe(gotSlot, reinterpret_cast<void *>(safe_system_property_find));
         }
     }
 }
@@ -572,13 +585,49 @@ static int hookTargetLibrariesGotCallback(struct dl_phdr_info *info, size_t /*si
     if (!info || !info->dlpi_name || info->dlpi_name[0] == '\0' || !info->dlpi_phdr) {
         return 0;
     }
-    bool isHdmpve = (strstr(info->dlpi_name, "libhdmpve") != nullptr || strstr(info->dlpi_name, "hdmpve") != nullptr);
-    bool isSecurity = (strstr(info->dlpi_name, "libanort") != nullptr
-            || strstr(info->dlpi_name, "libanogs") != nullptr
-            || strstr(info->dlpi_name, "libCrashKit") != nullptr
-            || strstr(info->dlpi_name, "CrashKit") != nullptr
-            || strstr(info->dlpi_name, "libBugly") != nullptr);
-    if (!isHdmpve && !isSecurity) {
+    const char *name = info->dlpi_name;
+
+    // Never hook Android OS system, framework, or runtime libraries
+    if (strncmp(name, "/system/", 8) == 0
+            || strncmp(name, "/apex/", 6) == 0
+            || strncmp(name, "/vendor/", 8) == 0
+            || strncmp(name, "/product/", 9) == 0
+            || strncmp(name, "/system_ext/", 12) == 0) {
+        return 0;
+    }
+    if (strstr(name, "libart.so") != nullptr
+            || strstr(name, "libc.so") != nullptr
+            || strstr(name, "libdl.so") != nullptr
+            || strstr(name, "libm.so") != nullptr
+            || strstr(name, "liblog.so") != nullptr
+            || strstr(name, "linker") != nullptr
+            || strstr(name, "libFeaturesticCore.so") != nullptr) {
+        return 0;
+    }
+
+    bool isHdmpve = (strstr(name, "libhdmpve") != nullptr || strstr(name, "hdmpve") != nullptr);
+    bool isGameTarget = isHdmpve
+            || (strstr(name, "libanort") != nullptr)
+            || (strstr(name, "libanogs") != nullptr)
+            || (strstr(name, "libCrashKit") != nullptr || strstr(name, "CrashKit") != nullptr)
+            || (strstr(name, "libBugly") != nullptr)
+            || (strstr(name, "libUE4") != nullptr || strstr(name, "UE4") != nullptr)
+            || (strstr(name, "libtersafe") != nullptr || strstr(name, "tersafe") != nullptr)
+            || (strstr(name, "libturingmm") != nullptr)
+            || (strstr(name, "libapollo") != nullptr || strstr(name, "apollo") != nullptr)
+            || (strstr(name, "libgcloud") != nullptr)
+            || (strstr(name, "libIMSDK") != nullptr)
+            || (strstr(name, "libTDataMaster") != nullptr)
+            || (strstr(name, "libpandora") != nullptr)
+            || (strstr(name, "libbgmi") != nullptr)
+            || (strstr(name, "libDARK") != nullptr)
+            || (strstr(name, "FeaturesticPlugin") != nullptr)
+            || (strstr(name, "/data/app/") != nullptr)
+            || (strstr(name, "/data/data/") != nullptr)
+            || (strstr(name, "/data/user/") != nullptr)
+            || (strstr(name, ".apk!") != nullptr);
+
+    if (!isGameTarget) {
         return 0;
     }
 
@@ -660,9 +709,16 @@ static void tryHookTargetLibrariesGot() {
 
 static void *targetLibsGotWatcherThreadMain(void * /*arg*/) {
     prctl(PR_SET_NAME, reinterpret_cast<unsigned long>("target:gotguard"), 0, 0, 0);
-    for (int i = 0; i < 60; ++i) {
+    // Initial fast scan: every 250ms for first 20s
+    for (int i = 0; i < 80; ++i) {
         tryHookTargetLibrariesGot();
-        struct timespec ts{0, 500 * 1000 * 1000L}; // 500ms
+        struct timespec ts{0, 250 * 1000 * 1000L}; // 250ms
+        nanosleep(&ts, nullptr);
+    }
+    // Continuous watchdog: checks every 1000ms indefinitely throughout game lifetime
+    while (true) {
+        tryHookTargetLibrariesGot();
+        struct timespec ts{1, 0}; // 1000ms
         nanosleep(&ts, nullptr);
     }
     return nullptr;
@@ -780,9 +836,11 @@ static __thread int tThreadSegvAccerrCount = 0;
 static int (*sOrigKill)(pid_t, int) = nullptr;
 static int (*sOrigTgkill)(pid_t, pid_t, int) = nullptr;
 static int (*sOrigRaise)(int) = nullptr;
+static int (*sOrigPthreadKill)(pthread_t, int) = nullptr;
 static void (*sOrigAbort)(void) = nullptr;
 static void (*sOrigExit)(int) = nullptr;
 static void (*sOrig_Exit)(int) = nullptr;
+static long (*sOrigSyscall)(long, ...) = nullptr;
 
 static void initRealLibcProcessFunctions() {
     static std::atomic<bool> sInitDone{false};
@@ -793,12 +851,16 @@ static void initRealLibcProcessFunctions() {
     if (tk) sOrigTgkill = reinterpret_cast<int (*)(pid_t, pid_t, int)>(tk);
     void *r = dlsym(RTLD_DEFAULT, "raise");
     if (r) sOrigRaise = reinterpret_cast<int (*)(int)>(r);
+    void *pk = dlsym(RTLD_DEFAULT, "pthread_kill");
+    if (pk) sOrigPthreadKill = reinterpret_cast<int (*)(pthread_t, int)>(pk);
     void *e = dlsym(RTLD_DEFAULT, "exit");
     if (e) sOrigExit = reinterpret_cast<void (*)(int)>(e);
     void *_e = dlsym(RTLD_DEFAULT, "_exit");
     if (_e) sOrig_Exit = reinterpret_cast<void (*)(int)>(_e);
     void *a = dlsym(RTLD_DEFAULT, "abort");
     if (a) sOrigAbort = reinterpret_cast<void (*)(void)>(a);
+    void *sc = dlsym(RTLD_DEFAULT, "syscall");
+    if (sc) sOrigSyscall = reinterpret_cast<long (*)(long, ...)>(sc);
 }
 
 static int safe_kill(pid_t pid, int sig) {
@@ -824,11 +886,48 @@ static int safe_tgkill(pid_t tgid, pid_t tid, int sig) {
 
 static int safe_raise(int sig) {
     initRealLibcProcessFunctions();
-    if (sig == SIGSEGV || sig == SIGBUS || sig == SIGABRT || sig == SIGSYS || sig == SIGILL || sig == SIGTERM) {
+    if (sig == SIGSEGV || sig == SIGBUS || sig == SIGABRT || sig == SIGSYS || sig == SIGILL || sig == SIGTERM || sig == SIGKILL) {
         ALOGW("FEATURESTIC GUARD: Suppressed raise(sig=%d) from tid=%d", sig, static_cast<int>(gettid()));
         return 0;
     }
     return sOrigRaise ? sOrigRaise(sig) : 0;
+}
+
+static int safe_pthread_kill(pthread_t thread, int sig) {
+    initRealLibcProcessFunctions();
+    if (sig == SIGSEGV || sig == SIGBUS || sig == SIGABRT || sig == SIGSYS || sig == SIGILL || sig == SIGTERM || sig == SIGKILL) {
+        ALOGW("FEATURESTIC GUARD: Suppressed pthread_kill(thread=%p, sig=%d) from tid=%d",
+              reinterpret_cast<void *>(thread), sig, static_cast<int>(gettid()));
+        return 0;
+    }
+    return sOrigPthreadKill ? sOrigPthreadKill(thread, sig) : 0;
+}
+
+static long safe_syscall(long number, long a1, long a2, long a3, long a4, long a5, long a6) {
+    initRealLibcProcessFunctions();
+#if defined(__aarch64__)
+    if (number == 94 /* __NR_exit_group */) {
+        safe__exit(static_cast<int>(a1));
+        return 0;
+    }
+    if (number == 93 /* __NR_exit */) {
+        terminateCallingThreadCleanly(static_cast<int>(a1));
+        return 0;
+    }
+    if (number == 129 /* __NR_kill */) {
+        return safe_kill(static_cast<pid_t>(a1), static_cast<int>(a2));
+    }
+    if (number == 131 /* __NR_tgkill */) {
+        return safe_tgkill(static_cast<pid_t>(a1), static_cast<pid_t>(a2), static_cast<int>(a3));
+    }
+    if (number == 130 /* __NR_tkill */) {
+        return safe_tgkill(getpid(), static_cast<pid_t>(a1), static_cast<int>(a2));
+    }
+#endif
+    if (sOrigSyscall) {
+        return sOrigSyscall(number, a1, a2, a3, a4, a5, a6);
+    }
+    return 0;
 }
 
 static void terminateCallingThreadCleanly(int code) {

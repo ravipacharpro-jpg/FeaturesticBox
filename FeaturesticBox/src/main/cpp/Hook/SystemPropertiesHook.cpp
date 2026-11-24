@@ -36,7 +36,7 @@ static bool isQemuOrVirtualProp(const char *name) {
     return false;
 }
 
-static int safe_system_property_get(const char *name, char *value) {
+int safe_system_property_get(const char *name, char *value) {
     if (name == nullptr || name[0] == '\0' || value == nullptr) {
         if (value) value[0] = '\0';
         return 0;
@@ -86,19 +86,33 @@ static int safe_system_property_get(const char *name, char *value) {
         }
     }
 
+    if (sOrigSystemPropertyGet == nullptr) {
+        void *sym = dlsym(RTLD_DEFAULT, "__system_property_get");
+        if (sym != nullptr) {
+            sOrigSystemPropertyGet = reinterpret_cast<int (*)(const char *, char *)>(sym);
+        }
+    }
+
     if (sOrigSystemPropertyGet != nullptr) {
         return sOrigSystemPropertyGet(name, value);
     }
     return 0;
 }
 
-static const prop_info *safe_system_property_find(const char *name) {
+const prop_info *safe_system_property_find(const char *name) {
     if (name == nullptr || name[0] == '\0') {
         return nullptr;
     }
 
     if (isQemuOrVirtualProp(name)) {
         return nullptr;
+    }
+
+    if (sOrigSystemPropertyFind == nullptr) {
+        void *sym = dlsym(RTLD_DEFAULT, "__system_property_find");
+        if (sym != nullptr) {
+            sOrigSystemPropertyFind = reinterpret_cast<const prop_info *(*)(const char *)>(sym);
+        }
     }
 
     if (sOrigSystemPropertyFind != nullptr) {
