@@ -381,7 +381,7 @@ static void safe_free(void *ptr) {
     // In Android Bionic jemalloc (2MB chunks, map_bias=13, map_bits offset 0x78):
     // NOTE: Android 11+ (API >= 30) uses Scudo, which does NOT use jemalloc chunk headers!
     // Running this on Android 11+ causes false-positive suppression of valid frees.
-    if ((VMEnv.api_level > 0 ? VMEnv.api_level : android_get_device_api_level()) < 30) {
+    if (android_get_device_api_level() < 30) {
         uintptr_t chunk = uptr & ~uintptr_t(0x1FFFFF);
         size_t pageind = (uptr - chunk) >> 12;
         if (pageind >= 13 && pageind < 512) {
