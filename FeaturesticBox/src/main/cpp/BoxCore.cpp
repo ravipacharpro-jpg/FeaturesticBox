@@ -222,6 +222,17 @@ static bool isRogueWorkerThread(const char *tname) {
     return false;
 }
 
+static bool isJavaManagedThread(const char *tname) {
+    if (!tname || tname[0] == '\0') return false;
+    return strstr(tname, "pool-") != nullptr
+            || strstr(tname, "AsyncTask") != nullptr
+            || strstr(tname, "Binder:") != nullptr
+            || strstr(tname, "OkHttp") != nullptr
+            || strstr(tname, "Measurement") != nullptr
+            || strstr(tname, "Firebase") != nullptr
+            || strstr(tname, "queued-work") != nullptr;
+}
+
 static bool isArtInternalDaemonThread(const char *tname) {
     if (!tname || tname[0] == '\0') return false;
     return strcasestr(tname, "heaptask") != nullptr
@@ -1579,7 +1590,7 @@ static void passiveNativeCrashDiagnosticsHandler(int sig, siginfo_t *info, void 
     if (info != nullptr && info->si_code <= 0) {
         ALOGW("FEATURESTIC GUARD: Suppressed software kill signal %d (code=%d, sender_pid=%d) on tid=%d (%s)",
               sig, siCode, info->si_pid, static_cast<int>(gettid()), tname[0] ? tname : "?");
-        if (sig == SIGABRT && gettid() != getpid() && !isArtInternalDaemonThread(tname)) {
+        if (sig == SIGABRT && gettid() != getpid() && !isArtInternalDaemonThread(tname) && !isJavaManagedThread(tname)) {
             ALOGW("FEATURESTIC GUARD: Cleanly terminating aborted worker thread tid=%d (%s)",
                   static_cast<int>(gettid()), tname[0] ? tname : "?");
             terminateCallingThreadCleanly(0);
@@ -1831,7 +1842,7 @@ static void passiveNativeCrashDiagnosticsHandler(int sig, siginfo_t *info, void 
     }
 #endif
 
-    if (gettid() != getpid() && !isCriticalGameOrMainThread() && !isGraphicsOrRenderThread(tname) && !isArtInternalDaemonThread(tname)) {
+    if (gettid() != getpid() && !isCriticalGameOrMainThread() && !isGraphicsOrRenderThread(tname) && !isArtInternalDaemonThread(tname) && !isJavaManagedThread(tname)) {
         ALOGW("FEATURESTIC RESCUE: Safely terminating rogue worker thread tid=%d (%s) on signal %d cleanly",
               static_cast<int>(gettid()), tname[0] ? tname : "?", sig);
         terminateCallingThreadCleanly(0);

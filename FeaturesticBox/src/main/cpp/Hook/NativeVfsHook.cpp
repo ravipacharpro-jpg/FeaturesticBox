@@ -1356,64 +1356,47 @@ static bool installSeccompVfsFilter() {
     static std::atomic<bool> sInstalled{false};
     if (sInstalled.exchange(true)) return true;
 
-    gOurSigsysHandler = reinterpret_cast<void *>(seccompSigsysHandler);
-    struct sigaction sa{};
-    sa.sa_sigaction = seccompSigsysHandler;
-    sigemptyset(&sa.sa_mask);
-    sa.sa_flags = SA_SIGINFO | SA_NODEFER;
-    if (sigaction(SIGSYS, &sa, nullptr) != 0) {
-        ALOGW("NativeVfsHook: Failed to install SIGSYS handler for seccomp guard");
-        return false;
-    }
-
-    sigset_t unblock{};
-    sigemptyset(&unblock);
-    sigaddset(&unblock, SIGSYS);
-    pthread_sigmask(SIG_UNBLOCK, &unblock, nullptr);
-
-    // Surgical BPF filter: traps ONLY signal-tampering & process-killing syscalls.
-    // Never traps openat, statx, ioctl, mmap, or any VFS/ART/Vulkan syscalls.
+    // Zero-SIGSYS SECCOMP-BPF signal guard using SECCOMP_RET_ERRNO | 0:
+    // Silently returns 0 (success) in-kernel for inline svc #0 attempts to overwrite
+    // SIGSEGV/SIGBUS/SIGILL/SIGABRT or send fatal kill/tkill/tgkill signals.
+    // Never raises SIGSYS (zero Signal 31 / pthread_create conflict).
+    constexpr uint32_t RET_SILENT_OK = SECCOMP_RET_ERRNO | 0U;
     struct sock_filter filter[] = {
         /* 00 */ BPF_STMT(BPF_LD | BPF_W | BPF_ABS, 4),
         /* 01 */ BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 0xc00000b7U, 1, 0),
         /* 02 */ BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
 
-        /* 03 */ BPF_STMT(BPF_LD | BPF_W | BPF_ABS, 56),
+        /* 03 */ BPF_STMT(BPF_LD | BPF_W | BPF_ABS, 56),           // args[5] magic
         /* 04 */ BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 0x5afe5afeU, 0, 1),
         /* 05 */ BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
 
-        /* 06 */ BPF_STMT(BPF_LD | BPF_W | BPF_ABS, 0),
-        /* 07 */ BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 94,  25, 0),  // __NR_exit_group -> 33
-        /* 08 */ BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 132, 24, 0),  // __NR_sigaltstack -> 33
-        /* 09 */ BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 134, 4,  0),  // __NR_rt_sigaction -> 14
-        /* 10 */ BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 135, 10, 0),  // __NR_rt_sigprocmask -> 21
-        /* 11 */ BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 129, 12, 0),  // __NR_kill -> 24
-        /* 12 */ BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 130, 11, 0),  // __NR_tkill -> 24
-        /* 13 */ BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 131, 12, 20), // __NR_tgkill -> 26 else 34
+        /* 06 */ BPF_STMT(BPF_LD | BPF_W | BPF_ABS, 0),            // nr
+        /* 07 */ BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 134, 3,  0),  // __NR_rt_sigaction -> 11
+        /* 08 */ BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 129, 11, 0),  // __NR_kill -> 20
+        /* 09 */ BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 130, 10, 0),  // __NR_tkill -> 20
+        /* 10 */ BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 131, 11, 19), // __NR_tgkill -> 22 else 30
 
-        /* 14 */ BPF_STMT(BPF_LD | BPF_W | BPF_ABS, 16),           // rt_sigaction sig
-        /* 15 */ BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 11, 17, 0),   // SIGSEGV -> 33
-        /* 16 */ BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 7,  16, 0),   // SIGBUS -> 33
-        /* 17 */ BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 6,  15, 0),   // SIGABRT -> 33
-        /* 18 */ BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 4,  14, 0),   // SIGILL -> 33
-        /* 19 */ BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 3,  13, 0),   // SIGQUIT -> 33
-        /* 20 */ BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 31, 12, 13),  // SIGSYS -> 33 else 34
+        /* 11 */ BPF_STMT(BPF_LD | BPF_W | BPF_ABS, 24),           // rt_sigaction act lo
+        /* 12 */ BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 0,   0,  2),  // if lo==0 check hi else 15
+        /* 13 */ BPF_STMT(BPF_LD | BPF_W | BPF_ABS, 28),           // rt_sigaction act hi
+        /* 14 */ BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 0,   15, 0),  // act==NULL -> 30 ALLOW
+        /* 15 */ BPF_STMT(BPF_LD | BPF_W | BPF_ABS, 16),           // rt_sigaction sig
+        /* 16 */ BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 11,  12, 0),  // SIGSEGV -> 29
+        /* 17 */ BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 7,   11, 0),  // SIGBUS -> 29
+        /* 18 */ BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 6,   10, 0),  // SIGABRT -> 29
+        /* 19 */ BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 4,   9,  10), // SIGILL -> 29 else 30
 
-        /* 21 */ BPF_STMT(BPF_LD | BPF_W | BPF_ABS, 16),           // rt_sigprocmask how
-        /* 22 */ BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 0,  10, 0),   // SIG_BLOCK -> 33
-        /* 23 */ BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 2,  9,  10),  // SIG_SETMASK -> 33 else 34
-
-        /* 24 */ BPF_STMT(BPF_LD | BPF_W | BPF_ABS, 24),           // kill/tkill args[1]
-        /* 25 */ BPF_JUMP(BPF_JMP | BPF_JA, 1, 0, 0),              // skip to 27
-        /* 26 */ BPF_STMT(BPF_LD | BPF_W | BPF_ABS, 32),           // tgkill args[2]
-        /* 27 */ BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 11, 5,  0),   // SIGSEGV -> 33
-        /* 28 */ BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 7,  4,  0),   // SIGBUS -> 33
-        /* 29 */ BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 6,  3,  0),   // SIGABRT -> 33
-        /* 30 */ BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 4,  2,  0),   // SIGILL -> 33
-        /* 31 */ BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 9,  1,  0),   // SIGKILL -> 33
-        /* 32 */ BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 15, 0,  1),   // SIGTERM -> 33 else 34
-        /* 33 */ BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_TRAP),
-        /* 34 */ BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
+        /* 20 */ BPF_STMT(BPF_LD | BPF_W | BPF_ABS, 24),           // kill/tkill args[1]
+        /* 21 */ BPF_JUMP(BPF_JMP | BPF_JA, 1, 0, 0),              // -> 23
+        /* 22 */ BPF_STMT(BPF_LD | BPF_W | BPF_ABS, 32),           // tgkill args[2]
+        /* 23 */ BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 11,  5,  0),  // SIGSEGV -> 29
+        /* 24 */ BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 7,   4,  0),  // SIGBUS -> 29
+        /* 25 */ BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 6,   3,  0),  // SIGABRT -> 29
+        /* 26 */ BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 4,   2,  0),  // SIGILL -> 29
+        /* 27 */ BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 9,   1,  0),  // SIGKILL -> 29
+        /* 28 */ BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 15,  0,  1),  // SIGTERM -> 29 else 30
+        /* 29 */ BPF_STMT(BPF_RET | BPF_K, RET_SILENT_OK),
+        /* 30 */ BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
     };
 
     struct sock_fprog prog{};
@@ -1422,10 +1405,10 @@ static bool installSeccompVfsFilter() {
 
     prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
     if (prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &prog) != 0) {
-        ALOGW("NativeVfsHook: Failed to install surgical SECCOMP signal guard (errno=%d)", errno);
+        ALOGW("NativeVfsHook: Failed to install zero-SIGSYS SECCOMP guard (errno=%d)", errno);
         return false;
     }
-    ALOGI("NativeVfsHook: Surgical SECCOMP-BPF signal guard active (zero VFS/ART/Vulkan traps)");
+    ALOGI("NativeVfsHook: Zero-SIGSYS SECCOMP-BPF signal guard active!");
     return true;
 }
 #else
@@ -1500,7 +1483,7 @@ void init() {
     if (readlinkSym) sOrigReadlink = reinterpret_cast<readlink_fn_t>(readlinkSym);
 
     ALOGI("NativeVfsHook: Libc inline hooks safely disabled: zero tampering on libc.so text segment for Tencent Anti-Cheat");
-    // Keep seccomp disabled: Android Bionic pthread_create masks SIGSYS and causes immediate Signal 31
+    installSeccompVfsFilter();
 #endif
 }
 
