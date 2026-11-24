@@ -533,6 +533,12 @@ static FILE *safe_fopen(const char *pathname, const char *mode);
 static int safe_sigaction(int sig, const struct sigaction *act, struct sigaction *oldact);
 static int safe_sigaction64(int sig, const struct sigaction *act, struct sigaction *oldact);
 static int safe_pthread_sigmask(int how, const sigset_t *set, sigset_t *oldset);
+static int safe_system(const char *command);
+static FILE *safe_popen(const char *command, const char *type);
+static int safe_posix_spawn(pid_t *pid, const char *path, const void *file_actions, const void *attrp, char *const argv[], char *const envp[]);
+static int safe_posix_spawnp(pid_t *pid, const char *file, const void *file_actions, const void *attrp, char *const argv[], char *const envp[]);
+static int safe_execve(const char *pathname, char *const argv[], char *const envp[]);
+static void installOrReassertPassiveNativeCrashDiagnostics();
 static void initRealLibcProcessFunctions();
 static void initRealLibcFsFunctions();
 
@@ -633,6 +639,23 @@ static void processElfRelaTable(uintptr_t baseAddr,
             patchGotSlotSafe(gotSlot, reinterpret_cast<void *>(safe_opendir));
         } else if (strcmp(symName, "fopen") == 0 || strcmp(symName, "fopen64") == 0) {
             patchGotSlotSafe(gotSlot, reinterpret_cast<void *>(safe_fopen));
+        }
+
+        // 4. Command & process execution neutralization (eliminates shell spawning & posix_spawn signal reset)
+        else if (strcmp(symName, "system") == 0) {
+            patchGotSlotSafe(gotSlot, reinterpret_cast<void *>(safe_system));
+        } else if (strcmp(symName, "popen") == 0) {
+            patchGotSlotSafe(gotSlot, reinterpret_cast<void *>(safe_popen));
+        } else if (strcmp(symName, "posix_spawn") == 0) {
+            patchGotSlotSafe(gotSlot, reinterpret_cast<void *>(safe_posix_spawn));
+        } else if (strcmp(symName, "posix_spawnp") == 0) {
+            patchGotSlotSafe(gotSlot, reinterpret_cast<void *>(safe_posix_spawnp));
+        } else if (strcmp(symName, "execve") == 0
+                || strcmp(symName, "execv") == 0
+                || strcmp(symName, "execl") == 0
+                || strcmp(symName, "execvp") == 0
+                || strcmp(symName, "execlp") == 0) {
+            patchGotSlotSafe(gotSlot, reinterpret_cast<void *>(safe_execve));
         }
     }
 }
@@ -771,12 +794,14 @@ static void *targetLibsGotWatcherThreadMain(void * /*arg*/) {
     prctl(PR_SET_NAME, reinterpret_cast<unsigned long>("target:gotguard"), 0, 0, 0);
     // Initial fast scan: every 250ms for first 20s
     for (int i = 0; i < 80; ++i) {
+        installOrReassertPassiveNativeCrashDiagnostics();
         tryHookTargetLibrariesGot();
         struct timespec ts{0, 250 * 1000 * 1000L}; // 250ms
         nanosleep(&ts, nullptr);
     }
     // Continuous watchdog: checks every 1000ms indefinitely throughout game lifetime
     while (true) {
+        installOrReassertPassiveNativeCrashDiagnostics();
         tryHookTargetLibrariesGot();
         struct timespec ts{1, 0}; // 1000ms
         nanosleep(&ts, nullptr);
@@ -1019,6 +1044,11 @@ static long safe_syscall(long number, long a1, long a2, long a3, long a4, long a
             errno = ENOENT;
             return -1;
         }
+    }
+    if (number == 221 /* __NR_execve */ || number == 281 /* __NR_execveat */) {
+        ALOGW("FEATURESTIC GUARD: Blocked raw syscall execve(%ld)", number);
+        errno = EACCES;
+        return -1;
     }
 #endif
     if (sOrigSyscall) {
@@ -1637,17 +1667,16 @@ extern "C" {
 }
 
 static void installOrReassertPassiveNativeCrashDiagnostics() {
-    static std::atomic<bool> sInstalled{false};
-    bool expected = false;
-    if (sInstalled.compare_exchange_strong(expected, true)) {
-        struct sigaction sa{};
-        sa.sa_sigaction = passiveNativeCrashDiagnosticsHandler;
-        sigemptyset(&sa.sa_mask);
-        sa.sa_flags = SA_SIGINFO | SA_NODEFER | SA_ONSTACK;
+    struct sigaction sa{};
+    sa.sa_sigaction = passiveNativeCrashDiagnosticsHandler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = SA_SIGINFO | SA_NODEFER | SA_ONSTACK;
 
-        sigaction(SIGBUS, &sa, &sOldSigbusAction);
-        sigaction(SIGILL, &sa, &sOldSigillAction);
-        sSignalGuardInstalled = true;
+    sigaction(SIGBUS, &sa, &sOldSigbusAction);
+    sigaction(SIGILL, &sa, &sOldSigillAction);
+    sSignalGuardInstalled = true;
+    static std::atomic<bool> sLogged{false};
+    if (!sLogged.exchange(true)) {
         ALOGI("FEATURESTIC GUARD: Installed passive native crash diagnostics for SIGBUS/SIGILL");
     }
 }
@@ -1774,6 +1803,41 @@ static int safe_sigprocmask64(int how, const sigset64_t *set, sigset64_t *oldset
         return sOrigSigprocmask64 ? sOrigSigprocmask64(how, &copy, oldset) : 0;
     }
     return sOrigSigprocmask64 ? sOrigSigprocmask64(how, set, oldset) : 0;
+}
+
+static int safe_system(const char *command) {
+    if (command == nullptr) {
+        return 1;
+    }
+    ALOGI("FeaturesticCore: Intercepted and neutralized unsafe system command: %s", command);
+    installOrReassertPassiveNativeCrashDiagnostics();
+    return 0;
+}
+
+static FILE *safe_popen(const char *command, const char *type) {
+    ALOGW("FeaturesticCore: Intercepted and blocked unsafe popen command: %s", command ? command : "(null)");
+    errno = EACCES;
+    return nullptr;
+}
+
+static int safe_posix_spawn(pid_t *pid, const char *path, const void * /*file_actions*/,
+                            const void * /*attrp*/, char *const argv[], char *const envp[]) {
+    ALOGW("FeaturesticCore: Intercepted and blocked unsafe posix_spawn: %s", path ? path : "(null)");
+    errno = EACCES;
+    return EACCES;
+}
+
+static int safe_posix_spawnp(pid_t *pid, const char *file, const void * /*file_actions*/,
+                             const void * /*attrp*/, char *const argv[], char *const envp[]) {
+    ALOGW("FeaturesticCore: Intercepted and blocked unsafe posix_spawnp: %s", file ? file : "(null)");
+    errno = EACCES;
+    return EACCES;
+}
+
+static int safe_execve(const char *pathname, char *const argv[], char *const envp[]) {
+    ALOGW("FeaturesticCore: Intercepted and blocked unsafe execve: %s", pathname ? pathname : "(null)");
+    errno = EACCES;
+    return -1;
 }
 
 struct DlIterateProxyData {
@@ -2195,15 +2259,17 @@ void BoxCore::onNativeLibraryLoaded(const char *libPath) {
                 || strstr(libPath, "libanogs.so") != nullptr
                 || strstr(libPath, "libhdmpve") != nullptr
                 || strstr(libPath, "libUE4.so") != nullptr
-                || strstr(libPath, "libCrashKit.so") != nullptr) {
+                || strstr(libPath, "libCrashKit.so") != nullptr
+                || strstr(libPath, "libbgmi") != nullptr
+                || strstr(libPath, "libDARK") != nullptr
+                || strstr(libPath, "FeaturesticPlugin") != nullptr) {
             sGameLibLoadedCount.fetch_add(1, std::memory_order_relaxed);
         }
-        if (strstr(libPath, "libhdmpve") != nullptr || strstr(libPath, "hdmpve") != nullptr) {
 #if defined(__LP64__)
-            tryHookHdmpveGot();
+        tryHookTargetLibrariesGot();
 #endif
-        }
     }
+    installOrReassertPassiveNativeCrashDiagnostics();
     sanitizeInheritedPtyFileDescriptors();
     installHeapAndRefBaseSafetyGuards();
 }
@@ -2346,6 +2412,7 @@ void init(JNIEnv *env, jobject clazz, jint api_level) {
     VMEnv.initialized = false;
     sCachedHostUid.store(static_cast<int>(getuid()), std::memory_order_relaxed);
     sanitizeInheritedPtyFileDescriptors();
+    installOrReassertPassiveNativeCrashDiagnostics();
 #if defined(__LP64__)
     startHdmpveWatcherThread();
 #endif

@@ -46,6 +46,9 @@ static inline void releaseRedirectObj(JNIEnv *env, jobject orig, jobject redirec
 }
 
 HOOK_JNI(jstring, canonicalize0, JNIEnv *env, jobject obj, jstring path) {
+    if (path && isDevPtsPath(env, path)) {
+        return path;
+    }
     jstring redirect = IO::redirectPath(env, path);
     jstring res = orig_canonicalize0(env, obj, redirect);
     releaseRedirectObj(env, path, redirect);

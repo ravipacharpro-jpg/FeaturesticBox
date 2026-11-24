@@ -17,6 +17,32 @@ static bool isDevPtsPath(JNIEnv *env, jstring pathStr) {
     return blocked;
 }
 
+static bool isDevPtsFd(JNIEnv *env, jobject javaFd) {
+    if (!env || !javaFd) return false;
+    jclass fdClass = env->GetObjectClass(javaFd);
+    if (!fdClass) return false;
+    jfieldID descField = env->GetFieldID(fdClass, "descriptor", "I");
+    if (!descField) {
+        env->ExceptionClear();
+        env->DeleteLocalRef(fdClass);
+        return false;
+    }
+    int fd = env->GetIntField(javaFd, descField);
+    env->DeleteLocalRef(fdClass);
+    if (fd < 0) return false;
+    char linkPath[64];
+    char target[128];
+    snprintf(linkPath, sizeof(linkPath), "/proc/self/fd/%d", fd);
+    ssize_t len = readlink(linkPath, target, sizeof(target) - 1);
+    if (len > 0) {
+        target[len] = '\0';
+        if (strncmp(target, "/dev/pts", 8) == 0 || strncmp(target, "/dev/ptmx", 9) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
 static void throwErrnoException(JNIEnv *env, const char *fnName, int err) {
     if (!env) return;
     jclass clazz = env->FindClass("android/system/ErrnoException");
@@ -149,6 +175,10 @@ HOOK_JNI(jobject, open, JNIEnv *env, jobject obj, jstring path, jint flags, jint
 }
 
 HOOK_JNI(jstring, readlink, JNIEnv *env, jobject obj, jstring path) {
+    if (path && isDevPtsPath(env, path)) {
+        throwErrnoException(env, "readlink", 2 /* ENOENT */);
+        return nullptr;
+    }
     jstring redirect = path ? IO::redirectPath(env, path) : nullptr;
     jstring res = orig_readlink(env, obj, redirect);
     releaseRedirectRef(env, path, redirect);
@@ -156,10 +186,22 @@ HOOK_JNI(jstring, readlink, JNIEnv *env, jobject obj, jstring path) {
 }
 
 HOOK_JNI(jstring, realpath, JNIEnv *env, jobject obj, jstring path) {
+    if (path && isDevPtsPath(env, path)) {
+        throwErrnoException(env, "realpath", 2 /* ENOENT */);
+        return nullptr;
+    }
     jstring redirect = path ? IO::redirectPath(env, path) : nullptr;
     jstring res = orig_realpath(env, obj, redirect);
     releaseRedirectRef(env, path, redirect);
     return res;
+}
+
+HOOK_JNI(jobject, fstat, JNIEnv *env, jobject obj, jobject javaFd) {
+    if (javaFd && isDevPtsFd(env, javaFd)) {
+        throwErrnoException(env, "fstat", 2 /* ENOENT */);
+        return nullptr;
+    }
+    return orig_fstat(env, obj, javaFd);
 }
 
 HOOK_JNI(void, remove, JNIEnv *env, jobject obj, jstring path) {
@@ -262,6 +304,7 @@ void LinuxHook::init(JNIEnv *env) {
     JniHook::HookJniFun(env, "libcore/io/Linux", "removexattr", "(Ljava/lang/String;Ljava/lang/String;)V",(void *) new_removexattr, (void **) (&orig_removexattr), false);
     JniHook::HookJniFun(env, "libcore/io/Linux", "rename", "(Ljava/lang/String;Ljava/lang/String;)V",(void *) new_rename, (void **) (&orig_rename), false);
     JniHook::HookJniFun(env, "libcore/io/Linux", "stat", "(Ljava/lang/String;)Landroid/system/StructStat;",(void *) new_stat, (void **) (&orig_stat), false);
+    JniHook::HookJniFun(env, "libcore/io/Linux", "fstat", "(Ljava/io/FileDescriptor;)Landroid/system/StructStat;",(void *) new_fstat, (void **) (&orig_fstat), false);
     JniHook::HookJniFun(env, "libcore/io/Linux", "fstatat", "(Ljava/io/FileDescriptor;Ljava/lang/String;I)Landroid/system/StructStat;",(void *) new_fstatat, (void **) (&orig_fstatat), false);
     JniHook::HookJniFun(env, "libcore/io/Linux", "openat", "(Ljava/io/FileDescriptor;Ljava/lang/String;II)Ljava/io/FileDescriptor;",(void *) new_openat, (void **) (&orig_openat), false);
     JniHook::HookJniFun(env, "libcore/io/Linux", "statvfs", "(Ljava/lang/String;)Landroid/system/StructStatVfs;",(void *) new_statvfs, (void **) (&orig_statvfs), false);
