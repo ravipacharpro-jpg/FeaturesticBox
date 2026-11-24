@@ -518,7 +518,12 @@ static void terminateCallingThreadCleanly(int code);
 static long safe_syscall(long number, long a1 = 0, long a2 = 0, long a3 = 0, long a4 = 0, long a5 = 0, long a6 = 0);
 static int safe_stat(const char *pathname, struct stat *statbuf);
 static int safe_lstat(const char *pathname, struct stat *statbuf);
+static int safe_fstat(int fd, struct stat *statbuf);
 static int safe_fstatat(int dirfd, const char *pathname, struct stat *statbuf, int flags);
+static int safe_access(const char *pathname, int mode);
+static int safe_faccessat(int dirfd, const char *pathname, int mode, int flags);
+static ssize_t safe_readlink(const char *pathname, char *buf, size_t bufsiz);
+static ssize_t safe_readlinkat(int dirfd, const char *pathname, char *buf, size_t bufsiz);
 static int safe_open(const char *pathname, int flags, ...);
 static int safe_openat(int dirfd, const char *pathname, int flags, ...);
 static int safe___open_2(const char *pathname, int flags);
@@ -604,8 +609,18 @@ static void processElfRelaTable(uintptr_t baseAddr,
             patchGotSlotSafe(gotSlot, reinterpret_cast<void *>(safe_stat));
         } else if (strcmp(symName, "lstat") == 0 || strcmp(symName, "lstat64") == 0) {
             patchGotSlotSafe(gotSlot, reinterpret_cast<void *>(safe_lstat));
+        } else if (strcmp(symName, "fstat") == 0 || strcmp(symName, "fstat64") == 0) {
+            patchGotSlotSafe(gotSlot, reinterpret_cast<void *>(safe_fstat));
         } else if (strcmp(symName, "fstatat") == 0 || strcmp(symName, "fstatat64") == 0 || strcmp(symName, "newfstatat") == 0) {
             patchGotSlotSafe(gotSlot, reinterpret_cast<void *>(safe_fstatat));
+        } else if (strcmp(symName, "access") == 0) {
+            patchGotSlotSafe(gotSlot, reinterpret_cast<void *>(safe_access));
+        } else if (strcmp(symName, "faccessat") == 0) {
+            patchGotSlotSafe(gotSlot, reinterpret_cast<void *>(safe_faccessat));
+        } else if (strcmp(symName, "readlink") == 0) {
+            patchGotSlotSafe(gotSlot, reinterpret_cast<void *>(safe_readlink));
+        } else if (strcmp(symName, "readlinkat") == 0) {
+            patchGotSlotSafe(gotSlot, reinterpret_cast<void *>(safe_readlinkat));
         } else if (strcmp(symName, "open") == 0 || strcmp(symName, "open64") == 0) {
             patchGotSlotSafe(gotSlot, reinterpret_cast<void *>(safe_open));
         } else if (strcmp(symName, "openat") == 0 || strcmp(symName, "openat64") == 0) {
@@ -948,6 +963,9 @@ static int safe_pthread_kill(pthread_t thread, int sig) {
     return sOrigPthreadKill ? sOrigPthreadKill(thread, sig) : 0;
 }
 
+static inline bool isTerminalOrPtsPath(const char *path);
+static inline bool isPtsDirFd(int dirfd);
+
 static long safe_syscall(long number, long a1, long a2, long a3, long a4, long a5, long a6) {
     initRealLibcProcessFunctions();
 #if defined(__aarch64__)
@@ -967,6 +985,40 @@ static long safe_syscall(long number, long a1, long a2, long a3, long a4, long a
     }
     if (number == 130 /* __NR_tkill */) {
         return safe_tgkill(getpid(), static_cast<pid_t>(a1), static_cast<int>(a2));
+    }
+    if (number == 79 /* __NR_newfstatat */) {
+        const char *p = reinterpret_cast<const char *>(a2);
+        if (isTerminalOrPtsPath(p) || (a1 != -100 /* AT_FDCWD */ && isPtsDirFd(static_cast<int>(a1)))) {
+            errno = ENOENT;
+            return -1;
+        }
+    }
+    if (number == 56 /* __NR_openat */) {
+        const char *p = reinterpret_cast<const char *>(a2);
+        if (isTerminalOrPtsPath(p) || (a1 != -100 /* AT_FDCWD */ && isPtsDirFd(static_cast<int>(a1)))) {
+            errno = ENOENT;
+            return -1;
+        }
+    }
+    if (number == 48 /* __NR_faccessat */) {
+        const char *p = reinterpret_cast<const char *>(a2);
+        if (isTerminalOrPtsPath(p) || (a1 != -100 /* AT_FDCWD */ && isPtsDirFd(static_cast<int>(a1)))) {
+            errno = ENOENT;
+            return -1;
+        }
+    }
+    if (number == 78 /* __NR_readlinkat */) {
+        const char *p = reinterpret_cast<const char *>(a2);
+        if (isTerminalOrPtsPath(p) || (a1 != -100 /* AT_FDCWD */ && isPtsDirFd(static_cast<int>(a1)))) {
+            errno = ENOENT;
+            return -1;
+        }
+    }
+    if (number == 80 /* __NR_fstat */) {
+        if (isPtsDirFd(static_cast<int>(a1))) {
+            errno = ENOENT;
+            return -1;
+        }
     }
 #endif
     if (sOrigSyscall) {
@@ -1068,6 +1120,11 @@ static int (*sOrigOpen)(const char *, int, mode_t) = nullptr;
 static int (*sOrigStat)(const char *, struct stat *) = nullptr;
 static int (*sOrigLstat)(const char *, struct stat *) = nullptr;
 static int (*sOrigFstatat)(int, const char *, struct stat *, int) = nullptr;
+static int (*sOrigFstat)(int, struct stat *) = nullptr;
+static int (*sOrigAccess)(const char *, int) = nullptr;
+static int (*sOrigFaccessat)(int, const char *, int, int) = nullptr;
+static ssize_t (*sOrigReadlink)(const char *, char *, size_t) = nullptr;
+static ssize_t (*sOrigReadlinkat)(int, const char *, char *, size_t) = nullptr;
 static DIR *(*sOrigOpendir)(const char *) = nullptr;
 static FILE *(*sOrigFopen)(const char *, const char *) = nullptr;
 
@@ -1082,12 +1139,23 @@ static void initRealLibcFsFunctions() {
     if (!fst) fst = dlsym(RTLD_DEFAULT, "fstatat64");
     if (!fst) fst = dlsym(RTLD_DEFAULT, "newfstatat");
     if (fst) sOrigFstatat = reinterpret_cast<int (*)(int, const char *, struct stat *, int)>(fst);
+    void *fst1 = dlsym(RTLD_DEFAULT, "fstat");
+    if (!fst1) fst1 = dlsym(RTLD_DEFAULT, "fstat64");
+    if (fst1) sOrigFstat = reinterpret_cast<int (*)(int, struct stat *)>(fst1);
     void *st = dlsym(RTLD_DEFAULT, "stat");
     if (!st) st = dlsym(RTLD_DEFAULT, "stat64");
     if (st) sOrigStat = reinterpret_cast<int (*)(const char *, struct stat *)>(st);
     void *lst = dlsym(RTLD_DEFAULT, "lstat");
     if (!lst) lst = dlsym(RTLD_DEFAULT, "lstat64");
     if (lst) sOrigLstat = reinterpret_cast<int (*)(const char *, struct stat *)>(lst);
+    void *acc = dlsym(RTLD_DEFAULT, "access");
+    if (acc) sOrigAccess = reinterpret_cast<int (*)(const char *, int)>(acc);
+    void *facc = dlsym(RTLD_DEFAULT, "faccessat");
+    if (facc) sOrigFaccessat = reinterpret_cast<int (*)(int, const char *, int, int)>(facc);
+    void *rl = dlsym(RTLD_DEFAULT, "readlink");
+    if (rl) sOrigReadlink = reinterpret_cast<ssize_t (*)(const char *, char *, size_t)>(rl);
+    void *rla = dlsym(RTLD_DEFAULT, "readlinkat");
+    if (rla) sOrigReadlinkat = reinterpret_cast<ssize_t (*)(int, const char *, char *, size_t)>(rla);
     void *od = dlsym(RTLD_DEFAULT, "opendir");
     if (od) sOrigOpendir = reinterpret_cast<DIR *(*)(const char *)>(od);
     void *fo = dlsym(RTLD_DEFAULT, "fopen");
@@ -1099,7 +1167,10 @@ static inline bool isTerminalOrPtsPath(const char *path) {
     if (strncmp(path, "/dev/pts", 8) == 0
             || strcmp(path, "/dev/ptmx") == 0
             || strncmp(path, "/dev/tty", 8) == 0
-            || strstr(path, "devpts") != nullptr) {
+            || strstr(path, "devpts") != nullptr
+            || strstr(path, "dev/pts") != nullptr
+            || strstr(path, "/pts/") != nullptr
+            || strncmp(path, "pts/", 4) == 0) {
         return true;
     }
     return false;
@@ -1159,6 +1230,70 @@ static int safe_fstatat(int dirfd, const char *pathname, struct stat *statbuf, i
     initRealLibcFsFunctions();
     if (sOrigFstatat) {
         return sOrigFstatat(dirfd, redirected ? redirected : pathname, statbuf, flags);
+    }
+    return -1;
+}
+
+static int safe_fstat(int fd, struct stat *statbuf) {
+    if (isPtsDirFd(fd)) {
+        errno = ENOENT;
+        return -1;
+    }
+    initRealLibcFsFunctions();
+    if (sOrigFstat) {
+        return sOrigFstat(fd, statbuf);
+    }
+    return -1;
+}
+
+static int safe_access(const char *pathname, int mode) {
+    if (isTerminalOrPtsPath(pathname)) {
+        errno = ENOENT;
+        return -1;
+    }
+    const char *redirected = IO::redirectPath(pathname);
+    initRealLibcFsFunctions();
+    if (sOrigAccess) {
+        return sOrigAccess(redirected ? redirected : pathname, mode);
+    }
+    return -1;
+}
+
+static int safe_faccessat(int dirfd, const char *pathname, int mode, int flags) {
+    if (isTerminalOrPtsPath(pathname) || (dirfd != AT_FDCWD && isPtsDirFd(dirfd))) {
+        errno = ENOENT;
+        return -1;
+    }
+    const char *redirected = IO::redirectPath(pathname);
+    initRealLibcFsFunctions();
+    if (sOrigFaccessat) {
+        return sOrigFaccessat(dirfd, redirected ? redirected : pathname, mode, flags);
+    }
+    return -1;
+}
+
+static ssize_t safe_readlink(const char *pathname, char *buf, size_t bufsiz) {
+    if (isTerminalOrPtsPath(pathname)) {
+        errno = ENOENT;
+        return -1;
+    }
+    const char *redirected = IO::redirectPath(pathname);
+    initRealLibcFsFunctions();
+    if (sOrigReadlink) {
+        return sOrigReadlink(redirected ? redirected : pathname, buf, bufsiz);
+    }
+    return -1;
+}
+
+static ssize_t safe_readlinkat(int dirfd, const char *pathname, char *buf, size_t bufsiz) {
+    if (isTerminalOrPtsPath(pathname) || (dirfd != AT_FDCWD && isPtsDirFd(dirfd))) {
+        errno = ENOENT;
+        return -1;
+    }
+    const char *redirected = IO::redirectPath(pathname);
+    initRealLibcFsFunctions();
+    if (sOrigReadlinkat) {
+        return sOrigReadlinkat(dirfd, redirected ? redirected : pathname, buf, bufsiz);
     }
     return -1;
 }
@@ -1252,10 +1387,51 @@ static void passiveNativeCrashDiagnosticsHandler(int sig, siginfo_t *info, void 
         return;
     }
 
-    // 3. Worker Thread Isolation for SIGBUS, SIGSEGV, SIGILL:
-    // If a non-critical worker/anti-cheat thread faults (e.g. Thread-84 triggering an unaligned trap),
-    // terminate ONLY this worker thread cleanly using kernel __NR_exit so the game continues running!
-    if (sig == SIGBUS || sig == SIGSEGV || sig == SIGILL) {
+    // 3. Log crash offset diagnostics for every real fault
+    recordNativeCrashOffsetLog(sig, siCode, fAddr, ucontext);
+
+    // 4. Special dedicated handling for SIGBUS (Bus error):
+    // Anti-cheat intentionally dereferences misaligned or unmapped memory to raise SIGBUS.
+    // Never allow SIGBUS to terminate the process!
+    if (sig == SIGBUS) {
+        if (!isCriticalGameOrMainThread() && !isArtInternalDaemonThread(tname) && gettid() != getpid()) {
+            ALOGW("FEATURESTIC RESCUE: Safely terminating rogue worker thread tid=%d (%s) on signal %d cleanly",
+                  static_cast<int>(gettid()), tname[0] ? tname : "?", sig);
+            terminateCallingThreadCleanly(0);
+            return;
+        }
+#if defined(__aarch64__)
+        if (ucontext != nullptr) {
+            auto *uc = reinterpret_cast<ucontext_t *>(ucontext);
+            uintptr_t currentPc = static_cast<uintptr_t>(uc->uc_mcontext.pc);
+            ALOGW("FEATURESTIC RESCUE: Rescuing SIGBUS on critical/main thread PC %p (faultAddr=%p) tid=%d (%s)",
+                  reinterpret_cast<void *>(currentPc), reinterpret_cast<void *>(fAddr),
+                  static_cast<int>(gettid()), tname[0] ? tname : "?");
+            if (currentPc >= 0x10000 && isPageMappedSafe(currentPc)) {
+                uint32_t instr = *reinterpret_cast<const uint32_t *>(currentPc);
+                int rt = instr & 0x1F;
+                if (rt < 31) {
+                    uc->uc_mcontext.regs[rt] = sLowMemoryCushionBase;
+                }
+                uc->uc_mcontext.pc += 4;
+                return;
+            }
+            uintptr_t lr = static_cast<uintptr_t>(uc->uc_mcontext.regs[30]);
+            if (lr >= 0x10000 && isPageMappedSafe(lr)) {
+                uc->uc_mcontext.pc = lr;
+                uc->uc_mcontext.regs[0] = 0;
+                return;
+            }
+            uc->uc_mcontext.pc += 4;
+            return;
+        }
+#endif
+        return;
+    }
+
+    // 5. Worker Thread Isolation for SIGSEGV, SIGILL:
+    // If a non-critical worker/anti-cheat thread faults, terminate ONLY this thread cleanly using kernel __NR_exit
+    if (sig == SIGSEGV || sig == SIGILL) {
         if (!isCriticalGameOrMainThread() && !isArtInternalDaemonThread(tname) && gettid() != getpid()) {
             ALOGW("FEATURESTIC RESCUE: Safely terminating rogue worker thread tid=%d (%s) on signal %d cleanly",
                   static_cast<int>(gettid()), tname[0] ? tname : "?", sig);
@@ -1471,6 +1647,7 @@ static void installOrReassertPassiveNativeCrashDiagnostics() {
 
         sigaction(SIGBUS, &sa, &sOldSigbusAction);
         sigaction(SIGILL, &sa, &sOldSigillAction);
+        sSignalGuardInstalled = true;
         ALOGI("FEATURESTIC GUARD: Installed passive native crash diagnostics for SIGBUS/SIGILL");
     }
 }
@@ -1505,9 +1682,14 @@ static int safe_sigaction_common(int sig,
         return origFn ? origFn(sig, act, oldact) : 0;
     }
     if (sig == SIGSEGV || sig == SIGBUS || sig == SIGABRT || sig == SIGILL) {
-        struct sigaction *savedSlot = (sig == SIGSEGV) ? &sOldSigsegvAction
-                : ((sig == SIGBUS) ? &sOldSigbusAction
-                : ((sig == SIGILL) ? &sOldSigillAction : &sOldSigabrtAction));
+        if (sig == SIGBUS || sig == SIGILL) {
+            // Never allow anti-cheat crash reporters to strip or replace protective SIGBUS/SIGILL handlers!
+            if (oldact != nullptr) {
+                *oldact = (sig == SIGBUS) ? sOldSigbusAction : sOldSigillAction;
+            }
+            return 0;
+        }
+        struct sigaction *savedSlot = (sig == SIGSEGV) ? &sOldSigsegvAction : &sOldSigabrtAction;
         if (oldact != nullptr) {
             *oldact = *savedSlot;
         }

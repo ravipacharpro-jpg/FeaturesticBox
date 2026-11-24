@@ -2,6 +2,33 @@
 #include "UnixFileSystemHook.h"
 #include "JniHook/JniHook.h"
 #include "BaseHook.h"
+#include <cstring>
+
+static bool isDevPtsPath(JNIEnv *env, jstring pathStr) {
+    if (!env || !pathStr) return false;
+    const char *str = env->GetStringUTFChars(pathStr, nullptr);
+    if (!str) return false;
+    bool blocked = (strstr(str, "dev/pts") != nullptr || strstr(str, "dev/ptmx") != nullptr || strstr(str, "devpts") != nullptr);
+    env->ReleaseStringUTFChars(pathStr, str);
+    return blocked;
+}
+
+static bool isDevPtsFile(JNIEnv *env, jobject fileObj) {
+    if (!env || !fileObj) return false;
+    jclass fileClass = env->GetObjectClass(fileObj);
+    if (!fileClass) return false;
+    jmethodID getPath = env->GetMethodID(fileClass, "getPath", "()Ljava/lang/String;");
+    if (!getPath) {
+        env->DeleteLocalRef(fileClass);
+        return false;
+    }
+    jstring pathStr = (jstring) env->CallObjectMethod(fileObj, getPath);
+    env->DeleteLocalRef(fileClass);
+    if (!pathStr) return false;
+    bool blocked = isDevPtsPath(env, pathStr);
+    env->DeleteLocalRef(pathStr);
+    return blocked;
+}
 
 static inline void releaseRedirectObj(JNIEnv *env, jobject orig, jobject redirected) {
     if (!env || !redirected || redirected == orig) return;
@@ -26,6 +53,9 @@ HOOK_JNI(jstring, canonicalize0, JNIEnv *env, jobject obj, jstring path) {
 }
 
 HOOK_JNI(jint, getBooleanAttributes0, JNIEnv *env, jobject obj, jstring abspath) {
+    if (abspath && isDevPtsPath(env, abspath)) {
+        return 0; // BA_EXISTS = 0x01; 0 indicates does not exist
+    }
     jstring redirect = IO::redirectPath(env, abspath);
     jint res = orig_getBooleanAttributes0(env, obj, redirect);
     releaseRedirectObj(env, abspath, redirect);
@@ -33,6 +63,9 @@ HOOK_JNI(jint, getBooleanAttributes0, JNIEnv *env, jobject obj, jstring abspath)
 }
 
 HOOK_JNI(jint, getBooleanAttributes0File, JNIEnv *env, jobject obj, jobject file) {
+    if (file && isDevPtsFile(env, file)) {
+        return 0;
+    }
     jobject redirect = IO::redirectPath(env, file);
     jint res = orig_getBooleanAttributes0File(env, obj, redirect);
     releaseRedirectObj(env, file, redirect);
@@ -40,6 +73,9 @@ HOOK_JNI(jint, getBooleanAttributes0File, JNIEnv *env, jobject obj, jobject file
 }
 
 HOOK_JNI(jboolean, checkAccess0, JNIEnv *env, jobject obj, jobject file, jint access) {
+    if (file && isDevPtsFile(env, file)) {
+        return JNI_FALSE;
+    }
     jobject redirect = IO::redirectPath(env, file);
     jboolean res = orig_checkAccess0(env, obj, redirect, access);
     releaseRedirectObj(env, file, redirect);
@@ -47,6 +83,9 @@ HOOK_JNI(jboolean, checkAccess0, JNIEnv *env, jobject obj, jobject file, jint ac
 }
 
 HOOK_JNI(jlong, getLastModifiedTime0, JNIEnv *env, jobject obj, jobject path) {
+    if (path && isDevPtsFile(env, path)) {
+        return 0;
+    }
     jobject redirect = IO::redirectPath(env, path);
     jlong res = orig_getLastModifiedTime0(env, obj, redirect);
     releaseRedirectObj(env, path, redirect);
@@ -54,6 +93,9 @@ HOOK_JNI(jlong, getLastModifiedTime0, JNIEnv *env, jobject obj, jobject path) {
 }
 
 HOOK_JNI(jlong, getLength0, JNIEnv *env, jobject obj, jobject file) {
+    if (file && isDevPtsFile(env, file)) {
+        return 0;
+    }
     jobject redirect = IO::redirectPath(env, file);
     jlong res = orig_getLength0(env, obj, redirect);
     releaseRedirectObj(env, file, redirect);
@@ -83,6 +125,9 @@ HOOK_JNI(jboolean, delete0, JNIEnv *env, jobject obj, jobject file) {
 }
 
 HOOK_JNI(jobjectArray, list0, JNIEnv *env, jobject obj, jobject file) {
+    if (file && isDevPtsFile(env, file)) {
+        return nullptr;
+    }
     jobject redirect = IO::redirectPath(env, file);
     jobjectArray res = orig_list0(env, obj, redirect);
     releaseRedirectObj(env, file, redirect);
