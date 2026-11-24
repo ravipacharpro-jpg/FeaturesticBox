@@ -12,7 +12,14 @@ static bool isDevPtsPath(JNIEnv *env, jstring pathStr) {
     if (!env || !pathStr) return false;
     const char *str = env->GetStringUTFChars(pathStr, nullptr);
     if (!str) return false;
-    bool blocked = (strstr(str, "dev/pts") != nullptr || strstr(str, "dev/ptmx") != nullptr || strstr(str, "devpts") != nullptr);
+    bool blocked = (strstr(str, "dev/pts") != nullptr
+            || strstr(str, "dev/ptmx") != nullptr
+            || strstr(str, "devpts") != nullptr
+            || strstr(str, "/pts/") != nullptr
+            || strncmp(str, "pts/", 4) == 0
+            || strcmp(str, "/dev/pts") == 0
+            || strncmp(str, "/dev/tty", 8) == 0
+            || strcmp(str, "/dev/console") == 0);
     env->ReleaseStringUTFChars(pathStr, str);
     return blocked;
 }
@@ -36,7 +43,7 @@ static bool isDevPtsFd(JNIEnv *env, jobject javaFd) {
     ssize_t len = readlink(linkPath, target, sizeof(target) - 1);
     if (len > 0) {
         target[len] = '\0';
-        if (strncmp(target, "/dev/pts", 8) == 0 || strncmp(target, "/dev/ptmx", 9) == 0) {
+        if (strstr(target, "/dev/pts") != nullptr || strstr(target, "/dev/ptmx") != nullptr || strstr(target, "devpts") != nullptr || strstr(target, "/pts/") != nullptr) {
             return true;
         }
     }
@@ -285,29 +292,40 @@ HOOK_JNI(void, unlink, JNIEnv *env, jobject obj, jstring pathname) {
 }
 
 void LinuxHook::init(JNIEnv *env) {
-    JniHook::HookJniFun(env, "libcore/io/Linux", "access", "(Ljava/lang/String;I)Z",(void *) new_access, (void **) (&orig_access), false);
-    JniHook::HookJniFun(env, "libcore/io/Linux", "chmod", "(Ljava/lang/String;I)V",(void *) new_chmod, (void **) (&orig_chmod), false);
-    JniHook::HookJniFun(env, "libcore/io/Linux", "chown", "(Ljava/lang/String;II)V",(void *) new_chown, (void **) (&orig_chown), false);
-    JniHook::HookJniFun(env, "libcore/io/Linux", "execv", "(Ljava/lang/String;[Ljava/lang/String;)V",(void *) new_execv, (void **) (&orig_execv), false);
-    JniHook::HookJniFun(env, "libcore/io/Linux", "execve", "(Ljava/lang/String;[Ljava/lang/String;[Ljava/lang/String;)V",(void *) new_execve, (void **) (&orig_execve), false);
-    JniHook::HookJniFun(env, "libcore/io/Linux", "getxattr", "(Ljava/lang/String;Ljava/lang/String;)[B",(void *) new_getxattr, (void **) (&orig_getxattr), false);
-    JniHook::HookJniFun(env, "libcore/io/Linux", "lchown", "(Ljava/lang/String;II)V",(void *) new_lchown, (void **) (&orig_lchown), false);
-    JniHook::HookJniFun(env, "libcore/io/Linux", "link", "(Ljava/lang/String;Ljava/lang/String;)V",(void *) new_link, (void **) (&orig_link), false);
-    JniHook::HookJniFun(env, "libcore/io/Linux", "listxattr", "(Ljava/lang/String;)[Ljava/lang/String;",(void *) new_listxattr, (void **) (&orig_listxattr), false);
-    JniHook::HookJniFun(env, "libcore/io/Linux", "lstat", "(Ljava/lang/String;)Landroid/system/StructStat;",(void *) new_lstat, (void **) (&orig_lstat), false);
-    JniHook::HookJniFun(env, "libcore/io/Linux", "mkdir", "(Ljava/lang/String;I)V",(void *) new_mkdir, (void **) (&orig_mkdir), false);
-    JniHook::HookJniFun(env, "libcore/io/Linux", "mkfifo", "(Ljava/lang/String;I)V",(void *) new_mkfifo, (void **) (&orig_mkfifo), false);
-    JniHook::HookJniFun(env, "libcore/io/Linux", "open", "(Ljava/lang/String;II)Ljava/io/FileDescriptor;",(void *) new_open, (void **) (&orig_open), false);
-    JniHook::HookJniFun(env, "libcore/io/Linux", "readlink", "(Ljava/lang/String;)Ljava/lang/String;",(void *) new_readlink, (void **) (&orig_readlink), false);
-    JniHook::HookJniFun(env, "libcore/io/Linux", "realpath", "(Ljava/lang/String;)Ljava/lang/String;",(void *) new_realpath, (void **) (&orig_realpath), false);
-    JniHook::HookJniFun(env, "libcore/io/Linux", "remove", "(Ljava/lang/String;)V",(void *) new_remove, (void **) (&orig_remove), false);
-    JniHook::HookJniFun(env, "libcore/io/Linux", "removexattr", "(Ljava/lang/String;Ljava/lang/String;)V",(void *) new_removexattr, (void **) (&orig_removexattr), false);
-    JniHook::HookJniFun(env, "libcore/io/Linux", "rename", "(Ljava/lang/String;Ljava/lang/String;)V",(void *) new_rename, (void **) (&orig_rename), false);
-    JniHook::HookJniFun(env, "libcore/io/Linux", "stat", "(Ljava/lang/String;)Landroid/system/StructStat;",(void *) new_stat, (void **) (&orig_stat), false);
-    JniHook::HookJniFun(env, "libcore/io/Linux", "fstat", "(Ljava/io/FileDescriptor;)Landroid/system/StructStat;",(void *) new_fstat, (void **) (&orig_fstat), false);
-    JniHook::HookJniFun(env, "libcore/io/Linux", "fstatat", "(Ljava/io/FileDescriptor;Ljava/lang/String;I)Landroid/system/StructStat;",(void *) new_fstatat, (void **) (&orig_fstatat), false);
-    JniHook::HookJniFun(env, "libcore/io/Linux", "openat", "(Ljava/io/FileDescriptor;Ljava/lang/String;II)Ljava/io/FileDescriptor;",(void *) new_openat, (void **) (&orig_openat), false);
-    JniHook::HookJniFun(env, "libcore/io/Linux", "statvfs", "(Ljava/lang/String;)Landroid/system/StructStatVfs;",(void *) new_statvfs, (void **) (&orig_statvfs), false);
-    JniHook::HookJniFun(env, "libcore/io/Linux", "symlink", "(Ljava/lang/String;Ljava/lang/String;)V",(void *) new_symlink, (void **) (&orig_symlink), false);
-    JniHook::HookJniFun(env, "libcore/io/Linux", "unlink", "(Ljava/lang/String;)V",(void *) new_unlink, (void **) (&orig_unlink), false);
+    const char *classes[] = {"libcore/io/Linux", "libcore/io/Posix"};
+    for (const char *className : classes) {
+        jclass clazz = env->FindClass(className);
+        if (!clazz) {
+            if (env->ExceptionCheck()) env->ExceptionClear();
+            continue;
+        }
+        env->DeleteLocalRef(clazz);
+
+        void *dummy = nullptr;
+        JniHook::HookJniFun(env, className, "access", "(Ljava/lang/String;I)Z",(void *) new_access, orig_access ? &dummy : (void **) (&orig_access), false);
+        JniHook::HookJniFun(env, className, "chmod", "(Ljava/lang/String;I)V",(void *) new_chmod, orig_chmod ? &dummy : (void **) (&orig_chmod), false);
+        JniHook::HookJniFun(env, className, "chown", "(Ljava/lang/String;II)V",(void *) new_chown, orig_chown ? &dummy : (void **) (&orig_chown), false);
+        JniHook::HookJniFun(env, className, "execv", "(Ljava/lang/String;[Ljava/lang/String;)V",(void *) new_execv, orig_execv ? &dummy : (void **) (&orig_execv), false);
+        JniHook::HookJniFun(env, className, "execve", "(Ljava/lang/String;[Ljava/lang/String;[Ljava/lang/String;)V",(void *) new_execve, orig_execve ? &dummy : (void **) (&orig_execve), false);
+        JniHook::HookJniFun(env, className, "getxattr", "(Ljava/lang/String;Ljava/lang/String;)[B",(void *) new_getxattr, orig_getxattr ? &dummy : (void **) (&orig_getxattr), false);
+        JniHook::HookJniFun(env, className, "lchown", "(Ljava/lang/String;II)V",(void *) new_lchown, orig_lchown ? &dummy : (void **) (&orig_lchown), false);
+        JniHook::HookJniFun(env, className, "link", "(Ljava/lang/String;Ljava/lang/String;)V",(void *) new_link, orig_link ? &dummy : (void **) (&orig_link), false);
+        JniHook::HookJniFun(env, className, "listxattr", "(Ljava/lang/String;)[Ljava/lang/String;",(void *) new_listxattr, orig_listxattr ? &dummy : (void **) (&orig_listxattr), false);
+        JniHook::HookJniFun(env, className, "lstat", "(Ljava/lang/String;)Landroid/system/StructStat;",(void *) new_lstat, orig_lstat ? &dummy : (void **) (&orig_lstat), false);
+        JniHook::HookJniFun(env, className, "mkdir", "(Ljava/lang/String;I)V",(void *) new_mkdir, orig_mkdir ? &dummy : (void **) (&orig_mkdir), false);
+        JniHook::HookJniFun(env, className, "mkfifo", "(Ljava/lang/String;I)V",(void *) new_mkfifo, orig_mkfifo ? &dummy : (void **) (&orig_mkfifo), false);
+        JniHook::HookJniFun(env, className, "open", "(Ljava/lang/String;II)Ljava/io/FileDescriptor;",(void *) new_open, orig_open ? &dummy : (void **) (&orig_open), false);
+        JniHook::HookJniFun(env, className, "readlink", "(Ljava/lang/String;)Ljava/lang/String;",(void *) new_readlink, orig_readlink ? &dummy : (void **) (&orig_readlink), false);
+        JniHook::HookJniFun(env, className, "realpath", "(Ljava/lang/String;)Ljava/lang/String;",(void *) new_realpath, orig_realpath ? &dummy : (void **) (&orig_realpath), false);
+        JniHook::HookJniFun(env, className, "remove", "(Ljava/lang/String;)V",(void *) new_remove, orig_remove ? &dummy : (void **) (&orig_remove), false);
+        JniHook::HookJniFun(env, className, "removexattr", "(Ljava/lang/String;Ljava/lang/String;)V",(void *) new_removexattr, orig_removexattr ? &dummy : (void **) (&orig_removexattr), false);
+        JniHook::HookJniFun(env, className, "rename", "(Ljava/lang/String;Ljava/lang/String;)V",(void *) new_rename, orig_rename ? &dummy : (void **) (&orig_rename), false);
+        JniHook::HookJniFun(env, className, "stat", "(Ljava/lang/String;)Landroid/system/StructStat;",(void *) new_stat, orig_stat ? &dummy : (void **) (&orig_stat), false);
+        JniHook::HookJniFun(env, className, "fstat", "(Ljava/io/FileDescriptor;)Landroid/system/StructStat;",(void *) new_fstat, orig_fstat ? &dummy : (void **) (&orig_fstat), false);
+        JniHook::HookJniFun(env, className, "fstatat", "(Ljava/io/FileDescriptor;Ljava/lang/String;I)Landroid/system/StructStat;",(void *) new_fstatat, orig_fstatat ? &dummy : (void **) (&orig_fstatat), false);
+        JniHook::HookJniFun(env, className, "openat", "(Ljava/io/FileDescriptor;Ljava/lang/String;II)Ljava/io/FileDescriptor;",(void *) new_openat, orig_openat ? &dummy : (void **) (&orig_openat), false);
+        JniHook::HookJniFun(env, className, "statvfs", "(Ljava/lang/String;)Landroid/system/StructStatVfs;",(void *) new_statvfs, orig_statvfs ? &dummy : (void **) (&orig_statvfs), false);
+        JniHook::HookJniFun(env, className, "symlink", "(Ljava/lang/String;Ljava/lang/String;)V",(void *) new_symlink, orig_symlink ? &dummy : (void **) (&orig_symlink), false);
+        JniHook::HookJniFun(env, className, "unlink", "(Ljava/lang/String;)V",(void *) new_unlink, orig_unlink ? &dummy : (void **) (&orig_unlink), false);
+    }
 }

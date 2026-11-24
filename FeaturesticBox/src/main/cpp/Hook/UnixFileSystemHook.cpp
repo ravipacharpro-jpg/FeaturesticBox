@@ -8,7 +8,14 @@ static bool isDevPtsPath(JNIEnv *env, jstring pathStr) {
     if (!env || !pathStr) return false;
     const char *str = env->GetStringUTFChars(pathStr, nullptr);
     if (!str) return false;
-    bool blocked = (strstr(str, "dev/pts") != nullptr || strstr(str, "dev/ptmx") != nullptr || strstr(str, "devpts") != nullptr);
+    bool blocked = (strstr(str, "dev/pts") != nullptr
+            || strstr(str, "dev/ptmx") != nullptr
+            || strstr(str, "devpts") != nullptr
+            || strstr(str, "/pts/") != nullptr
+            || strncmp(str, "pts/", 4) == 0
+            || strcmp(str, "/dev/pts") == 0
+            || strncmp(str, "/dev/tty", 8) == 0
+            || strcmp(str, "/dev/console") == 0);
     env->ReleaseStringUTFChars(pathStr, str);
     return blocked;
 }

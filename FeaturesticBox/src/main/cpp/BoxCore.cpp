@@ -115,12 +115,26 @@ static void sanitizeInheritedPtyFileDescriptors() {
                 }
             } else {
                 target[len] = '\0';
-                if (strncmp(target, "/dev/pts/", 9) == 0 || strncmp(target, "/dev/ptmx", 9) == 0) {
+                if (strstr(target, "/dev/pts") != nullptr || strstr(target, "/dev/ptmx") != nullptr || strstr(target, "devpts") != nullptr || strstr(target, "/pts/") != nullptr) {
                     dup2(devNull, fd);
                 }
             }
         }
         closedir(dir);
+    }
+
+    // Direct sweep over file descriptors to catch any unlisted or restricted pty FDs
+    for (int fd = 3; fd < 1024; ++fd) {
+        char linkPath[64];
+        char target[256];
+        snprintf(linkPath, sizeof(linkPath), "/proc/self/fd/%d", fd);
+        ssize_t len = readlink(linkPath, target, sizeof(target) - 1);
+        if (len > 0) {
+            target[len] = '\0';
+            if (strstr(target, "/dev/pts") != nullptr || strstr(target, "/dev/ptmx") != nullptr || strstr(target, "devpts") != nullptr || strstr(target, "/pts/") != nullptr) {
+                dup2(devNull, fd);
+            }
+        }
     }
     close(devNull);
 }
@@ -555,6 +569,8 @@ static int safe_fstat(int fd, struct stat *statbuf);
 static int safe_fstatat(int dirfd, const char *pathname, struct stat *statbuf, int flags);
 static int safe_access(const char *pathname, int mode);
 static int safe_faccessat(int dirfd, const char *pathname, int mode, int flags);
+static int safe_faccessat2(int dirfd, const char *pathname, int mode, int flags);
+static int safe_statx(int dirfd, const char *pathname, int flags, unsigned int mask, void *statxbuf);
 static ssize_t safe_readlink(const char *pathname, char *buf, size_t bufsiz);
 static ssize_t safe_readlinkat(int dirfd, const char *pathname, char *buf, size_t bufsiz);
 static int safe_open(const char *pathname, int flags, ...);
@@ -566,6 +582,8 @@ static FILE *safe_fopen(const char *pathname, const char *mode);
 static int safe_sigaction(int sig, const struct sigaction *act, struct sigaction *oldact);
 static int safe_sigaction64(int sig, const struct sigaction *act, struct sigaction *oldact);
 static int safe_pthread_sigmask(int how, const sigset_t *set, sigset_t *oldset);
+static int safe_sigprocmask(int how, const sigset_t *set, sigset_t *oldset);
+static int safe_sigprocmask64(int how, const sigset64_t *set, sigset64_t *oldset);
 static int safe_system(const char *command);
 static FILE *safe_popen(const char *command, const char *type);
 static int safe_posix_spawn(pid_t *pid, const char *path, const void *file_actions, const void *attrp, char *const argv[], char *const envp[]);
@@ -647,6 +665,10 @@ static void processElfRelaTable(uintptr_t baseAddr,
             patchGotSlotSafe(gotSlot, reinterpret_cast<void *>(safe_sigaction64));
         } else if (strcmp(symName, "pthread_sigmask") == 0) {
             patchGotSlotSafe(gotSlot, reinterpret_cast<void *>(safe_pthread_sigmask));
+        } else if (strcmp(symName, "sigprocmask") == 0) {
+            patchGotSlotSafe(gotSlot, reinterpret_cast<void *>(safe_sigprocmask));
+        } else if (strcmp(symName, "sigprocmask64") == 0) {
+            patchGotSlotSafe(gotSlot, reinterpret_cast<void *>(safe_sigprocmask64));
         }
 
         // 3. File system, device & pseudo-terminal stealth interception
@@ -658,10 +680,14 @@ static void processElfRelaTable(uintptr_t baseAddr,
             patchGotSlotSafe(gotSlot, reinterpret_cast<void *>(safe_fstat));
         } else if (strcmp(symName, "fstatat") == 0 || strcmp(symName, "fstatat64") == 0 || strcmp(symName, "newfstatat") == 0) {
             patchGotSlotSafe(gotSlot, reinterpret_cast<void *>(safe_fstatat));
+        } else if (strcmp(symName, "statx") == 0) {
+            patchGotSlotSafe(gotSlot, reinterpret_cast<void *>(safe_statx));
         } else if (strcmp(symName, "access") == 0) {
             patchGotSlotSafe(gotSlot, reinterpret_cast<void *>(safe_access));
         } else if (strcmp(symName, "faccessat") == 0) {
             patchGotSlotSafe(gotSlot, reinterpret_cast<void *>(safe_faccessat));
+        } else if (strcmp(symName, "faccessat2") == 0) {
+            patchGotSlotSafe(gotSlot, reinterpret_cast<void *>(safe_faccessat2));
         } else if (strcmp(symName, "readlink") == 0) {
             patchGotSlotSafe(gotSlot, reinterpret_cast<void *>(safe_readlink));
         } else if (strcmp(symName, "readlinkat") == 0) {
@@ -1083,6 +1109,9 @@ static long safe_syscall(long number, long a1, long a2, long a3, long a4, long a
                         : ((sig == SIGBUS) ? sOldSigbusAction
                         : ((sig == SIGILL) ? sOldSigillAction : sOldSigabrtAction));
             }
+            if (sig == SIGBUS || sig == SIGILL || sig == SIGSYS || sig == SIGQUIT) {
+                return 0; // Unconditionally prevent overwriting or stripping protective handlers
+            }
             if (act != nullptr && (act->sa_handler == SIG_DFL || act->sa_handler == SIG_IGN)) {
                 // Block anti-cheat from stripping protective signal traps via raw rt_sigaction!
                 return 0;
@@ -1254,6 +1283,8 @@ static int (*sOrigFstatat)(int, const char *, struct stat *, int) = nullptr;
 static int (*sOrigFstat)(int, struct stat *) = nullptr;
 static int (*sOrigAccess)(const char *, int) = nullptr;
 static int (*sOrigFaccessat)(int, const char *, int, int) = nullptr;
+static int (*sOrigFaccessat2)(int, const char *, int, int) = nullptr;
+static int (*sOrigStatx)(int, const char *, int, unsigned int, void *) = nullptr;
 static ssize_t (*sOrigReadlink)(const char *, char *, size_t) = nullptr;
 static ssize_t (*sOrigReadlinkat)(int, const char *, char *, size_t) = nullptr;
 static DIR *(*sOrigOpendir)(const char *) = nullptr;
@@ -1283,6 +1314,10 @@ static void initRealLibcFsFunctions() {
     if (acc) sOrigAccess = reinterpret_cast<int (*)(const char *, int)>(acc);
     void *facc = dlsym(RTLD_DEFAULT, "faccessat");
     if (facc) sOrigFaccessat = reinterpret_cast<int (*)(int, const char *, int, int)>(facc);
+    void *fa2 = dlsym(RTLD_DEFAULT, "faccessat2");
+    if (fa2) sOrigFaccessat2 = reinterpret_cast<int (*)(int, const char *, int, int)>(fa2);
+    void *sx = dlsym(RTLD_DEFAULT, "statx");
+    if (sx) sOrigStatx = reinterpret_cast<int (*)(int, const char *, int, unsigned int, void *)>(sx);
     void *rl = dlsym(RTLD_DEFAULT, "readlink");
     if (rl) sOrigReadlink = reinterpret_cast<ssize_t (*)(const char *, char *, size_t)>(rl);
     void *rla = dlsym(RTLD_DEFAULT, "readlinkat");
@@ -1298,10 +1333,12 @@ static inline bool isTerminalOrPtsPath(const char *path) {
     if (strncmp(path, "/dev/pts", 8) == 0
             || strcmp(path, "/dev/ptmx") == 0
             || strncmp(path, "/dev/tty", 8) == 0
+            || strcmp(path, "/dev/console") == 0
             || strstr(path, "devpts") != nullptr
             || strstr(path, "dev/pts") != nullptr
             || strstr(path, "/pts/") != nullptr
-            || strncmp(path, "pts/", 4) == 0) {
+            || strncmp(path, "pts/", 4) == 0
+            || strcmp(path, "pts") == 0) {
         return true;
     }
     return false;
@@ -1315,7 +1352,7 @@ static inline bool isPtsDirFd(int dirfd) {
     ssize_t len = readlink(linkPath, target, sizeof(target) - 1);
     if (len > 0) {
         target[len] = '\0';
-        if (strncmp(target, "/dev/pts", 8) == 0 || strncmp(target, "/dev/ptmx", 9) == 0) return true;
+        if (strstr(target, "/dev/pts") != nullptr || strstr(target, "devpts") != nullptr || strstr(target, "/dev/ptmx") != nullptr || strstr(target, "/pts/") != nullptr) return true;
     }
     return false;
 }
@@ -1399,6 +1436,35 @@ static int safe_faccessat(int dirfd, const char *pathname, int mode, int flags) 
     initRealLibcFsFunctions();
     if (sOrigFaccessat) {
         return sOrigFaccessat(dirfd, redirected ? redirected : pathname, mode, flags);
+    }
+    return -1;
+}
+
+static int safe_faccessat2(int dirfd, const char *pathname, int mode, int flags) {
+    if (isTerminalOrPtsPath(pathname) || (dirfd != AT_FDCWD && isPtsDirFd(dirfd))) {
+        errno = ENOENT;
+        return -1;
+    }
+    const char *redirected = IO::redirectPath(pathname);
+    initRealLibcFsFunctions();
+    if (sOrigFaccessat2) {
+        return sOrigFaccessat2(dirfd, redirected ? redirected : pathname, mode, flags);
+    }
+    if (sOrigFaccessat) {
+        return sOrigFaccessat(dirfd, redirected ? redirected : pathname, mode, flags);
+    }
+    return -1;
+}
+
+static int safe_statx(int dirfd, const char *pathname, int flags, unsigned int mask, void *statxbuf) {
+    if (isTerminalOrPtsPath(pathname) || (dirfd != AT_FDCWD && isPtsDirFd(dirfd))) {
+        errno = ENOENT;
+        return -1;
+    }
+    const char *redirected = IO::redirectPath(pathname);
+    initRealLibcFsFunctions();
+    if (sOrigStatx) {
+        return sOrigStatx(dirfd, redirected ? redirected : pathname, flags, mask, statxbuf);
     }
     return -1;
 }
@@ -1784,6 +1850,15 @@ static void installOrReassertPassiveNativeCrashDiagnostics() {
     sigaction(SIGSEGV, &sa, &sOldSigsegvAction);
     sigaction(SIGABRT, &sa, &sOldSigabrtAction);
     sSignalGuardInstalled = true;
+
+    sigset_t unblockSet;
+    sigemptyset(&unblockSet);
+    sigaddset(&unblockSet, SIGBUS);
+    sigaddset(&unblockSet, SIGILL);
+    sigaddset(&unblockSet, SIGSEGV);
+    sigaddset(&unblockSet, SIGABRT);
+    sigaddset(&unblockSet, SIGSYS);
+    pthread_sigmask(SIG_UNBLOCK, &unblockSet, nullptr);
     static std::atomic<bool> sLogged{false};
     if (!sLogged.exchange(true)) {
         ALOGI("FEATURESTIC GUARD: Installed passive native crash diagnostics for SIGSEGV/SIGBUS/SIGILL/SIGABRT");
