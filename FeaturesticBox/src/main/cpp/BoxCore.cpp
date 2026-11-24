@@ -519,7 +519,8 @@ static void processElfRelaTable(uintptr_t baseAddr,
         } else if (strcmp(symName, "_ZdlPvm") == 0
                 || strcmp(symName, "_ZdaPvm") == 0) {
             patchGotSlotSafe(gotSlot, reinterpret_cast<void *>(safe_delete_sized));
-        } else if (strcmp(symName, "_ZN7android7RefBase9decStrongEPKv") == 0) {
+        } else if (strcmp(symName, "_ZNK7android7RefBase9decStrongEPKv") == 0
+                || strcmp(symName, "_ZN7android7RefBase9decStrongEPKv") == 0) {
             patchGotSlotSafe(gotSlot, reinterpret_cast<void *>(safe_RefBase_decStrong));
         } else if (strcmp(symName, "_ZN7android7RefBase12weakref_type7decWeakEPKv") == 0) {
             patchGotSlotSafe(gotSlot, reinterpret_cast<void *>(safe_weakref_decWeak));
@@ -780,8 +781,8 @@ static void safe_abort(void) {
     prctl(PR_GET_NAME, reinterpret_cast<unsigned long>(tname), 0, 0, 0);
     ALOGW("FEATURESTIC GUARD: Intercepted abort() from tid=%d (name=%s)",
           static_cast<int>(gettid()), tname[0] ? tname : "?");
-    if (!isCriticalGameOrMainThread() && gettid() != getpid()) {
-        ALOGW("FEATURESTIC GUARD: Quiescing worker thread calling abort() tid=%d (%s) into sleep",
+    if (gettid() != getpid()) {
+        ALOGW("FEATURESTIC GUARD: Quiescing non-main thread calling abort() tid=%d (%s) into sleep",
               static_cast<int>(gettid()), tname[0] ? tname : "?");
         while (true) {
             sleep(3600);
@@ -1262,6 +1263,14 @@ static void *safe_dlsym(void *handle, const char *symbol) {
     return sOrigDlsym ? sOrigDlsym(handle, symbol) : nullptr;
 }
 
+static void (*sOrigAndroidLogAssert)(const char *, const char *, const char *, ...) = nullptr;
+
+static void safe_android_log_assert(const char *cond, const char *tag, const char *fmt, ...) {
+    ALOGW("FEATURESTIC GUARD: Intercepted __android_log_assert(tag='%s', cond='%s')",
+          tag ? tag : "", cond ? cond : "");
+    // NEVER call abort() on assertion failure! Return safely so rendering & teardown continue!
+}
+
 static void installHeapAndRefBaseSafetyGuards() {
     static bool sGuardsInitialized = false;
     if (!sGuardsInitialized) {
@@ -1273,6 +1282,12 @@ static void installHeapAndRefBaseSafetyGuards() {
         void *freeSym = dlsym(RTLD_DEFAULT, "free");
         void *sigactionSym = dlsym(RTLD_DEFAULT, "sigaction");
         void *sigaction64Sym = dlsym(RTLD_DEFAULT, "sigaction64");
+        void *decStrongSym = dlsym(RTLD_DEFAULT, "_ZNK7android7RefBase9decStrongEPKv");
+        if (!decStrongSym) {
+            decStrongSym = dlsym(RTLD_DEFAULT, "_ZN7android7RefBase9decStrongEPKv");
+        }
+        void *decWeakSym = dlsym(RTLD_DEFAULT, "_ZN7android7RefBase12weakref_type7decWeakEPKv");
+        void *logAssertSym = dlsym(RTLD_DEFAULT, "__android_log_assert");
         void *killSym = dlsym(RTLD_DEFAULT, "kill");
         void *tgkillSym = dlsym(RTLD_DEFAULT, "tgkill");
         void *raiseSym = dlsym(RTLD_DEFAULT, "raise");
@@ -1286,6 +1301,21 @@ static void installHeapAndRefBaseSafetyGuards() {
         void *dlIteratePhdrSym = dlsym(RTLD_DEFAULT, "dl_iterate_phdr");
         void *dlsymSym = dlsym(RTLD_DEFAULT, "dlsym");
 #if defined(__aarch64__)
+        if (decStrongSym) {
+            A64HookFunction(decStrongSym,
+                            reinterpret_cast<void *>(safe_RefBase_decStrong),
+                            reinterpret_cast<void **>(&sOrigRefBaseDecStrong));
+        }
+        if (decWeakSym) {
+            A64HookFunction(decWeakSym,
+                            reinterpret_cast<void *>(safe_weakref_decWeak),
+                            reinterpret_cast<void **>(&sOrigWeakrefDecWeak));
+        }
+        if (logAssertSym) {
+            A64HookFunction(logAssertSym,
+                            reinterpret_cast<void *>(safe_android_log_assert),
+                            reinterpret_cast<void **>(&sOrigAndroidLogAssert));
+        }
         if (pthreadSigmaskSym) {
             A64HookFunction(pthreadSigmaskSym,
                             reinterpret_cast<void *>(safe_pthread_sigmask),
