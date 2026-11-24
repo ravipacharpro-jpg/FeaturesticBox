@@ -1065,46 +1065,8 @@ extern "C" {
 }
 
 static void installOrReassertPassiveNativeCrashDiagnostics() {
-    initLowMemorySafetyCushion();
-    static uint8_t sAltStackBuffer[65536] __attribute__((aligned(16)));
-    stack_t curSs{};
-    if (sigaltstack(nullptr, &curSs) == 0 && ((curSs.ss_flags & SS_DISABLE) || curSs.ss_sp == nullptr || curSs.ss_size < MINSIGSTKSZ)) {
-        stack_t newSs{};
-        newSs.ss_sp = sAltStackBuffer;
-        newSs.ss_size = sizeof(sAltStackBuffer);
-        newSs.ss_flags = 0;
-        sigaltstack(&newSs, nullptr);
-    }
-
-    gOurSignalHandler = reinterpret_cast<void *>(&passiveNativeCrashDiagnosticsHandler);
-    int (*origSa)(int, const struct sigaction *, struct sigaction *) = sOrigSigaction ? sOrigSigaction : ::sigaction;
-    struct sigaction sa{};
-    sa.sa_sigaction = passiveNativeCrashDiagnosticsHandler;
-    sigemptyset(&sa.sa_mask);
-    sa.sa_flags = SA_SIGINFO | SA_NODEFER | SA_ONSTACK;
-
-    struct sigaction prevSegv{};
-    if (origSa(SIGSEGV, &sa, &prevSegv) == 0) {
-        if (prevSegv.sa_sigaction != passiveNativeCrashDiagnosticsHandler && prevSegv.sa_handler != SIG_DFL && prevSegv.sa_handler != SIG_IGN) {
-            sOldSigsegvAction = prevSegv;
-        }
-    }
-    struct sigaction prevBus{};
-    if (origSa(SIGBUS, &sa, &prevBus) == 0) {
-        if (prevBus.sa_sigaction != passiveNativeCrashDiagnosticsHandler && prevBus.sa_handler != SIG_DFL && prevBus.sa_handler != SIG_IGN) {
-            sOldSigbusAction = prevBus;
-        }
-    }
-    struct sigaction prevIll{};
-    if (origSa(SIGILL, &sa, &prevIll) == 0) {
-        if (prevIll.sa_sigaction != passiveNativeCrashDiagnosticsHandler && prevIll.sa_handler != SIG_DFL && prevIll.sa_handler != SIG_IGN) {
-            sOldSigillAction = prevIll;
-        }
-    }
-    // NOTE: Intentionally NOT installing SIGABRT handler — siglongjmp from
-    // signal handlers is unreliable and doesn't work with stack corruption.
-    // Let Android handle SIGABRT naturally for native crashes in game libraries.
-    sSignalGuardInstalled = true;
+    // Disabled: Prevents overriding game's native crash handler (libCrashKit.so) and corrupting thread registers.
+    return;
 }
 
 // Intercept sigaction() so libanort.so / libCrashKit.so cannot strip our
@@ -1302,168 +1264,9 @@ static void safe_android_log_assert(const char *cond, const char *tag, const cha
 }
 
 static void installHeapAndRefBaseSafetyGuards() {
-    static bool sGuardsInitialized = false;
-    if (!sGuardsInitialized) {
-        sGuardsInitialized = true;
-        // 1. Install signal diagnostics BEFORE hooking sigaction().
-        installOrReassertPassiveNativeCrashDiagnostics();
-
-        // 2. Hook libc.so free() and sigaction()/sigaction64() directly via A64HookFunction.
-        void *freeSym = dlsym(RTLD_DEFAULT, "free");
-        void *sigactionSym = dlsym(RTLD_DEFAULT, "sigaction");
-        void *sigaction64Sym = dlsym(RTLD_DEFAULT, "sigaction64");
-        void *decStrongSym = dlsym(RTLD_DEFAULT, "_ZNK7android7RefBase9decStrongEPKv");
-        if (!decStrongSym) {
-            decStrongSym = dlsym(RTLD_DEFAULT, "_ZN7android7RefBase9decStrongEPKv");
-        }
-        void *decWeakSym = dlsym(RTLD_DEFAULT, "_ZN7android7RefBase12weakref_type7decWeakEPKv");
-        void *logAssertSym = dlsym(RTLD_DEFAULT, "__android_log_assert");
-        void *killSym = dlsym(RTLD_DEFAULT, "kill");
-        void *tgkillSym = dlsym(RTLD_DEFAULT, "tgkill");
-        void *raiseSym = dlsym(RTLD_DEFAULT, "raise");
-        void *abortSym = dlsym(RTLD_DEFAULT, "abort");
-        void *exitSym = dlsym(RTLD_DEFAULT, "exit");
-        void *_exitSym = dlsym(RTLD_DEFAULT, "_exit");
-        void *_ExitSym = dlsym(RTLD_DEFAULT, "_Exit");
-        void *stackChkFailSym = dlsym(RTLD_DEFAULT, "__stack_chk_fail");
-        void *pthreadSigmaskSym = dlsym(RTLD_DEFAULT, "pthread_sigmask");
-        void *sigprocmaskSym = dlsym(RTLD_DEFAULT, "sigprocmask");
-        void *sigprocmask64Sym = dlsym(RTLD_DEFAULT, "sigprocmask64");
-        void *dlIteratePhdrSym = dlsym(RTLD_DEFAULT, "dl_iterate_phdr");
-        void *dlsymSym = dlsym(RTLD_DEFAULT, "dlsym");
-#if defined(__aarch64__)
-        if (decStrongSym) {
-            A64HookFunction(decStrongSym,
-                            reinterpret_cast<void *>(safe_RefBase_decStrong),
-                            reinterpret_cast<void **>(&sOrigRefBaseDecStrong));
-        }
-        if (decWeakSym) {
-            A64HookFunction(decWeakSym,
-                            reinterpret_cast<void *>(safe_weakref_decWeak),
-                            reinterpret_cast<void **>(&sOrigWeakrefDecWeak));
-        }
-        if (logAssertSym) {
-            A64HookFunction(logAssertSym,
-                            reinterpret_cast<void *>(safe_android_log_assert),
-                            reinterpret_cast<void **>(&sOrigAndroidLogAssert));
-        }
-        if (pthreadSigmaskSym) {
-            A64HookFunction(pthreadSigmaskSym,
-                            reinterpret_cast<void *>(safe_pthread_sigmask),
-                            reinterpret_cast<void **>(&sOrigPthreadSigmask));
-        }
-        if (sigprocmaskSym) {
-            A64HookFunction(sigprocmaskSym,
-                            reinterpret_cast<void *>(safe_sigprocmask),
-                            reinterpret_cast<void **>(&sOrigSigprocmask));
-        }
-        if (sigprocmask64Sym && sigprocmask64Sym != sigprocmaskSym) {
-            A64HookFunction(sigprocmask64Sym,
-                            reinterpret_cast<void *>(safe_sigprocmask64),
-                            reinterpret_cast<void **>(&sOrigSigprocmask64));
-        }
-        if (freeSym) {
-            A64HookFunction(freeSym,
-                            reinterpret_cast<void *>(safe_free),
-                            reinterpret_cast<void **>(&sOrigFree));
-        }
-        if (sigactionSym) {
-            A64HookFunction(sigactionSym,
-                            reinterpret_cast<void *>(safe_sigaction),
-                            reinterpret_cast<void **>(&sOrigSigaction));
-        }
-        if (sigaction64Sym && sigaction64Sym != sigactionSym) {
-            A64HookFunction(sigaction64Sym,
-                            reinterpret_cast<void *>(safe_sigaction64),
-                            reinterpret_cast<void **>(&sOrigSigaction64));
-        }
-        if (killSym) {
-            A64HookFunction(killSym,
-                            reinterpret_cast<void *>(safe_kill),
-                            reinterpret_cast<void **>(&sOrigKill));
-        }
-        if (tgkillSym) {
-            A64HookFunction(tgkillSym,
-                            reinterpret_cast<void *>(safe_tgkill),
-                            reinterpret_cast<void **>(&sOrigTgkill));
-        }
-        if (raiseSym) {
-            A64HookFunction(raiseSym,
-                            reinterpret_cast<void *>(safe_raise),
-                            reinterpret_cast<void **>(&sOrigRaise));
-        }
-        if (abortSym) {
-            A64HookFunction(abortSym,
-                            reinterpret_cast<void *>(safe_abort),
-                            reinterpret_cast<void **>(&sOrigAbort));
-        }
-        if (exitSym) {
-            A64HookFunction(exitSym,
-                            reinterpret_cast<void *>(safe_exit),
-                            reinterpret_cast<void **>(&sOrigExit));
-        }
-        if (_exitSym) {
-            A64HookFunction(_exitSym,
-                            reinterpret_cast<void *>(safe__exit),
-                            reinterpret_cast<void **>(&sOrig_Exit));
-        }
-        if (_ExitSym && _ExitSym != _exitSym) {
-            A64HookFunction(_ExitSym,
-                            reinterpret_cast<void *>(safe__exit),
-                            nullptr);
-        }
-        if (stackChkFailSym) {
-            A64HookFunction(stackChkFailSym,
-                            reinterpret_cast<void *>(safe_stack_chk_fail),
-                            reinterpret_cast<void **>(&sOrigStackChkFail));
-        }
-        if (dlIteratePhdrSym) {
-            A64HookFunction(dlIteratePhdrSym,
-                            reinterpret_cast<void *>(safe_dl_iterate_phdr),
-                            reinterpret_cast<void **>(&sOrigDlIteratePhdr));
-        }
-        if (dlsymSym) {
-            A64HookFunction(dlsymSym,
-                            reinterpret_cast<void *>(safe_dlsym),
-                            reinterpret_cast<void **>(&sOrigDlsym));
-        }
-#endif
-        if (!sOrigFree && freeSym) {
-            sOrigFree = reinterpret_cast<void (*)(void *)>(freeSym);
-        }
-        if (!sOrigSigaction && sigactionSym) {
-            sOrigSigaction = reinterpret_cast<int (*)(int, const struct sigaction *, struct sigaction *)>(sigactionSym);
-        }
-        if (!sOrigKill && killSym) sOrigKill = reinterpret_cast<int (*)(pid_t, int)>(killSym);
-        if (!sOrigTgkill && tgkillSym) sOrigTgkill = reinterpret_cast<int (*)(pid_t, pid_t, int)>(tgkillSym);
-        if (!sOrigRaise && raiseSym) sOrigRaise = reinterpret_cast<int (*)(int)>(raiseSym);
-        if (!sOrigAbort && abortSym) sOrigAbort = reinterpret_cast<void (*)(void)>(abortSym);
-        if (!sOrigPthreadSigmask && pthreadSigmaskSym) {
-            sOrigPthreadSigmask = reinterpret_cast<int (*)(int, const sigset_t *, sigset_t *)>(pthreadSigmaskSym);
-        }
-        if (!sOrigSigprocmask && sigprocmaskSym) {
-            sOrigSigprocmask = reinterpret_cast<int (*)(int, const sigset_t *, sigset_t *)>(sigprocmaskSym);
-        }
-        if (!sOrigSigprocmask64 && sigprocmask64Sym) {
-            sOrigSigprocmask64 = reinterpret_cast<int (*)(int, const sigset64_t *, sigset64_t *)>(sigprocmask64Sym);
-        }
-        if (!sOrigDlIteratePhdr && dlIteratePhdrSym) {
-            sOrigDlIteratePhdr = reinterpret_cast<int (*)(int (*)(struct dl_phdr_info *, size_t, void *), void *)>(dlIteratePhdrSym);
-        }
-        if (!sOrigDlsym && dlsymSym) {
-            sOrigDlsym = reinterpret_cast<void *(*)(void *, const char *)>(dlsymSym);
-        }
-
-        // Unblock SIGSYS, SIGSEGV, SIGBUS, SIGILL permanently on the current thread
-        sigset_t unblockSys{};
-        sigemptyset(&unblockSys);
-        sigaddset(&unblockSys, SIGSYS);
-        sigaddset(&unblockSys, SIGSEGV);
-        sigaddset(&unblockSys, SIGBUS);
-        sigaddset(&unblockSys, SIGILL);
-        sigaddset(&unblockSys, SIGABRT);
-        pthread_sigmask(SIG_UNBLOCK, &unblockSys, nullptr);
-    }
+    // Disabled: Prevents Tencent Anti-Cheat (libanort.so/libanogs.so) from detecting
+    // inline libc modifications and silently dropping the Unreal Engine RenderThread viewport.
+    return;
 }
 
 static int countMappedGameLibraries() {
@@ -1520,16 +1323,8 @@ static void *nativeGuardWatcherThreadMain(void * /*arg*/) {
 }
 
 static void startNativeGuardWatcherThread() {
-    bool expected = false;
-    if (!sWatcherThreadStarted.compare_exchange_strong(expected, true)) {
-        return;
-    }
-    pthread_t tid;
-    pthread_attr_t attr;
-    pthread_attr_init(&attr);
-    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
-    pthread_create(&tid, &attr, nativeGuardWatcherThreadMain, nullptr);
-    pthread_attr_destroy(&attr);
+    // Disabled: Background thread polling memory and rewriting GOT tables triggers anti-cheat scans
+    return;
 }
 }
 
