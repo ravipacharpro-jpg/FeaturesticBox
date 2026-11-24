@@ -380,7 +380,17 @@ public class CrashHandler implements Thread.UncaughtExceptionHandler {
                 sb.append("Device: ").append(Build.MANUFACTURER).append(" ").append(Build.MODEL).append("\n");
                 sb.append("Fingerprint: ").append(Build.FINGERPRINT).append("\n");
                 sb.append("Android: ").append(Build.VERSION.RELEASE).append(" (API ").append(Build.VERSION.SDK_INT).append(")\n\n");
-                sb.append("=== RECENT LOGCAT BUFFER (250 Lines) ===\n");
+                sb.append("=== ACTIVE THREADS DUMP ===\n");
+                try {
+                    for (java.util.Map.Entry<Thread, StackTraceElement[]> entry : Thread.getAllStackTraces().entrySet()) {
+                        Thread t = entry.getKey();
+                        sb.append("Thread [").append(t.getName()).append("] state=").append(t.getState()).append("\n");
+                        for (StackTraceElement ste : entry.getValue()) {
+                            sb.append("    at ").append(ste.toString()).append("\n");
+                        }
+                    }
+                } catch (Throwable ignored) {}
+                sb.append("\n=== RECENT LOGCAT BUFFER (250 Lines) ===\n");
                 sb.append(collectRecentLogcat(250));
 
                 postTelemetryPayload("Manual_Diagnostic", "diagnostic", sb.toString(), onComplete);

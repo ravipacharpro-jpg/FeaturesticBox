@@ -146,8 +146,6 @@ static bool isCriticalGameOrMainThread() {
                 || strcasestr(tname, "input") != nullptr
                 || strcasestr(tname, "event") != nullptr
                 || strcasestr(tname, "touch") != nullptr
-                || strcasestr(tname, "pool") != nullptr
-                || strcasestr(tname, "executor") != nullptr
                 || strcasestr(tname, "finalizer") != nullptr
                 || strcasestr(tname, "heaptask") != nullptr
                 || strcasestr(tname, "jit") != nullptr
