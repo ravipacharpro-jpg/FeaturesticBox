@@ -60,6 +60,7 @@ static struct sigaction sOldSigsegvAction{};
 static struct sigaction sOldSigbusAction{};
 static struct sigaction sOldSigabrtAction{};
 static struct sigaction sOldSigillAction{};
+static struct sigaction sOldSigquitAction{};
 static bool sSignalGuardInstalled = false;
 static std::atomic<int> sGameLibLoadedCount{0};
 static std::atomic<bool> sWatcherThreadStarted{false};
@@ -76,6 +77,7 @@ static inline void stripDangerousSignals(sigset_t *set) {
     sigdelset(set, SIGBUS);
     sigdelset(set, SIGILL);
     sigdelset(set, SIGABRT);
+    sigdelset(set, SIGQUIT);
 }
 
 static std::atomic<int> sCachedHostUid{-1};
@@ -431,25 +433,24 @@ static void safe_free(void *ptr) {
     }
 
     // 2. Jemalloc 2MB chunk verification (Android Bionic jemalloc)
-    // In Android Bionic jemalloc (2MB chunks, map_bias=13, map_bits offset 0x78):
+    // In Android Bionic jemalloc (2MB chunks, map_bias=13):
     // When an unallocated page (bit 0 == 0, e.g. mapbits: 0xbff0, 0x5ff0, 0xdfe0)
     // is passed to libc free(), jemalloc aborts with "Invalid %p passed to free: value not allocated".
     uintptr_t chunk = uptr & ~uintptr_t(0x1FFFFF);
     size_t pageind = (uptr - chunk) >> 12;
     if (pageind >= 13 && pageind < 512) {
         if (isPageMappedSafe(chunk)) {
-            const auto *chunkWords = reinterpret_cast<const volatile size_t *>(chunk);
-            uintptr_t arenaPtr = untagPtr(reinterpret_cast<const void *>(chunkWords[0]));
-            if (arenaPtr >= 0x10000ULL && arenaPtr < UINT64_C(0x0001000000000000) && (arenaPtr & 0x7ULL) == 0) {
-                uintptr_t mapSlot = chunk + 0x78 + (pageind - 13) * sizeof(size_t);
+            static const size_t kCandidateOffsets[] = {0x78, 0x70, 0x80, 0x68, 0x60, 0x88};
+            for (size_t offset : kCandidateOffsets) {
+                uintptr_t mapSlot = chunk + offset + (pageind - 13) * sizeof(size_t);
                 if (isPageMappedSafe(mapSlot)) {
                     size_t mapbits = *reinterpret_cast<const volatile size_t *>(mapSlot);
-                    if ((mapbits & 0x1ULL) == 0) {
-                        // Page is unallocated in jemalloc (e.g. mapbits: 0xbff0) -> silently drop to eliminate abort!
+                    if ((mapbits & 0x1ULL) == 0 && mapbits != 0) {
+                        // Page is unallocated in jemalloc (e.g. mapbits: 0x5ff0) -> silently drop to eliminate abort!
                         int cnt = ++sSuppressedFreeCount;
                         if (cnt <= 32) {
-                            ALOGW("HeapGuard: SUPPRESSED unallocated jemalloc chunk free(%p, chunk=%p, pageind=%zu, mapbits=0x%zx) [tid=%d, count=%d]",
-                                  ptr, reinterpret_cast<void *>(chunk), pageind, mapbits,
+                            ALOGW("HeapGuard: SUPPRESSED unallocated jemalloc chunk free(%p, chunk=%p, pageind=%zu, mapbits=0x%zx, offset=0x%zx) [tid=%d, count=%d]",
+                                  ptr, reinterpret_cast<void *>(chunk), pageind, mapbits, offset,
                                   static_cast<int>(gettid()), cnt);
                         }
                         return;
@@ -623,13 +624,9 @@ static void processElfRelaTable(uintptr_t baseAddr,
         // 1. Scoped memory allocator guard (protects against jemalloc unallocated free aborts; never touch UE4 engine allocator)
         if (hookMemoryAllocator) {
             if (strcmp(symName, "free") == 0
-                    || strcmp(symName, "_ZdlPv") == 0
-                    || strcmp(symName, "_ZdaPv") == 0) {
+                    || strncmp(symName, "_ZdlPv", 6) == 0
+                    || strncmp(symName, "_ZdaPv", 6) == 0) {
                 patchGotSlotSafe(gotSlot, reinterpret_cast<void *>(safe_free));
-                continue;
-            } else if (strcmp(symName, "_ZdlPvm") == 0
-                    || strcmp(symName, "_ZdaPvm") == 0) {
-                patchGotSlotSafe(gotSlot, reinterpret_cast<void *>(safe_delete_sized));
                 continue;
             }
         }
@@ -754,18 +751,13 @@ static int hookTargetLibrariesGotCallback(struct dl_phdr_info *info, size_t /*si
     }
 
     bool isHdmpve = (strstr(name, "libhdmpve") != nullptr || strstr(name, "hdmpve") != nullptr);
-    bool hookMemoryAllocator = isHdmpve
-            || (strstr(name, "libbgmi") != nullptr)
-            || (strstr(name, "libDARK") != nullptr)
-            || (strstr(name, "FeaturesticPlugin") != nullptr)
-            || (strstr(name, "libIMSDK") != nullptr)
-            || (strstr(name, "libTDataMaster") != nullptr);
+    bool isUE4 = (strstr(name, "libUE4") != nullptr || strstr(name, "UE4") != nullptr);
     bool isGameTarget = isHdmpve
             || (strstr(name, "libanort") != nullptr)
             || (strstr(name, "libanogs") != nullptr)
             || (strstr(name, "libCrashKit") != nullptr || strstr(name, "CrashKit") != nullptr)
             || (strstr(name, "libBugly") != nullptr)
-            || (strstr(name, "libUE4") != nullptr || strstr(name, "UE4") != nullptr)
+            || isUE4
             || (strstr(name, "libtersafe") != nullptr || strstr(name, "tersafe") != nullptr)
             || (strstr(name, "libturingmm") != nullptr)
             || (strstr(name, "libapollo") != nullptr || strstr(name, "apollo") != nullptr)
@@ -784,6 +776,8 @@ static int hookTargetLibrariesGotCallback(struct dl_phdr_info *info, size_t /*si
     if (!isGameTarget) {
         return 0;
     }
+
+    bool hookMemoryAllocator = isGameTarget && !isUE4;
 
     {
         std::lock_guard<std::mutex> lk(sHookedGotLibsMutex);
@@ -958,9 +952,11 @@ static void recordNativeCrashOffsetLog(int sig, int siCode, uintptr_t faultAddr,
 static void passiveNativeCrashDiagnosticsHandler(int sig, siginfo_t *info, void *ucontext);
 
 static void chainPreviousSignal(int sig, siginfo_t *info, void *ucontext) {
+    if (sig == SIGQUIT) return; // Suppress SIGQUIT unconditionally
     struct sigaction *prev = (sig == SIGSEGV) ? &sOldSigsegvAction
             : ((sig == SIGBUS) ? &sOldSigbusAction
-            : ((sig == SIGILL) ? &sOldSigillAction : &sOldSigabrtAction));
+            : ((sig == SIGILL) ? &sOldSigillAction
+            : ((sig == SIGQUIT) ? &sOldSigquitAction : &sOldSigabrtAction)));
     if (prev->sa_flags & SA_SIGINFO) {
         if (prev->sa_sigaction != nullptr
                 && reinterpret_cast<void *>(prev->sa_sigaction) != reinterpret_cast<void *>(&chainPreviousSignal)
@@ -1038,7 +1034,7 @@ static void initRealLibcProcessFunctions() {
 
 static int safe_kill(pid_t pid, int sig) {
     initRealLibcProcessFunctions();
-    if ((sig == SIGSEGV || sig == SIGBUS || sig == SIGABRT || sig == SIGKILL || sig == SIGSYS || sig == SIGILL || sig == SIGTERM)
+    if ((sig == SIGSEGV || sig == SIGBUS || sig == SIGABRT || sig == SIGKILL || sig == SIGSYS || sig == SIGILL || sig == SIGTERM || sig == SIGQUIT)
             && (pid == getpid() || pid == 0 || pid == -1)) {
         ALOGW("FEATURESTIC GUARD: Suppressed kill(pid=%d, sig=%d) from tid=%d", static_cast<int>(pid), sig, static_cast<int>(gettid()));
         return 0;
@@ -1048,7 +1044,7 @@ static int safe_kill(pid_t pid, int sig) {
 
 static int safe_tgkill(pid_t tgid, pid_t tid, int sig) {
     initRealLibcProcessFunctions();
-    if ((sig == SIGSEGV || sig == SIGBUS || sig == SIGABRT || sig == SIGKILL || sig == SIGSYS || sig == SIGILL || sig == SIGTERM)
+    if ((sig == SIGSEGV || sig == SIGBUS || sig == SIGABRT || sig == SIGKILL || sig == SIGSYS || sig == SIGILL || sig == SIGTERM || sig == SIGQUIT)
             && (tgid == getpid() || tgid == 0 || tgid == -1)) {
         ALOGW("FEATURESTIC GUARD: Suppressed tgkill(tgid=%d, tid=%d, sig=%d) from tid=%d",
               static_cast<int>(tgid), static_cast<int>(tid), sig, static_cast<int>(gettid()));
@@ -1059,7 +1055,7 @@ static int safe_tgkill(pid_t tgid, pid_t tid, int sig) {
 
 static int safe_raise(int sig) {
     initRealLibcProcessFunctions();
-    if (sig == SIGSEGV || sig == SIGBUS || sig == SIGABRT || sig == SIGSYS || sig == SIGILL || sig == SIGTERM || sig == SIGKILL) {
+    if (sig == SIGSEGV || sig == SIGBUS || sig == SIGABRT || sig == SIGSYS || sig == SIGILL || sig == SIGTERM || sig == SIGKILL || sig == SIGQUIT) {
         ALOGW("FEATURESTIC GUARD: Suppressed raise(sig=%d) from tid=%d", sig, static_cast<int>(gettid()));
         return 0;
     }
@@ -1068,7 +1064,7 @@ static int safe_raise(int sig) {
 
 static int safe_pthread_kill(pthread_t thread, int sig) {
     initRealLibcProcessFunctions();
-    if (sig == SIGSEGV || sig == SIGBUS || sig == SIGABRT || sig == SIGSYS || sig == SIGILL || sig == SIGTERM || sig == SIGKILL) {
+    if (sig == SIGSEGV || sig == SIGBUS || sig == SIGABRT || sig == SIGSYS || sig == SIGILL || sig == SIGTERM || sig == SIGKILL || sig == SIGQUIT) {
         ALOGW("FEATURESTIC GUARD: Suppressed pthread_kill(thread=%p, sig=%d) from tid=%d",
               reinterpret_cast<void *>(thread), sig, static_cast<int>(gettid()));
         return 0;
@@ -1107,7 +1103,8 @@ static long safe_syscall(long number, long a1, long a2, long a3, long a4, long a
             if (oldact != nullptr) {
                 *oldact = (sig == SIGSEGV) ? sOldSigsegvAction
                         : ((sig == SIGBUS) ? sOldSigbusAction
-                        : ((sig == SIGILL) ? sOldSigillAction : sOldSigabrtAction));
+                        : ((sig == SIGILL) ? sOldSigillAction
+                        : ((sig == SIGQUIT) ? sOldSigquitAction : sOldSigabrtAction)));
             }
             if (sig == SIGBUS || sig == SIGILL || sig == SIGSYS || sig == SIGQUIT) {
                 return 0; // Unconditionally prevent overwriting or stripping protective handlers
@@ -1249,8 +1246,8 @@ static void safe_abort(void) {
     pid_t pid = getpid();
     ALOGW("FEATURESTIC GUARD: Intercepted abort() from tid=%d (name=%s)",
           static_cast<int>(tid), tname[0] ? tname : "?");
-    if (tid != pid && !isCriticalGameOrMainThread() && !isGraphicsOrRenderThread(tname) && !isArtInternalDaemonThread(tname)) {
-        ALOGW("FEATURESTIC GUARD: Terminating non-critical worker thread calling abort() tid=%d (%s) cleanly",
+    if (tid != pid && !isArtInternalDaemonThread(tname)) {
+        ALOGW("FEATURESTIC GUARD: Terminating worker thread calling abort() tid=%d (%s) cleanly",
               static_cast<int>(tid), tname[0] ? tname : "?");
         terminateCallingThreadCleanly(0);
         return;
@@ -1569,11 +1566,18 @@ static void passiveNativeCrashDiagnosticsHandler(int sig, siginfo_t *info, void 
     char tname[32] = {0};
     prctl(PR_GET_NAME, reinterpret_cast<unsigned long>(tname), 0, 0, 0);
 
+    // Suppress SIGQUIT (Signal 3) from screenshot gestures or ANR traces
+    if (sig == SIGQUIT) {
+        ALOGW("FEATURESTIC GUARD: Suppressed SIGQUIT (Signal 3) on tid=%d (%s)",
+              static_cast<int>(gettid()), tname[0] ? tname : "?");
+        return;
+    }
+
     // 1. Suppress all userspace software kills (tgkill / kill / tkill)
     if (info != nullptr && info->si_code <= 0) {
         ALOGW("FEATURESTIC GUARD: Suppressed software kill signal %d (code=%d, sender_pid=%d) on tid=%d (%s)",
               sig, siCode, info->si_pid, static_cast<int>(gettid()), tname[0] ? tname : "?");
-        if (sig == SIGABRT && gettid() != getpid() && !isCriticalGameOrMainThread()) {
+        if (sig == SIGABRT && gettid() != getpid() && !isArtInternalDaemonThread(tname)) {
             ALOGW("FEATURESTIC GUARD: Cleanly terminating aborted worker thread tid=%d (%s)",
                   static_cast<int>(gettid()), tname[0] ? tname : "?");
             terminateCallingThreadCleanly(0);
@@ -1596,7 +1600,7 @@ static void passiveNativeCrashDiagnosticsHandler(int sig, siginfo_t *info, void 
     // Anti-cheat intentionally dereferences misaligned or unmapped memory to raise SIGBUS.
     // Never allow SIGBUS to terminate the process!
     if (sig == SIGBUS) {
-        if (!isCriticalGameOrMainThread() && !isArtInternalDaemonThread(tname) && gettid() != getpid()) {
+        if (!isArtInternalDaemonThread(tname) && gettid() != getpid()) {
             ALOGW("FEATURESTIC RESCUE: Safely terminating rogue worker thread tid=%d (%s) on signal %d cleanly",
                   static_cast<int>(gettid()), tname[0] ? tname : "?", sig);
             terminateCallingThreadCleanly(0);
@@ -1843,12 +1847,13 @@ static void installOrReassertPassiveNativeCrashDiagnostics() {
     struct sigaction sa{};
     sa.sa_sigaction = passiveNativeCrashDiagnosticsHandler;
     sigemptyset(&sa.sa_mask);
-    sa.sa_flags = SA_SIGINFO | SA_NODEFER;
+    sa.sa_flags = SA_SIGINFO | SA_NODEFER | SA_ONSTACK;
 
     sigaction(SIGBUS, &sa, &sOldSigbusAction);
     sigaction(SIGILL, &sa, &sOldSigillAction);
     sigaction(SIGSEGV, &sa, &sOldSigsegvAction);
     sigaction(SIGABRT, &sa, &sOldSigabrtAction);
+    sigaction(SIGQUIT, &sa, &sOldSigquitAction);
     sSignalGuardInstalled = true;
 
     sigset_t unblockSet;
@@ -1858,10 +1863,11 @@ static void installOrReassertPassiveNativeCrashDiagnostics() {
     sigaddset(&unblockSet, SIGSEGV);
     sigaddset(&unblockSet, SIGABRT);
     sigaddset(&unblockSet, SIGSYS);
+    sigaddset(&unblockSet, SIGQUIT);
     pthread_sigmask(SIG_UNBLOCK, &unblockSet, nullptr);
     static std::atomic<bool> sLogged{false};
     if (!sLogged.exchange(true)) {
-        ALOGI("FEATURESTIC GUARD: Installed passive native crash diagnostics for SIGSEGV/SIGBUS/SIGILL/SIGABRT");
+        ALOGI("FEATURESTIC GUARD: Installed passive native crash diagnostics for SIGSEGV/SIGBUS/SIGILL/SIGABRT/SIGQUIT");
     }
 }
 
@@ -1888,11 +1894,10 @@ static int safe_sigaction_common(int sig,
         return 0;
     }
     if (sig == SIGQUIT) {
-        // Protect ART SignalCatcher from anti-cheat (CrashKit / Bugly) hijacking SIGQUIT
-        if (sSignalGuardInstalled) {
-            return 0; // Ignore anti-cheat overriding SIGQUIT
+        if (oldact != nullptr) {
+            *oldact = sOldSigquitAction;
         }
-        return origFn ? origFn(sig, act, oldact) : 0;
+        return 0; // Unconditionally protect protective SIGQUIT suppression handler
     }
     if (sig == SIGSEGV || sig == SIGBUS || sig == SIGABRT || sig == SIGILL) {
         if (sig == SIGBUS || sig == SIGILL) {
