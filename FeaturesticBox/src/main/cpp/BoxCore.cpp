@@ -878,12 +878,6 @@ static void passiveNativeCrashDiagnosticsHandler(int sig, siginfo_t *info, void 
             // Safely return to external caller with return value x0 = 0 (NULL/false).
             // Intra-function loops are strictly rejected to prevent 100% CPU lockups.
             if (tConsecutiveFaults > 1) {
-                if (strstr(tname, "RHIThread") != nullptr || strstr(tname, "Render") != nullptr) {
-                    ALOGW("FEATURESTIC RESCUE: Advancing PC past fault on render thread tid=%d (%s) PC %p",
-                          static_cast<int>(gettid()), tname[0] ? tname : "?", reinterpret_cast<void *>(currentPc));
-                    uc->uc_mcontext.pc += 4;
-                    return;
-                }
                 if (callerPc != 0) {
                     ALOGW("FEATURESTIC RESCUE: Safely aborting failing call on tid=%d (%s) -> returning to caller PC %p (x0=0)",
                           static_cast<int>(gettid()), tname[0] ? tname : "?", reinterpret_cast<void *>(callerPc));
