@@ -1078,6 +1078,12 @@ static bool isCriticalGameOrMainThreadHelper() {
 }
 
 static long safe_syscall(long number, long arg1, long arg2, long arg3, long arg4, long arg5, long arg6) {
+    // STEP 1 A/B TEST: pass signal/exit/prctl/ptrace syscalls straight to kernel
+    if (number == 93 || number == 94 || number == 129 || number == 130 ||
+        number == 131 || number == 132 || number == 134 || number == 135 ||
+        number == 167 || number == 117) {
+        return sOrigSyscall ? sOrigSyscall(number, arg1, arg2, arg3, arg4, arg5, arg6) : -1;
+    }
     switch (number) {
         case 56: // __NR_openat
             return safe_openat(static_cast<int>(arg1), reinterpret_cast<const char *>(arg2), static_cast<int>(arg3), static_cast<mode_t>(arg4));
@@ -1353,6 +1359,8 @@ static void seccompSigsysHandler(int sig, siginfo_t *info, void *ucontext) {
 }
 
 static bool installSeccompVfsFilter() {
+    // STEP 1 A/B TEST: disable SECCOMP-BPF signal guard
+    return false;
     static std::atomic<bool> sInstalled{false};
     if (sInstalled.exchange(true)) return true;
 

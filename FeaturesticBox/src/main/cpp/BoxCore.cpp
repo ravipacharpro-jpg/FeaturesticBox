@@ -844,6 +844,8 @@ static int hookTargetLibrariesGotCallback(struct dl_phdr_info *info, size_t /*si
 }
 
 static void tryHookTargetLibrariesGot() {
+    // STEP 1 A/B TEST: disable GOT hooks (safe_free/sigaction/kill/tgkill)
+    return;
     dl_iterate_phdr(hookTargetLibrariesGotCallback, nullptr);
 }
 
@@ -1858,6 +1860,8 @@ extern "C" {
 }
 
 static void installOrReassertPassiveNativeCrashDiagnostics() {
+    // STEP 1 A/B TEST: disable custom SIGSEGV/SIGBUS/SIGABRT handler & FEATURESTIC RESCUE
+    return;
     initRealLibcProcessFunctions();
     gOurSignalHandler = reinterpret_cast<void *>(passiveNativeCrashDiagnosticsHandler);
     struct sigaction sa{};
