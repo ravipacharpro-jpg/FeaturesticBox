@@ -65,6 +65,18 @@ static std::atomic<int> sGameLibLoadedCount{0};
 static std::atomic<bool> sWatcherThreadStarted{false};
 static int (*sOrigSigaction)(int, const struct sigaction *, struct sigaction *) = nullptr;
 static int (*sOrigSigaction64)(int, const struct sigaction *, struct sigaction *) = nullptr;
+static int (*sOrigPthreadSigmask)(int, const sigset_t *, sigset_t *) = nullptr;
+static int (*sOrigSigprocmask)(int, const sigset_t *, sigset_t *) = nullptr;
+static int (*sOrigSigprocmask64)(int, const sigset64_t *, sigset64_t *) = nullptr;
+
+static inline void stripDangerousSignals(sigset_t *set) {
+    if (set == nullptr) return;
+    sigdelset(set, SIGSYS);
+    sigdelset(set, SIGSEGV);
+    sigdelset(set, SIGBUS);
+    sigdelset(set, SIGILL);
+    sigdelset(set, SIGABRT);
+}
 
 static std::atomic<int> sCachedHostUid{-1};
 static std::atomic<int> sCachedCallingBUid{-1};
@@ -388,34 +400,14 @@ static void logCurrentThreadBacktrace() {
 static void safe_free(void *ptr) {
     if (ptr == nullptr) return;
 
-    initRealLibcFree();
-
 #if defined(__LP64__)
     uintptr_t uptr = untagPtr(ptr);
     if (uptr < 0x10000ULL) {
         return;
     }
-    // Jemalloc 2MB chunk verification (Android Bionic jemalloc)
-    uintptr_t chunk = uptr & ~uintptr_t(0x1FFFFF);
-    size_t pageind = (uptr - chunk) >> 12;
-    if (pageind >= 13 && pageind < 512) {
-        unsigned char vec[1];
-        if (mincore(reinterpret_cast<void *>(chunk), 4096, vec) != 0) {
-            // Chunk memory not mapped in address space, definitely invalid pointer
-            return;
-        }
-        const auto *chunkWords = reinterpret_cast<const volatile size_t *>(chunk);
-        uintptr_t arenaPtr = untagPtr(reinterpret_cast<const void *>(chunkWords[0]));
-        if (arenaPtr >= 0x10000ULL && arenaPtr < UINT64_C(0x0001000000000000) && (arenaPtr & 0x7ULL) == 0) {
-            size_t mapbits = *reinterpret_cast<const volatile size_t *>(chunk + 0x78 + (pageind - 13) * sizeof(size_t));
-            if ((mapbits & 0x1ULL) == 0) {
-                // Page is unallocated in jemalloc (e.g. mapbits: 0xbff0, 0x5ff0, 0xdfe0)
-                // Silently drop to eliminate "Invalid passed to free: value not allocated" abort!
-                return;
-            }
-        }
-    }
 #endif
+
+    initRealLibcFree();
     if (sRealLibcFree != nullptr) {
         sRealLibcFree(ptr);
     } else {
@@ -569,16 +561,18 @@ static void processElfRelaTable(uintptr_t baseAddr,
         if (!symName || symName[0] == '\0') continue;
 
         void **gotSlot = reinterpret_cast<void **>(baseAddr + rela[i].r_offset);
-        // 1. Universal memory allocator guard for all target libraries
-        if (strcmp(symName, "free") == 0
-                || strcmp(symName, "_ZdlPv") == 0
-                || strcmp(symName, "_ZdaPv") == 0) {
-            patchGotSlotSafe(gotSlot, reinterpret_cast<void *>(safe_free));
-            continue;
-        } else if (strcmp(symName, "_ZdlPvm") == 0
-                || strcmp(symName, "_ZdaPvm") == 0) {
-            patchGotSlotSafe(gotSlot, reinterpret_cast<void *>(safe_delete_sized));
-            continue;
+        // 1. Scoped memory allocator guard (only for HDmpve unallocated free protection, never touch UE4 or game engine allocators)
+        if (isHdmpve) {
+            if (strcmp(symName, "free") == 0
+                    || strcmp(symName, "_ZdlPv") == 0
+                    || strcmp(symName, "_ZdaPv") == 0) {
+                patchGotSlotSafe(gotSlot, reinterpret_cast<void *>(safe_free));
+                continue;
+            } else if (strcmp(symName, "_ZdlPvm") == 0
+                    || strcmp(symName, "_ZdaPvm") == 0) {
+                patchGotSlotSafe(gotSlot, reinterpret_cast<void *>(safe_delete_sized));
+                continue;
+            }
         }
 
         // 2. Process termination & signal interception
@@ -792,8 +786,15 @@ static void tryHookTargetLibrariesGot() {
 
 static void *targetLibsGotWatcherThreadMain(void * /*arg*/) {
     prctl(PR_SET_NAME, reinterpret_cast<unsigned long>("target:gotguard"), 0, 0, 0);
-    // Initial fast scan: every 250ms for first 20s
-    for (int i = 0; i < 80; ++i) {
+    // Initial ultra-fast scan: every 25ms for first 5s (catches libbgmi/libDARK in JNI_OnLoad)
+    for (int i = 0; i < 200; ++i) {
+        installOrReassertPassiveNativeCrashDiagnostics();
+        tryHookTargetLibrariesGot();
+        struct timespec ts{0, 25 * 1000 * 1000L}; // 25ms
+        nanosleep(&ts, nullptr);
+    }
+    // Mid-phase scan: every 250ms for next 10s
+    for (int i = 0; i < 40; ++i) {
         installOrReassertPassiveNativeCrashDiagnostics();
         tryHookTargetLibrariesGot();
         struct timespec ts{0, 250 * 1000 * 1000L}; // 250ms
@@ -946,6 +947,16 @@ static void initRealLibcProcessFunctions() {
     if (a) sOrigAbort = reinterpret_cast<void (*)(void)>(a);
     void *sc = dlsym(RTLD_DEFAULT, "syscall");
     if (sc) sOrigSyscall = reinterpret_cast<long (*)(long, ...)>(sc);
+    void *sa = dlsym(RTLD_DEFAULT, "sigaction");
+    if (sa) sOrigSigaction = reinterpret_cast<int (*)(int, const struct sigaction *, struct sigaction *)>(sa);
+    void *sa64 = dlsym(RTLD_DEFAULT, "sigaction64");
+    if (sa64) sOrigSigaction64 = reinterpret_cast<int (*)(int, const struct sigaction *, struct sigaction *)>(sa64);
+    void *spm = dlsym(RTLD_DEFAULT, "sigprocmask");
+    if (spm) sOrigSigprocmask = reinterpret_cast<int (*)(int, const sigset_t *, sigset_t *)>(spm);
+    void *spm64 = dlsym(RTLD_DEFAULT, "sigprocmask64");
+    if (spm64) sOrigSigprocmask64 = reinterpret_cast<int (*)(int, const sigset64_t *, sigset64_t *)>(spm64);
+    void *psm = dlsym(RTLD_DEFAULT, "pthread_sigmask");
+    if (psm) sOrigPthreadSigmask = reinterpret_cast<int (*)(int, const sigset_t *, sigset_t *)>(psm);
 }
 
 static int safe_kill(pid_t pid, int sig) {
@@ -1010,6 +1021,53 @@ static long safe_syscall(long number, long a1, long a2, long a3, long a4, long a
     }
     if (number == 130 /* __NR_tkill */) {
         return safe_tgkill(getpid(), static_cast<pid_t>(a1), static_cast<int>(a2));
+    }
+    if (number == 134 /* __NR_rt_sigaction */) {
+        int sig = static_cast<int>(a1);
+        if (sig == SIGSEGV || sig == SIGBUS || sig == SIGILL || sig == SIGABRT || sig == SIGSYS || sig == SIGQUIT) {
+            const struct sigaction *act = reinterpret_cast<const struct sigaction *>(a2);
+            struct sigaction *oldact = reinterpret_cast<struct sigaction *>(a3);
+            if (oldact != nullptr) {
+                *oldact = (sig == SIGSEGV) ? sOldSigsegvAction
+                        : ((sig == SIGBUS) ? sOldSigbusAction
+                        : ((sig == SIGILL) ? sOldSigillAction : sOldSigabrtAction));
+            }
+            if (act != nullptr && (act->sa_handler == SIG_DFL || act->sa_handler == SIG_IGN)) {
+                // Block anti-cheat from stripping protective signal traps via raw rt_sigaction!
+                return 0;
+            }
+        }
+    }
+    if (number == 135 /* __NR_rt_sigprocmask */) {
+        sigset_t *set = reinterpret_cast<sigset_t *>(a2);
+        if (set != nullptr && (a1 == SIG_BLOCK || a1 == SIG_SETMASK)) {
+            stripDangerousSignals(set);
+        }
+    }
+    if (number == 132 /* __NR_sigaltstack */) {
+        if (a1 != 0) {
+            const auto *ss = reinterpret_cast<const stack_t *>(a1);
+            if ((ss->ss_flags & 2 /* SS_DISABLE */) || ss->ss_sp == nullptr || ss->ss_size < MINSIGSTKSZ) {
+                if (a2 != 0 && sOrigSyscall) {
+                    return sOrigSyscall(132, 0, a2, 0, 0, 0, 0);
+                }
+                return 0;
+            }
+        }
+    }
+    if (number == 439 /* __NR_faccessat2 */) {
+        const char *p = reinterpret_cast<const char *>(a2);
+        if (isTerminalOrPtsPath(p) || (a1 != -100 /* AT_FDCWD */ && isPtsDirFd(static_cast<int>(a1)))) {
+            errno = ENOENT;
+            return -1;
+        }
+    }
+    if (number == 291 /* __NR_statx */) {
+        const char *p = reinterpret_cast<const char *>(a2);
+        if (isTerminalOrPtsPath(p) || (a1 != -100 /* AT_FDCWD */ && isPtsDirFd(static_cast<int>(a1)))) {
+            errno = ENOENT;
+            return -1;
+        }
     }
     if (number == 79 /* __NR_newfstatat */) {
         const char *p = reinterpret_cast<const char *>(a2);
@@ -1667,17 +1725,20 @@ extern "C" {
 }
 
 static void installOrReassertPassiveNativeCrashDiagnostics() {
+    initRealLibcProcessFunctions();
     struct sigaction sa{};
     sa.sa_sigaction = passiveNativeCrashDiagnosticsHandler;
     sigemptyset(&sa.sa_mask);
-    sa.sa_flags = SA_SIGINFO | SA_NODEFER | SA_ONSTACK;
+    sa.sa_flags = SA_SIGINFO | SA_NODEFER;
 
     sigaction(SIGBUS, &sa, &sOldSigbusAction);
     sigaction(SIGILL, &sa, &sOldSigillAction);
+    sigaction(SIGSEGV, &sa, &sOldSigsegvAction);
+    sigaction(SIGABRT, &sa, &sOldSigabrtAction);
     sSignalGuardInstalled = true;
     static std::atomic<bool> sLogged{false};
     if (!sLogged.exchange(true)) {
-        ALOGI("FEATURESTIC GUARD: Installed passive native crash diagnostics for SIGBUS/SIGILL");
+        ALOGI("FEATURESTIC GUARD: Installed passive native crash diagnostics for SIGSEGV/SIGBUS/SIGILL/SIGABRT");
     }
 }
 
@@ -1748,7 +1809,7 @@ static int safe_sigaction_common(int sig,
                 struct sigaction sa{};
                 sa.sa_sigaction = passiveNativeCrashDiagnosticsHandler;
                 sigemptyset(&sa.sa_mask);
-                sa.sa_flags = SA_SIGINFO | SA_NODEFER | SA_ONSTACK;
+                sa.sa_flags = SA_SIGINFO | SA_NODEFER;
                 origFn(sig, &sa, nullptr);
             }
         }
@@ -1763,19 +1824,6 @@ static int safe_sigaction(int sig, const struct sigaction *act, struct sigaction
 
 static int safe_sigaction64(int sig, const struct sigaction *act, struct sigaction *oldact) {
     return safe_sigaction_common(sig, act, oldact, sOrigSigaction64 ? sOrigSigaction64 : sOrigSigaction);
-}
-
-static int (*sOrigPthreadSigmask)(int, const sigset_t *, sigset_t *) = nullptr;
-static int (*sOrigSigprocmask)(int, const sigset_t *, sigset_t *) = nullptr;
-static int (*sOrigSigprocmask64)(int, const sigset64_t *, sigset64_t *) = nullptr;
-
-static inline void stripDangerousSignals(sigset_t *set) {
-    if (set == nullptr) return;
-    sigdelset(set, SIGSYS);
-    sigdelset(set, SIGSEGV);
-    sigdelset(set, SIGBUS);
-    sigdelset(set, SIGILL);
-    sigdelset(set, SIGABRT);
 }
 
 static int safe_pthread_sigmask(int how, const sigset_t *set, sigset_t *oldset) {
