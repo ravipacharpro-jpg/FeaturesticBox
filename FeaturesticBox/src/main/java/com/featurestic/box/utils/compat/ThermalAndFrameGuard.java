@@ -112,9 +112,6 @@ public final class ThermalAndFrameGuard {
         boostRenderAndGameThreads();
     }
 
-    private static final java.util.Set<SurfaceView> sHookedSurfaces =
-            java.util.Collections.synchronizedSet(java.util.Collections.newSetFromMap(new java.util.WeakHashMap<>()));
-
     public static void applyToActivityWindow(final Activity activity) {
         try {
             com.featurestic.box.fake.service.IDisplayManagerProxy.flushDisplayInfoCache();
@@ -137,46 +134,9 @@ public final class ThermalAndFrameGuard {
             if (lp != null) {
                 lp.preferredRefreshRate = (float) targetFps;
                 setMinMaxRefreshRateFields(lp, (float) targetFps);
-
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                    Display display = activity.getWindowManager().getDefaultDisplay();
-                    if (display != null) {
-                        Display.Mode currentMode = display.getMode();
-                        Display.Mode[] modes = display.getSupportedModes();
-                        Display.Mode bestSameRes = null;
-                        Display.Mode bestAnyRes = null;
-                        if (modes != null) {
-                            for (Display.Mode m : modes) {
-                                float rate = m.getRefreshRate();
-                                if (rate > targetFps + 6f) continue;
-                                boolean sameRes = currentMode != null
-                                        && m.getPhysicalWidth() == currentMode.getPhysicalWidth()
-                                        && m.getPhysicalHeight() == currentMode.getPhysicalHeight();
-                                if (sameRes) {
-                                    if (bestSameRes == null || Math.abs(rate - targetFps) < Math.abs(bestSameRes.getRefreshRate() - targetFps)) {
-                                        bestSameRes = m;
-                                    }
-                                }
-                                if (bestAnyRes == null || Math.abs(rate - targetFps) < Math.abs(bestAnyRes.getRefreshRate() - targetFps)) {
-                                    bestAnyRes = m;
-                                }
-                            }
-                        }
-                        Display.Mode chosen = bestSameRes != null ? bestSameRes : bestAnyRes;
-                        if (chosen != null) {
-                            lp.preferredDisplayModeId = chosen.getModeId();
-                        }
-                    }
-                }
+                // Safe Window attributes only: NEVER touch lp.preferredDisplayModeId or SurfaceControl
+                // to prevent Android 16 display mode recreation and SkiaOpenGLPipeline surface detachment (surface=NULL).
                 window.setAttributes(lp);
-            }
-
-            View decor = window.getDecorView();
-            if (decor != null) {
-                decor.post(() -> applySurfaceFrameRateRecursive(decor, (float) targetFps));
-                decor.postDelayed(() -> applySurfaceFrameRateRecursive(decor, (float) targetFps), 1200L);
-                decor.postDelayed(() -> applySurfaceFrameRateRecursive(decor, (float) targetFps), 3200L);
-                decor.postDelayed(() -> applySurfaceFrameRateRecursive(decor, (float) targetFps), 6500L);
             }
         } catch (Throwable ignored) {
         }
@@ -200,80 +160,6 @@ public final class ThermalAndFrameGuard {
         }
     }
 
-    private static void applySurfaceFrameRateRecursive(View root, float targetFps) {
-        if (root == null || Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return;
-        try {
-            List<SurfaceView> surfaces = new ArrayList<>();
-            if (root instanceof ViewGroup) {
-                collectSurfaceViews((ViewGroup) root, surfaces);
-            }
-            for (final SurfaceView sv : surfaces) {
-                if (sv == null || sv.getHolder() == null) continue;
-                if (sHookedSurfaces.add(sv)) {
-                    sv.getHolder().addCallback(new android.view.SurfaceHolder.Callback() {
-                        @Override
-                        public void surfaceCreated(android.view.SurfaceHolder holder) {
-                            applySurfaceFrameRateRecursive(sv, (float) getTargetFps());
-                        }
-                        @Override
-                        public void surfaceChanged(android.view.SurfaceHolder holder, int format, int w, int h) {
-                            applySurfaceFrameRateRecursive(sv, (float) getTargetFps());
-                        }
-                        @Override
-                        public void surfaceDestroyed(android.view.SurfaceHolder holder) {
-                        }
-                    });
-                }
-                Surface surface = sv.getHolder().getSurface();
-                if (surface != null && surface.isValid()) {
-                    try {
-                        Method m3 = Surface.class.getMethod("setFrameRate", float.class, int.class, int.class);
-                        m3.invoke(surface, targetFps, 1, 1);
-                    } catch (Throwable fallback) {
-                        try {
-                            Method m2 = Surface.class.getMethod("setFrameRate", float.class, int.class);
-                            m2.invoke(surface, targetFps, 1);
-                        } catch (Throwable ignored) {
-                        }
-                    }
-                }
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                    try {
-                        SurfaceControl sc = sv.getSurfaceControl();
-                        if (sc != null && sc.isValid()) {
-                            SurfaceControl.Transaction tx = new SurfaceControl.Transaction();
-                            try {
-                                Method txSet = SurfaceControl.Transaction.class.getMethod(
-                                        "setFrameRate", SurfaceControl.class, float.class, int.class, int.class);
-                                txSet.invoke(tx, sc, targetFps, 1, 1);
-                                tx.apply();
-                            } finally {
-                                try {
-                                    tx.close();
-                                } catch (Throwable ignored) {
-                                }
-                            }
-                        }
-                    } catch (Throwable ignored) {
-                    }
-                }
-            }
-        } catch (Throwable ignored) {
-        }
-    }
-
-    private static void collectSurfaceViews(ViewGroup group, List<SurfaceView> out) {
-        if (group == null) return;
-        for (int i = 0; i < group.getChildCount(); i++) {
-            View child = group.getChildAt(i);
-            if (child instanceof SurfaceView) {
-                out.add((SurfaceView) child);
-            } else if (child instanceof ViewGroup) {
-                collectSurfaceViews((ViewGroup) child, out);
-            }
-        }
-    }
-
     private static volatile long sLastThermalStabilizeMs = 0L;
 
     public static void onThermalTelemetryTick(Activity activity, float batteryTempCelsius, int currentFps) {
@@ -289,13 +175,6 @@ public final class ThermalAndFrameGuard {
             } catch (Throwable ignored) {
             }
             stabilizeThreadsUnderThermalLoad();
-            try {
-                Window window = activity.getWindow();
-                if (window != null && window.getDecorView() != null) {
-                    applySurfaceFrameRateRecursive(window.getDecorView(), (float) getTargetFps());
-                }
-            } catch (Throwable ignored) {
-            }
         }
     }
 

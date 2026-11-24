@@ -69,6 +69,7 @@ public class RCore {
                 || path.startsWith("/apex/")
                 || path.startsWith("/vendor/firmware/")
                 || path.contains("/SdCard/")
+                || path.contains("/Sdcard/")
                 || path.contains("/files/data/")
                 || path.contains("/files/user_de/")) {
             return path;

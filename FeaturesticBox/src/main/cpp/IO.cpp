@@ -15,6 +15,7 @@ const char *IO::redirectPath(const char *__path) {
         return "/dev/null";
     }
     if (strstr(__path, "/SdCard/") != nullptr
+            || strstr(__path, "/Sdcard/") != nullptr
             || strstr(__path, "/files/data/") != nullptr
             || strstr(__path, "/files/user_de/") != nullptr
             || strstr(__path, "/files/profiles/") != nullptr
