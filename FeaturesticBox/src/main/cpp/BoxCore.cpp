@@ -373,41 +373,18 @@ static void safe_free(void *ptr) {
     if (uptr < 0x10000ULL) {
         return;
     }
-    // 1. Suppress if the memory address is unmapped in process address space.
-    if (!isPageMappedSafe(uptr)) {
-        int cnt = ++sSuppressedFreeCount;
-        char tname[32] = {0};
-        prctl(PR_GET_NAME, reinterpret_cast<unsigned long>(tname), 0, 0, 0);
-        ALOGW("HeapGuard: SUPPRESSED unmapped free(%p) caller=%p (count=%d, tid=%d [%s])",
-              ptr, __builtin_return_address(0), cnt, static_cast<int>(gettid()), tname[0] ? tname : "?");
-        return;
-    }
-
-    // 2. Suppress if address belongs to an unallocated jemalloc arena chunk page.
-    // In Android Bionic jemalloc (2MB chunks, map_bias=13, map_bits offset 0x78):
-    // NOTE: Android 11+ (API >= 30) uses Scudo, which does NOT use jemalloc chunk headers!
-    // Running this on Android 11+ causes false-positive suppression of valid frees.
-    if (android_get_device_api_level() < 30) {
-        uintptr_t chunk = uptr & ~uintptr_t(0x1FFFFF);
-        size_t pageind = (uptr - chunk) >> 12;
-        if (pageind >= 13 && pageind < 512) {
-            if (isPageMappedSafe(chunk)) {
-                const auto *chunkWords = reinterpret_cast<const volatile size_t *>(chunk);
-                uintptr_t arenaPtr = untagPtr(reinterpret_cast<const void *>(chunkWords[0]));
-                if (arenaPtr >= 0x10000ULL && arenaPtr < UINT64_C(0x0001000000000000) && (arenaPtr & 0x7ULL) == 0) {
-                    // Genuine jemalloc chunk header verified: read mapbits at chunk + 0x78 + (pageind - 13)*8
-                    size_t mapbits = *reinterpret_cast<const volatile size_t *>(chunk + 0x78 + (pageind - 13) * sizeof(size_t));
-                    if ((mapbits & 0x1ULL) == 0) {
-                        // Page is unallocated (e.g. mapbits == 0x5ff0, 0xdfe0, or 0xbff0) -> silently drop to prevent abort()!
-                        int cnt = ++sSuppressedFreeCount;
-                        char tname[32] = {0};
-                        prctl(PR_GET_NAME, reinterpret_cast<unsigned long>(tname), 0, 0, 0);
-                        ALOGW("HeapGuard: SUPPRESSED unallocated chunk free(%p, chunk=%p, pageind=%zu, mapbits=0x%zx) caller=%p [tid=%d, %s]",
-                              ptr, reinterpret_cast<void *>(chunk), pageind, mapbits,
-                              __builtin_return_address(0), static_cast<int>(gettid()), tname[0] ? tname : "?");
-                        return;
-                    }
-                }
+    // Jemalloc 2MB chunk verification (Android Bionic jemalloc)
+    uintptr_t chunk = uptr & ~uintptr_t(0x1FFFFF);
+    size_t pageind = (uptr - chunk) >> 12;
+    if (pageind >= 13 && pageind < 512) {
+        const auto *chunkWords = reinterpret_cast<const volatile size_t *>(chunk);
+        uintptr_t arenaPtr = untagPtr(reinterpret_cast<const void *>(chunkWords[0]));
+        if (arenaPtr >= 0x10000ULL && arenaPtr < UINT64_C(0x0001000000000000) && (arenaPtr & 0x7ULL) == 0) {
+            size_t mapbits = *reinterpret_cast<const volatile size_t *>(chunk + 0x78 + (pageind - 13) * sizeof(size_t));
+            if ((mapbits & 0x1ULL) == 0) {
+                // Page is unallocated in jemalloc (e.g. mapbits: 0xbff0, 0x5ff0, 0xdfe0)
+                // Silently drop to eliminate "Invalid passed to free: value not allocated" abort!
+                return;
             }
         }
     }
@@ -1264,9 +1241,21 @@ static void safe_android_log_assert(const char *cond, const char *tag, const cha
 }
 
 static void installHeapAndRefBaseSafetyGuards() {
-    // Disabled: Prevents Tencent Anti-Cheat (libanort.so/libanogs.so) from detecting
-    // inline libc modifications and silently dropping the Unreal Engine RenderThread viewport.
-    return;
+    static std::atomic<bool> sInstalled{false};
+    bool expected = false;
+    if (!sInstalled.compare_exchange_strong(expected, true)) {
+        return;
+    }
+
+#if defined(__aarch64__)
+    void *freeSym = dlsym(RTLD_DEFAULT, "free");
+    if (freeSym != nullptr && sOrigFree == nullptr) {
+        A64HookFunction(freeSym,
+                        reinterpret_cast<void *>(safe_free),
+                        reinterpret_cast<void **>(&sOrigFree));
+        ALOGI("FeaturesticCore: Hooked free() with jemalloc unallocated drop guard");
+    }
+#endif
 }
 
 static int countMappedGameLibraries() {
