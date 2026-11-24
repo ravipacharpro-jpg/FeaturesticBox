@@ -405,6 +405,45 @@ static void safe_free(void *ptr) {
     if (uptr < 0x10000ULL) {
         return;
     }
+
+    // 1. Suppress if memory address is unmapped in process address space
+    if (!isPageMappedSafe(uptr)) {
+        int cnt = ++sSuppressedFreeCount;
+        if (cnt <= 32) {
+            ALOGW("HeapGuard: SUPPRESSED unmapped free(%p) caller=%p (count=%d, tid=%d)",
+                  ptr, __builtin_return_address(0), cnt, static_cast<int>(gettid()));
+        }
+        return;
+    }
+
+    // 2. Jemalloc 2MB chunk verification (Android Bionic jemalloc)
+    // In Android Bionic jemalloc (2MB chunks, map_bias=13, map_bits offset 0x78):
+    // When an unallocated page (bit 0 == 0, e.g. mapbits: 0xbff0, 0x5ff0, 0xdfe0)
+    // is passed to libc free(), jemalloc aborts with "Invalid %p passed to free: value not allocated".
+    uintptr_t chunk = uptr & ~uintptr_t(0x1FFFFF);
+    size_t pageind = (uptr - chunk) >> 12;
+    if (pageind >= 13 && pageind < 512) {
+        if (isPageMappedSafe(chunk)) {
+            const auto *chunkWords = reinterpret_cast<const volatile size_t *>(chunk);
+            uintptr_t arenaPtr = untagPtr(reinterpret_cast<const void *>(chunkWords[0]));
+            if (arenaPtr >= 0x10000ULL && arenaPtr < UINT64_C(0x0001000000000000) && (arenaPtr & 0x7ULL) == 0) {
+                uintptr_t mapSlot = chunk + 0x78 + (pageind - 13) * sizeof(size_t);
+                if (isPageMappedSafe(mapSlot)) {
+                    size_t mapbits = *reinterpret_cast<const volatile size_t *>(mapSlot);
+                    if ((mapbits & 0x1ULL) == 0) {
+                        // Page is unallocated in jemalloc (e.g. mapbits: 0xbff0) -> silently drop to eliminate abort!
+                        int cnt = ++sSuppressedFreeCount;
+                        if (cnt <= 32) {
+                            ALOGW("HeapGuard: SUPPRESSED unallocated jemalloc chunk free(%p, chunk=%p, pageind=%zu, mapbits=0x%zx) [tid=%d, count=%d]",
+                                  ptr, reinterpret_cast<void *>(chunk), pageind, mapbits,
+                                  static_cast<int>(gettid()), cnt);
+                        }
+                        return;
+                    }
+                }
+            }
+        }
+    }
 #endif
 
     initRealLibcFree();
@@ -550,7 +589,7 @@ static void processElfRelaTable(uintptr_t baseAddr,
                                 size_t relaCount,
                                 const Elf64_Sym *symtab,
                                 const char *strtab,
-                                bool isHdmpve) {
+                                bool hookMemoryAllocator) {
     if (!rela || !symtab || !strtab) return;
     initRealLibcProcessFunctions();
     initRealLibcFsFunctions();
@@ -561,8 +600,8 @@ static void processElfRelaTable(uintptr_t baseAddr,
         if (!symName || symName[0] == '\0') continue;
 
         void **gotSlot = reinterpret_cast<void **>(baseAddr + rela[i].r_offset);
-        // 1. Scoped memory allocator guard (only for HDmpve unallocated free protection, never touch UE4 or game engine allocators)
-        if (isHdmpve) {
+        // 1. Scoped memory allocator guard (protects against jemalloc unallocated free aborts; never touch UE4 engine allocator)
+        if (hookMemoryAllocator) {
             if (strcmp(symName, "free") == 0
                     || strcmp(symName, "_ZdlPv") == 0
                     || strcmp(symName, "_ZdaPv") == 0) {
@@ -590,6 +629,10 @@ static void processElfRelaTable(uintptr_t baseAddr,
             patchGotSlotSafe(gotSlot, reinterpret_cast<void *>(safe_pthread_kill));
         } else if (strcmp(symName, "abort") == 0) {
             patchGotSlotSafe(gotSlot, reinterpret_cast<void *>(safe_abort));
+        } else if (strcmp(symName, "__stack_chk_fail") == 0 || strcmp(symName, "__stack_chk_fail_local") == 0) {
+            patchGotSlotSafe(gotSlot, reinterpret_cast<void *>(safe_stack_chk_fail));
+        } else if (strcmp(symName, "__android_log_assert") == 0) {
+            patchGotSlotSafe(gotSlot, reinterpret_cast<void *>(safe_android_log_assert));
         } else if (strcmp(symName, "syscall") == 0) {
             patchGotSlotSafe(gotSlot, reinterpret_cast<void *>(safe_syscall));
         } else if (strcmp(symName, "__system_property_get") == 0) {
@@ -683,6 +726,12 @@ static int hookTargetLibrariesGotCallback(struct dl_phdr_info *info, size_t /*si
     }
 
     bool isHdmpve = (strstr(name, "libhdmpve") != nullptr || strstr(name, "hdmpve") != nullptr);
+    bool hookMemoryAllocator = isHdmpve
+            || (strstr(name, "libbgmi") != nullptr)
+            || (strstr(name, "libDARK") != nullptr)
+            || (strstr(name, "FeaturesticPlugin") != nullptr)
+            || (strstr(name, "libIMSDK") != nullptr)
+            || (strstr(name, "libTDataMaster") != nullptr);
     bool isGameTarget = isHdmpve
             || (strstr(name, "libanort") != nullptr)
             || (strstr(name, "libanogs") != nullptr)
@@ -766,10 +815,10 @@ static int hookTargetLibrariesGotCallback(struct dl_phdr_info *info, size_t /*si
 
     if (symtab && strtab) {
         if (jmprel && jmprelSize >= sizeof(Elf64_Rela)) {
-            processElfRelaTable(info->dlpi_addr, jmprel, jmprelSize / sizeof(Elf64_Rela), symtab, strtab, isHdmpve);
+            processElfRelaTable(info->dlpi_addr, jmprel, jmprelSize / sizeof(Elf64_Rela), symtab, strtab, hookMemoryAllocator);
         }
         if (rela && relaSize >= sizeof(Elf64_Rela)) {
-            processElfRelaTable(info->dlpi_addr, rela, relaSize / sizeof(Elf64_Rela), symtab, strtab, isHdmpve);
+            processElfRelaTable(info->dlpi_addr, rela, relaSize / sizeof(Elf64_Rela), symtab, strtab, hookMemoryAllocator);
         }
         if (isHdmpve) {
             sHdmpveGotHooked.store(true, std::memory_order_release);
@@ -1186,21 +1235,13 @@ static void safe_stack_chk_fail(void) {
     prctl(PR_GET_NAME, reinterpret_cast<unsigned long>(tname), 0, 0, 0);
     ALOGW("FEATURESTIC GUARD: Intercepted __stack_chk_fail() from tid=%d (%s)",
           static_cast<int>(gettid()), tname[0] ? tname : "?");
-    if (!isCriticalGameOrMainThread() && !isGraphicsOrRenderThread(tname) && !isArtInternalDaemonThread(tname) && gettid() != getpid()) {
+    if (gettid() != getpid()) {
         ALOGW("FEATURESTIC GUARD: Terminating rogue thread stack failure tid=%d (%s) cleanly",
               static_cast<int>(gettid()), tname[0] ? tname : "?");
         terminateCallingThreadCleanly(0);
         return;
     }
-#if defined(__aarch64__)
-    register long x8 __asm__("x8") = 94; // __NR_exit_group
-    register long x0 __asm__("x0") = 0;
-    __asm__ __volatile__("svc #0" : "+r"(x0) : "r"(x8) : "memory", "cc");
-#else
-    syscall(SYS_exit_group, 0);
-#endif
-    if (sOrigStackChkFail) sOrigStackChkFail();
-    _exit(0);
+    return;
 }
 
 static int (*sOrigOpenat)(int, const char *, int, mode_t) = nullptr;
@@ -1464,6 +1505,11 @@ static void passiveNativeCrashDiagnosticsHandler(int sig, siginfo_t *info, void 
     if (info != nullptr && info->si_code <= 0) {
         ALOGW("FEATURESTIC GUARD: Suppressed software kill signal %d (code=%d, sender_pid=%d) on tid=%d (%s)",
               sig, siCode, info->si_pid, static_cast<int>(gettid()), tname[0] ? tname : "?");
+        if (sig == SIGABRT && gettid() != getpid() && !isCriticalGameOrMainThread()) {
+            ALOGW("FEATURESTIC GUARD: Cleanly terminating aborted worker thread tid=%d (%s)",
+                  static_cast<int>(gettid()), tname[0] ? tname : "?");
+            terminateCallingThreadCleanly(0);
+        }
         return;
     }
 
