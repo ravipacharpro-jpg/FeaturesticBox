@@ -195,6 +195,45 @@ static bool isArtInternalDaemonThread(const char *tname) {
             || strcasestr(tname, "daemon") != nullptr;
 }
 
+static bool isGraphicsOrRenderThread(const char *tname) {
+    if (!tname || tname[0] == '\0') return false;
+    return strcasestr(tname, "rhi") != nullptr
+            || strcasestr(tname, "render") != nullptr
+            || strcasestr(tname, "hwui") != nullptr
+            || strcasestr(tname, "surface") != nullptr
+            || strcasestr(tname, "mali") != nullptr
+            || strcasestr(tname, "adreno") != nullptr
+            || strcasestr(tname, "vulkan") != nullptr
+            || strcasestr(tname, "egl") != nullptr
+            || strcasestr(tname, "gles") != nullptr;
+}
+
+static uintptr_t sLowMemoryCushionBase = 0x10000ULL;
+static size_t sLowMemoryCushionSize = 0x1F0000ULL; // 0x10000 to 0x200000 (1.9375 MB)
+static std::atomic<bool> sLowMemoryCushionInitialized{false};
+
+static void initLowMemorySafetyCushion() {
+    bool expected = false;
+    if (!sLowMemoryCushionInitialized.compare_exchange_strong(expected, true)) {
+        return;
+    }
+#if defined(__LP64__)
+    void *res = mmap(reinterpret_cast<void *>(sLowMemoryCushionBase),
+                     sLowMemoryCushionSize,
+                     PROT_READ | PROT_WRITE,
+                     MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED,
+                     -1, 0);
+    if (res != MAP_FAILED) {
+        memset(res, 0, sLowMemoryCushionSize);
+        ALOGI("FEATURESTIC CUSHION: Mapped zeroed safety cushion at %p (size=%zu KB) to absorb low-address faults",
+              res, sLowMemoryCushionSize / 1024);
+    } else {
+        ALOGW("FEATURESTIC CUSHION: Failed to map low memory cushion at %p (errno=%d)",
+              reinterpret_cast<void *>(sLowMemoryCushionBase), errno);
+    }
+#endif
+}
+
 // NOTE: Removed parkFaultingBackgroundThreadForever() - parking threads
 // forever was causing SIGBUS crashes instead of preventing them.
 
@@ -873,14 +912,16 @@ static void passiveNativeCrashDiagnosticsHandler(int sig, siginfo_t *info, void 
             }
 
             // 1. Universal Cascade Detection on ANY thread:
-            // Safely return to external caller with return value x0 = 0 (NULL/false).
-            // Intra-function loops are strictly rejected to prevent 100% CPU lockups.
+            // Safely return to external caller. On graphics/render threads, point x0 to the
+            // zeroed memory safety cushion so subsequent caller dereferences ([x0]) never fault!
             if (tConsecutiveFaults > 1) {
                 if (callerPc != 0) {
-                    ALOGW("FEATURESTIC RESCUE: Safely aborting failing call on tid=%d (%s) -> returning to caller PC %p (x0=0)",
-                          static_cast<int>(gettid()), tname[0] ? tname : "?", reinterpret_cast<void *>(callerPc));
+                    uintptr_t retVal = isGraphicsOrRenderThread(tname) ? sLowMemoryCushionBase : 0;
+                    ALOGW("FEATURESTIC RESCUE: Safely aborting failing call on tid=%d (%s) -> returning to caller PC %p (x0=%p)",
+                          static_cast<int>(gettid()), tname[0] ? tname : "?", reinterpret_cast<void *>(callerPc),
+                          reinterpret_cast<void *>(retVal));
                     uc->uc_mcontext.pc = callerPc;
-                    uc->uc_mcontext.regs[0] = 0;
+                    uc->uc_mcontext.regs[0] = retVal;
                     if (tConsecutiveFaults > 2) {
                         usleep(10000); // 10ms throttle: drops CPU burn down to 0% while remaining responsive
                     }
@@ -890,8 +931,9 @@ static void passiveNativeCrashDiagnosticsHandler(int sig, siginfo_t *info, void 
 
             // 2. If PC is invalid or unmapped, recover via mapped external caller
             if ((currentPc < 0x10000 || !isPageMappedSafe(currentPc)) && callerPc != 0) {
+                uintptr_t retVal = isGraphicsOrRenderThread(tname) ? sLowMemoryCushionBase : 0;
                 uc->uc_mcontext.pc = callerPc;
-                uc->uc_mcontext.regs[0] = 0;
+                uc->uc_mcontext.regs[0] = retVal;
                 if (tConsecutiveFaults > 2) {
                     usleep(10000);
                 }
@@ -903,11 +945,19 @@ static void passiveNativeCrashDiagnosticsHandler(int sig, siginfo_t *info, void 
                 if (tConsecutiveFaults > 2) {
                     usleep(10000); // 10ms throttle: eliminates 100% CPU spins and ANRs
                 }
+                uint32_t instr = *reinterpret_cast<const uint32_t *>(currentPc);
+                if ((instr & 0x00400000) != 0) {
+                    int rt = instr & 0x1F;
+                    if (rt < 31) {
+                        uc->uc_mcontext.regs[rt] = isGraphicsOrRenderThread(tname) ? sLowMemoryCushionBase : 0;
+                    }
+                }
                 uc->uc_mcontext.pc += 4;
                 return;
             } else if (callerPc != 0) {
+                uintptr_t retVal = isGraphicsOrRenderThread(tname) ? sLowMemoryCushionBase : 0;
                 uc->uc_mcontext.pc = callerPc;
-                uc->uc_mcontext.regs[0] = 0;
+                uc->uc_mcontext.regs[0] = retVal;
                 return;
             }
 
@@ -934,6 +984,7 @@ extern "C" {
 }
 
 static void installOrReassertPassiveNativeCrashDiagnostics() {
+    initLowMemorySafetyCushion();
     static uint8_t sAltStackBuffer[65536] __attribute__((aligned(16)));
     stack_t curSs{};
     if (sigaltstack(nullptr, &curSs) == 0 && ((curSs.ss_flags & SS_DISABLE) || curSs.ss_sp == nullptr || curSs.ss_size < MINSIGSTKSZ)) {
@@ -1717,6 +1768,7 @@ JavaVM *BoxCore::getJavaVM() {
 void nativeHook(JNIEnv *env) {
     if (env == nullptr) return;
 
+    initLowMemorySafetyCushion();
     BaseHook::init(env);
     UnixFileSystemHook::init(env);
     VMClassLoaderHook::init(env);
@@ -1777,6 +1829,7 @@ void setNativeProp(JNIEnv *env, jclass clazz, jstring key, jstring value) {
 void init(JNIEnv *env, jobject clazz, jint api_level) {
     if (env == nullptr) return;
 
+    initLowMemorySafetyCushion();
     ALOGD("NativeCore init.");
     VMEnv.api_level = api_level;
     VMEnv.initialized = false;
@@ -1923,6 +1976,7 @@ void registerMethod(JNIEnv *jenv) {
 }
 
 JNIEXPORT jint JNI_OnLoad(JavaVM *vm, void *reserved) {
+    initLowMemorySafetyCushion();
     JNIEnv *env;
     VMEnv.vm = vm;
 
