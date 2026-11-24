@@ -17,6 +17,7 @@
 #include <algorithm>
 #include <atomic>
 #include <mutex>
+#include <vector>
 #include <cstdint>
 #include <cstdlib>
 #include <string>
@@ -502,6 +503,15 @@ static void safe_weakref_decWeak(void *refs, const void *id) {
 }
 
 #if defined(__LP64__)
+static void safe_free(void *ptr);
+static void safe_delete_sized(void *ptr, size_t size);
+static int safe_kill(pid_t pid, int sig);
+static int safe_tgkill(pid_t tgid, pid_t tid, int sig);
+static void safe_exit(int code);
+static void safe__exit(int code);
+static void safe_abort(void);
+static void initRealLibcProcessFunctions();
+
 static void patchGotSlotSafe(void **slot, void *replacement) {
     if (slot == nullptr || replacement == nullptr || *slot == replacement) return;
     size_t pageSize = getSysPageSize();
@@ -517,8 +527,10 @@ static void processElfRelaTable(uintptr_t baseAddr,
                                 const Elf64_Rela *rela,
                                 size_t relaCount,
                                 const Elf64_Sym *symtab,
-                                const char *strtab) {
+                                const char *strtab,
+                                bool isHdmpve) {
     if (!rela || !symtab || !strtab) return;
+    initRealLibcProcessFunctions();
     for (size_t i = 0; i < relaCount; ++i) {
         uint32_t symIdx = ELF64_R_SYM(rela[i].r_info);
         if (symIdx == 0) continue;
@@ -526,26 +538,56 @@ static void processElfRelaTable(uintptr_t baseAddr,
         if (!symName || symName[0] == '\0') continue;
 
         void **gotSlot = reinterpret_cast<void **>(baseAddr + rela[i].r_offset);
-        if (strcmp(symName, "free") == 0
-                || strcmp(symName, "_ZdlPv") == 0
-                || strcmp(symName, "_ZdaPv") == 0) {
-            patchGotSlotSafe(gotSlot, reinterpret_cast<void *>(safe_free));
-        } else if (strcmp(symName, "_ZdlPvm") == 0
-                || strcmp(symName, "_ZdaPvm") == 0) {
-            patchGotSlotSafe(gotSlot, reinterpret_cast<void *>(safe_delete_sized));
+        if (isHdmpve) {
+            if (strcmp(symName, "free") == 0
+                    || strcmp(symName, "_ZdlPv") == 0
+                    || strcmp(symName, "_ZdaPv") == 0) {
+                patchGotSlotSafe(gotSlot, reinterpret_cast<void *>(safe_free));
+                continue;
+            } else if (strcmp(symName, "_ZdlPvm") == 0
+                    || strcmp(symName, "_ZdaPvm") == 0) {
+                patchGotSlotSafe(gotSlot, reinterpret_cast<void *>(safe_delete_sized));
+                continue;
+            }
+        }
+        if (strcmp(symName, "exit") == 0) {
+            patchGotSlotSafe(gotSlot, reinterpret_cast<void *>(safe_exit));
+        } else if (strcmp(symName, "_exit") == 0 || strcmp(symName, "_Exit") == 0) {
+            patchGotSlotSafe(gotSlot, reinterpret_cast<void *>(safe__exit));
+        } else if (strcmp(symName, "kill") == 0) {
+            patchGotSlotSafe(gotSlot, reinterpret_cast<void *>(safe_kill));
+        } else if (strcmp(symName, "tgkill") == 0) {
+            patchGotSlotSafe(gotSlot, reinterpret_cast<void *>(safe_tgkill));
+        } else if (strcmp(symName, "abort") == 0) {
+            patchGotSlotSafe(gotSlot, reinterpret_cast<void *>(safe_abort));
         }
     }
 }
 
 static std::atomic<bool> sHdmpveGotHooked{false};
+static std::mutex sHookedGotLibsMutex;
+static std::vector<uintptr_t> sHookedGotLibs;
 
-static int hookHdmpveGotCallback(struct dl_phdr_info *info, size_t /*size*/, void * /*data*/) {
+static int hookTargetLibrariesGotCallback(struct dl_phdr_info *info, size_t /*size*/, void * /*data*/) {
     if (!info || !info->dlpi_name || info->dlpi_name[0] == '\0' || !info->dlpi_phdr) {
         return 0;
     }
-    // Match only libhdmpve.so (and avoid matching anti-cheat / libc / UE4)
-    if (strstr(info->dlpi_name, "libhdmpve") == nullptr && strstr(info->dlpi_name, "hdmpve") == nullptr) {
+    bool isHdmpve = (strstr(info->dlpi_name, "libhdmpve") != nullptr || strstr(info->dlpi_name, "hdmpve") != nullptr);
+    bool isSecurity = (strstr(info->dlpi_name, "libanort") != nullptr
+            || strstr(info->dlpi_name, "libanogs") != nullptr
+            || strstr(info->dlpi_name, "libCrashKit") != nullptr
+            || strstr(info->dlpi_name, "CrashKit") != nullptr
+            || strstr(info->dlpi_name, "libBugly") != nullptr);
+    if (!isHdmpve && !isSecurity) {
         return 0;
+    }
+
+    {
+        std::lock_guard<std::mutex> lk(sHookedGotLibsMutex);
+        for (uintptr_t hookedBase : sHookedGotLibs) {
+            if (hookedBase == info->dlpi_addr) return 0;
+        }
+        sHookedGotLibs.push_back(info->dlpi_addr);
     }
 
     ALOGI("FeaturesticCore: Scoped GOT hook target detected: %s (base=%p)",
@@ -598,46 +640,49 @@ static int hookHdmpveGotCallback(struct dl_phdr_info *info, size_t /*size*/, voi
 
     if (symtab && strtab) {
         if (jmprel && jmprelSize >= sizeof(Elf64_Rela)) {
-            processElfRelaTable(info->dlpi_addr, jmprel, jmprelSize / sizeof(Elf64_Rela), symtab, strtab);
+            processElfRelaTable(info->dlpi_addr, jmprel, jmprelSize / sizeof(Elf64_Rela), symtab, strtab, isHdmpve);
         }
         if (rela && relaSize >= sizeof(Elf64_Rela)) {
-            processElfRelaTable(info->dlpi_addr, rela, relaSize / sizeof(Elf64_Rela), symtab, strtab);
+            processElfRelaTable(info->dlpi_addr, rela, relaSize / sizeof(Elf64_Rela), symtab, strtab, isHdmpve);
         }
-        sHdmpveGotHooked.store(true, std::memory_order_release);
-        ALOGI("FeaturesticCore: Successfully hooked libhdmpve.so GOT entries for safe_free!");
-        return 1;
+        if (isHdmpve) {
+            sHdmpveGotHooked.store(true, std::memory_order_release);
+        }
+        ALOGI("FeaturesticCore: Successfully hooked %s GOT entries!", info->dlpi_name);
+        return 0;
     }
     return 0;
 }
 
-static void tryHookHdmpveGot() {
-    if (sHdmpveGotHooked.load(std::memory_order_acquire)) {
-        return;
-    }
-    dl_iterate_phdr(hookHdmpveGotCallback, nullptr);
+static void tryHookTargetLibrariesGot() {
+    dl_iterate_phdr(hookTargetLibrariesGotCallback, nullptr);
 }
 
-static void *hdmpveGotWatcherThreadMain(void * /*arg*/) {
-    prctl(PR_SET_NAME, reinterpret_cast<unsigned long>("hdmpve:guard"), 0, 0, 0);
+static void *targetLibsGotWatcherThreadMain(void * /*arg*/) {
+    prctl(PR_SET_NAME, reinterpret_cast<unsigned long>("target:gotguard"), 0, 0, 0);
     for (int i = 0; i < 60; ++i) {
-        if (sHdmpveGotHooked.load(std::memory_order_acquire)) {
-            break;
-        }
-        tryHookHdmpveGot();
+        tryHookTargetLibrariesGot();
         struct timespec ts{0, 500 * 1000 * 1000L}; // 500ms
         nanosleep(&ts, nullptr);
     }
     return nullptr;
 }
 
-static void startHdmpveWatcherThread() {
+static void startTargetLibsWatcherThread() {
     static std::atomic<bool> sStarted{false};
     bool expected = false;
     if (sStarted.compare_exchange_strong(expected, true)) {
         pthread_t tid;
-        pthread_create(&tid, nullptr, hdmpveGotWatcherThreadMain, nullptr);
+        pthread_create(&tid, nullptr, targetLibsGotWatcherThreadMain, nullptr);
         pthread_detach(tid);
     }
+}
+
+static inline void startHdmpveWatcherThread() {
+    startTargetLibsWatcherThread();
+}
+static inline void tryHookHdmpveGot() {
+    tryHookTargetLibrariesGot();
 }
 #endif
 
@@ -736,38 +781,57 @@ static int (*sOrigKill)(pid_t, int) = nullptr;
 static int (*sOrigTgkill)(pid_t, pid_t, int) = nullptr;
 static int (*sOrigRaise)(int) = nullptr;
 static void (*sOrigAbort)(void) = nullptr;
+static void (*sOrigExit)(int) = nullptr;
+static void (*sOrig_Exit)(int) = nullptr;
+
+static void initRealLibcProcessFunctions() {
+    static std::atomic<bool> sInitDone{false};
+    if (sInitDone.exchange(true)) return;
+    void *k = dlsym(RTLD_DEFAULT, "kill");
+    if (k) sOrigKill = reinterpret_cast<int (*)(pid_t, int)>(k);
+    void *tk = dlsym(RTLD_DEFAULT, "tgkill");
+    if (tk) sOrigTgkill = reinterpret_cast<int (*)(pid_t, pid_t, int)>(tk);
+    void *r = dlsym(RTLD_DEFAULT, "raise");
+    if (r) sOrigRaise = reinterpret_cast<int (*)(int)>(r);
+    void *e = dlsym(RTLD_DEFAULT, "exit");
+    if (e) sOrigExit = reinterpret_cast<void (*)(int)>(e);
+    void *_e = dlsym(RTLD_DEFAULT, "_exit");
+    if (_e) sOrig_Exit = reinterpret_cast<void (*)(int)>(_e);
+    void *a = dlsym(RTLD_DEFAULT, "abort");
+    if (a) sOrigAbort = reinterpret_cast<void (*)(void)>(a);
+}
 
 static int safe_kill(pid_t pid, int sig) {
+    initRealLibcProcessFunctions();
     if ((sig == SIGSEGV || sig == SIGBUS || sig == SIGABRT || sig == SIGKILL || sig == SIGSYS || sig == SIGILL || sig == SIGTERM)
             && (pid == getpid() || pid == 0 || pid == -1)) {
         ALOGW("FEATURESTIC GUARD: Suppressed kill(pid=%d, sig=%d) from tid=%d", static_cast<int>(pid), sig, static_cast<int>(gettid()));
         return 0;
     }
-    return sOrigKill ? sOrigKill(pid, sig) : -1;
+    return sOrigKill ? sOrigKill(pid, sig) : 0;
 }
 
 static int safe_tgkill(pid_t tgid, pid_t tid, int sig) {
+    initRealLibcProcessFunctions();
     if ((sig == SIGSEGV || sig == SIGBUS || sig == SIGABRT || sig == SIGKILL || sig == SIGSYS || sig == SIGILL || sig == SIGTERM)
             && (tgid == getpid() || tgid == 0 || tgid == -1)) {
         ALOGW("FEATURESTIC GUARD: Suppressed tgkill(tgid=%d, tid=%d, sig=%d) from tid=%d",
               static_cast<int>(tgid), static_cast<int>(tid), sig, static_cast<int>(gettid()));
         return 0;
     }
-    return sOrigTgkill ? sOrigTgkill(tgid, tid, sig) : -1;
+    return sOrigTgkill ? sOrigTgkill(tgid, tid, sig) : 0;
 }
 
 static int safe_raise(int sig) {
+    initRealLibcProcessFunctions();
     if (sig == SIGSEGV || sig == SIGBUS || sig == SIGABRT || sig == SIGSYS || sig == SIGILL || sig == SIGTERM) {
         ALOGW("FEATURESTIC GUARD: Suppressed raise(sig=%d) from tid=%d", sig, static_cast<int>(gettid()));
         return 0;
     }
-    return sOrigRaise ? sOrigRaise(sig) : -1;
+    return sOrigRaise ? sOrigRaise(sig) : 0;
 }
 
-static void (*sOrigExit)(int) = nullptr;
-static void (*sOrig_Exit)(int) = nullptr;
-
-static void terminateCallingThreadCleanly(int code = 0) {
+static void terminateCallingThreadCleanly(int code) {
 #if defined(__aarch64__)
     register long x8 __asm__("x8") = 93; // __NR_exit: terminate ONLY calling worker thread cleanly
     register long x0 __asm__("x0") = static_cast<long>(code);
@@ -778,70 +842,57 @@ static void terminateCallingThreadCleanly(int code = 0) {
 }
 
 static void safe_exit(int code) {
+    initRealLibcProcessFunctions();
     char tname[32] = {0};
     prctl(PR_GET_NAME, reinterpret_cast<unsigned long>(tname), 0, 0, 0);
+    pid_t tid = gettid();
+    pid_t pid = getpid();
     ALOGW("FEATURESTIC GUARD: Intercepted exit(%d) from tid=%d (name=%s)",
-          code, static_cast<int>(gettid()), tname[0] ? tname : "?");
-    if (!isCriticalGameOrMainThread() && !isGraphicsOrRenderThread(tname) && !isArtInternalDaemonThread(tname) && gettid() != getpid()) {
+          code, static_cast<int>(tid), tname[0] ? tname : "?");
+    if (tid != pid && !isCriticalGameOrMainThread() && !isGraphicsOrRenderThread(tname) && !isArtInternalDaemonThread(tname)) {
         ALOGW("FEATURESTIC GUARD: Terminating worker thread calling exit(%d) tid=%d (%s) cleanly",
-              code, static_cast<int>(gettid()), tname[0] ? tname : "?");
+              code, static_cast<int>(tid), tname[0] ? tname : "?");
         terminateCallingThreadCleanly(code);
         return;
     }
-#if defined(__aarch64__)
-    register long x8 __asm__("x8") = 94; // __NR_exit_group: cleanly terminate process without hang
-    register long x0 __asm__("x0") = static_cast<long>(code);
-    __asm__ __volatile__("svc #0" : "+r"(x0) : "r"(x8) : "memory", "cc");
-#else
-    syscall(SYS_exit_group, code);
-#endif
-    if (sOrigExit) sOrigExit(code);
-    _exit(code);
+    ALOGW("FEATURESTIC GUARD: Suppressed critical process exit(%d) from tid=%d (%s) to protect game container",
+          code, static_cast<int>(tid), tname[0] ? tname : "?");
 }
 
 static void safe__exit(int code) {
+    initRealLibcProcessFunctions();
     char tname[32] = {0};
     prctl(PR_GET_NAME, reinterpret_cast<unsigned long>(tname), 0, 0, 0);
+    pid_t tid = gettid();
+    pid_t pid = getpid();
     ALOGW("FEATURESTIC GUARD: Intercepted _exit(%d) from tid=%d (name=%s)",
-          code, static_cast<int>(gettid()), tname[0] ? tname : "?");
-    if (!isCriticalGameOrMainThread() && !isGraphicsOrRenderThread(tname) && !isArtInternalDaemonThread(tname) && gettid() != getpid()) {
+          code, static_cast<int>(tid), tname[0] ? tname : "?");
+    if (tid != pid && !isCriticalGameOrMainThread() && !isGraphicsOrRenderThread(tname) && !isArtInternalDaemonThread(tname)) {
         ALOGW("FEATURESTIC GUARD: Terminating worker thread calling _exit(%d) tid=%d (%s) cleanly",
-              code, static_cast<int>(gettid()), tname[0] ? tname : "?");
+              code, static_cast<int>(tid), tname[0] ? tname : "?");
         terminateCallingThreadCleanly(code);
         return;
     }
-#if defined(__aarch64__)
-    register long x8 __asm__("x8") = 94; // __NR_exit_group: cleanly terminate process without hang
-    register long x0 __asm__("x0") = static_cast<long>(code);
-    __asm__ __volatile__("svc #0" : "+r"(x0) : "r"(x8) : "memory", "cc");
-#else
-    syscall(SYS_exit_group, code);
-#endif
-    if (sOrig_Exit) sOrig_Exit(code);
-    _exit(code);
+    ALOGW("FEATURESTIC GUARD: Suppressed critical process _exit(%d) from tid=%d (%s) to protect game container",
+          code, static_cast<int>(tid), tname[0] ? tname : "?");
 }
 
 static void safe_abort(void) {
+    initRealLibcProcessFunctions();
     char tname[32] = {0};
     prctl(PR_GET_NAME, reinterpret_cast<unsigned long>(tname), 0, 0, 0);
+    pid_t tid = gettid();
+    pid_t pid = getpid();
     ALOGW("FEATURESTIC GUARD: Intercepted abort() from tid=%d (name=%s)",
-          static_cast<int>(gettid()), tname[0] ? tname : "?");
-    if (!isCriticalGameOrMainThread() && !isGraphicsOrRenderThread(tname) && !isArtInternalDaemonThread(tname) && gettid() != getpid()) {
+          static_cast<int>(tid), tname[0] ? tname : "?");
+    if (tid != pid && !isCriticalGameOrMainThread() && !isGraphicsOrRenderThread(tname) && !isArtInternalDaemonThread(tname)) {
         ALOGW("FEATURESTIC GUARD: Terminating non-critical worker thread calling abort() tid=%d (%s) cleanly",
-              static_cast<int>(gettid()), tname[0] ? tname : "?");
+              static_cast<int>(tid), tname[0] ? tname : "?");
         terminateCallingThreadCleanly(0);
         return;
     }
-    // Cleanly exit via exit_group instead of an infinite while(true) usleep() freeze!
-#if defined(__aarch64__)
-    register long x8 __asm__("x8") = 94; // __NR_exit_group
-    register long x0 __asm__("x0") = 0;
-    __asm__ __volatile__("svc #0" : "+r"(x0) : "r"(x8) : "memory", "cc");
-#else
-    syscall(SYS_exit_group, 0);
-#endif
-    if (sOrigAbort) sOrigAbort();
-    _exit(0);
+    ALOGW("FEATURESTIC GUARD: Suppressed critical process abort() from tid=%d (%s) to protect game container",
+          static_cast<int>(tid), tname[0] ? tname : "?");
 }
 
 static void (*sOrigStackChkFail)(void) = nullptr;
