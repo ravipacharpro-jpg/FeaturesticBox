@@ -207,22 +207,18 @@ void SystemPropertiesHook::init(JNIEnv *env) {
         );
     }
 
-    // 2. Hook Native libc __system_property_get and __system_property_find via A64HookFunction
+    // 2. Resolve Native libc __system_property_get and __system_property_find without inline hook
     if (!sNativeHooksInstalled.exchange(true)) {
 #if defined(__aarch64__)
         void *getSym = dlsym(RTLD_DEFAULT, "__system_property_get");
         if (getSym != nullptr) {
-            A64HookFunction(getSym,
-                            reinterpret_cast<void *>(safe_system_property_get),
-                            reinterpret_cast<void **>(&sOrigSystemPropertyGet));
-            ALOGI("SystemPropertiesHook: Hooked native __system_property_get");
+            sOrigSystemPropertyGet = reinterpret_cast<system_property_get_fn_t>(getSym);
+            ALOGI("SystemPropertiesHook: Resolved native __system_property_get (zero inline hook)");
         }
         void *findSym = dlsym(RTLD_DEFAULT, "__system_property_find");
         if (findSym != nullptr) {
-            A64HookFunction(findSym,
-                            reinterpret_cast<void *>(safe_system_property_find),
-                            reinterpret_cast<void **>(&sOrigSystemPropertyFind));
-            ALOGI("SystemPropertiesHook: Hooked native __system_property_find");
+            sOrigSystemPropertyFind = reinterpret_cast<system_property_find_fn_t>(findSym);
+            ALOGI("SystemPropertiesHook: Resolved native __system_property_find (zero inline hook)");
         }
 #endif
     }

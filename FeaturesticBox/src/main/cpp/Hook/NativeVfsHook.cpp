@@ -1269,6 +1269,13 @@ void init() {
     }
 
 #if defined(__aarch64__)
+    // CRITICAL STEALTH ARCHITECTURE:
+    // DO NOT INLINE-HOOK LIBC FUNCTIONS (openat, syscall, fstatat, etc.)!
+    // Inline hooking libc.so functions overwrites the .text instructions of libc.so,
+    // which triggers Tencent Anti-Cheat (ACE / TP / Anogs) post-login memory integrity hash verification
+    // and causes silent process termination (exit_group / SIGKILL).
+    // All virtual file routing is cleanly handled at the Java/JNI layer (LinuxHook.cpp)
+    // and scoped ELF GOT hooks for libhdmpve.so.
     void *openatSym = dlsym(RTLD_DEFAULT, "openat");
     void *openat64Sym = dlsym(RTLD_DEFAULT, "openat64");
     void *openSym = dlsym(RTLD_DEFAULT, "open");
@@ -1287,114 +1294,26 @@ void init() {
     void *readlinkatSym = dlsym(RTLD_DEFAULT, "readlinkat");
     void *readlinkSym = dlsym(RTLD_DEFAULT, "readlink");
 
-    if (openatSym) {
-        A64HookFunction(openatSym,
-                        reinterpret_cast<void *>(safe_openat),
-                        reinterpret_cast<void **>(&sOrigOpenat));
-    }
-    if (openat64Sym && openat64Sym != openatSym) {
-        A64HookFunction(openat64Sym,
-                        reinterpret_cast<void *>(safe_openat64),
-                        reinterpret_cast<void **>(&sOrigOpenat64));
-    }
-    if (openSym && openSym != openatSym) {
-        A64HookFunction(openSym,
-                        reinterpret_cast<void *>(safe_open),
-                        reinterpret_cast<void **>(&sOrigOpen));
-    }
-    if (faccessatSym) {
-        A64HookFunction(faccessatSym,
-                        reinterpret_cast<void *>(safe_faccessat),
-                        reinterpret_cast<void **>(&sOrigFaccessat));
-    }
-    if (accessSym && accessSym != faccessatSym) {
-        A64HookFunction(accessSym,
-                        reinterpret_cast<void *>(safe_access),
-                        reinterpret_cast<void **>(&sOrigAccess));
-    }
-    if (fstatatSym) {
-        A64HookFunction(fstatatSym,
-                        reinterpret_cast<void *>(safe_fstatat),
-                        reinterpret_cast<void **>(&sOrigFstatat));
-    }
-    if (fstatat64Sym && fstatat64Sym != fstatatSym) {
-        A64HookFunction(fstatat64Sym,
-                        reinterpret_cast<void *>(safe_fstatat64),
-                        reinterpret_cast<void **>(&sOrigFstatat64));
-    }
-    if (statSym) {
-        A64HookFunction(statSym,
-                        reinterpret_cast<void *>(safe_stat),
-                        reinterpret_cast<void **>(&sOrigStat));
-    }
-    if (lstatSym) {
-        A64HookFunction(lstatSym,
-                        reinterpret_cast<void *>(safe_lstat),
-                        reinterpret_cast<void **>(&sOrigLstat));
-    }
-    if (stat64Sym && stat64Sym != statSym) {
-        A64HookFunction(stat64Sym,
-                        reinterpret_cast<void *>(safe_stat64),
-                        reinterpret_cast<void **>(&sOrigStat64));
-    }
-    if (lstat64Sym && lstat64Sym != lstatSym) {
-        A64HookFunction(lstat64Sym,
-                        reinterpret_cast<void *>(safe_lstat64),
-                        reinterpret_cast<void **>(&sOrigLstat64));
-    }
-    if (statxSym) {
-        A64HookFunction(statxSym,
-                        reinterpret_cast<void *>(safe_statx),
-                        reinterpret_cast<void **>(&sOrigStatx));
-    }
-    if (syscallSym) {
-        A64HookFunction(syscallSym,
-                        reinterpret_cast<void *>(safe_syscall),
-                        reinterpret_cast<void **>(&sOrigSyscall));
-    }
-    if (fstatSym) {
-        A64HookFunction(fstatSym,
-                        reinterpret_cast<void *>(safe_fstat),
-                        reinterpret_cast<void **>(&sOrigFstat));
-    }
-    if (fstat64Sym && fstat64Sym != fstatSym) {
-        A64HookFunction(fstat64Sym,
-                        reinterpret_cast<void *>(safe_fstat64),
-                        reinterpret_cast<void **>(&sOrigFstat64));
-    }
-    if (readlinkatSym) {
-        A64HookFunction(readlinkatSym,
-                        reinterpret_cast<void *>(safe_readlinkat),
-                        reinterpret_cast<void **>(&sOrigReadlinkat));
-    }
-    if (readlinkSym && readlinkSym != readlinkatSym) {
-        A64HookFunction(readlinkSym,
-                        reinterpret_cast<void *>(safe_readlink),
-                        reinterpret_cast<void **>(&sOrigReadlink));
-    }
+    if (openatSym) sOrigOpenat = reinterpret_cast<openat_fn_t>(openatSym);
+    if (openat64Sym) sOrigOpenat64 = reinterpret_cast<openat_fn_t>(openat64Sym);
+    if (openSym) sOrigOpen = reinterpret_cast<open_fn_t>(openSym);
+    if (faccessatSym) sOrigFaccessat = reinterpret_cast<faccessat_fn_t>(faccessatSym);
+    if (accessSym) sOrigAccess = reinterpret_cast<access_fn_t>(accessSym);
+    if (fstatatSym) sOrigFstatat = reinterpret_cast<fstatat_fn_t>(fstatatSym);
+    if (fstatat64Sym) sOrigFstatat64 = reinterpret_cast<fstatat_fn_t>(fstatat64Sym);
+    if (statSym) sOrigStat = reinterpret_cast<stat_fn_t>(statSym);
+    if (lstatSym) sOrigLstat = reinterpret_cast<lstat_fn_t>(lstatSym);
+    if (stat64Sym) sOrigStat64 = reinterpret_cast<stat64_fn_t>(stat64Sym);
+    if (lstat64Sym) sOrigLstat64 = reinterpret_cast<lstat64_fn_t>(lstat64Sym);
+    if (statxSym) sOrigStatx = reinterpret_cast<statx_fn_t>(statxSym);
+    if (syscallSym) sOrigSyscall = reinterpret_cast<syscall_fn_t>(syscallSym);
+    if (fstatSym) sOrigFstat = reinterpret_cast<fstat_fn_t>(fstatSym);
+    if (fstat64Sym) sOrigFstat64 = reinterpret_cast<fstat_fn_t>(fstat64Sym);
+    if (readlinkatSym) sOrigReadlinkat = reinterpret_cast<readlinkat_fn_t>(readlinkatSym);
+    if (readlinkSym) sOrigReadlink = reinterpret_cast<readlink_fn_t>(readlinkSym);
 
-    if (!sOrigOpenat && openatSym) sOrigOpenat = reinterpret_cast<openat_fn_t>(openatSym);
-    if (!sOrigOpenat64 && openat64Sym) sOrigOpenat64 = reinterpret_cast<openat_fn_t>(openat64Sym);
-    if (!sOrigOpen && openSym) sOrigOpen = reinterpret_cast<open_fn_t>(openSym);
-    if (!sOrigFaccessat && faccessatSym) sOrigFaccessat = reinterpret_cast<faccessat_fn_t>(faccessatSym);
-    if (!sOrigAccess && accessSym) sOrigAccess = reinterpret_cast<access_fn_t>(accessSym);
-    if (!sOrigFstatat && fstatatSym) sOrigFstatat = reinterpret_cast<fstatat_fn_t>(fstatatSym);
-    if (!sOrigFstatat64 && fstatat64Sym) sOrigFstatat64 = reinterpret_cast<fstatat_fn_t>(fstatat64Sym);
-    if (!sOrigStat && statSym) sOrigStat = reinterpret_cast<stat_fn_t>(statSym);
-    if (!sOrigLstat && lstatSym) sOrigLstat = reinterpret_cast<lstat_fn_t>(lstatSym);
-    if (!sOrigStat64 && stat64Sym) sOrigStat64 = reinterpret_cast<stat64_fn_t>(stat64Sym);
-    if (!sOrigLstat64 && lstat64Sym) sOrigLstat64 = reinterpret_cast<lstat64_fn_t>(lstat64Sym);
-    if (!sOrigStatx && statxSym) sOrigStatx = reinterpret_cast<statx_fn_t>(statxSym);
-    if (!sOrigSyscall && syscallSym) sOrigSyscall = reinterpret_cast<syscall_fn_t>(syscallSym);
-    if (!sOrigFstat && fstatSym) sOrigFstat = reinterpret_cast<fstat_fn_t>(fstatSym);
-    if (!sOrigFstat64 && fstat64Sym) sOrigFstat64 = reinterpret_cast<fstat_fn_t>(fstat64Sym);
-    if (!sOrigReadlinkat && readlinkatSym) sOrigReadlinkat = reinterpret_cast<readlinkat_fn_t>(readlinkatSym);
-    if (!sOrigReadlink && readlinkSym) sOrigReadlink = reinterpret_cast<readlink_fn_t>(readlinkSym);
-
-    installSeccompVfsFilter();
+    ALOGI("NativeVfsHook: Libc inline hooks safely disabled: zero tampering on libc.so text segment for Tencent Anti-Cheat");
 #endif
-
-    ALOGI("NativeVfsHook: Libc VFS and Procfs virtualization hooks active");
 }
 
 int rawDirectOpen(const char *path, int flags, mode_t mode) {
