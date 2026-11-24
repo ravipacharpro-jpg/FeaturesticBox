@@ -292,9 +292,25 @@ static void initLowMemorySafetyCushion() {
 // ============================================================================
 // Jemalloc Double-Free / Invalid-Free Guard & Android RefBase::decStrong Guard
 // ============================================================================
-static void (*sOrigFree)(void *) = nullptr;
+static void (*sRealLibcFree)(void *) = nullptr;
 static void (*sOrigRefBaseDecStrong)(void *, const void *) = nullptr;
 static void (*sOrigWeakrefDecWeak)(void *, const void *) = nullptr;
+
+static inline void initRealLibcFree() {
+    if (sRealLibcFree == nullptr) {
+        void *sym = dlsym(RTLD_DEFAULT, "free");
+        sRealLibcFree = sym ? reinterpret_cast<void (*)(void *)>(sym) : &free;
+    }
+}
+
+static size_t getSysPageSize() {
+    static size_t sPageSize = 0;
+    if (sPageSize == 0) {
+        long sz = sysconf(_SC_PAGESIZE);
+        sPageSize = (sz > 0) ? static_cast<size_t>(sz) : 4096;
+    }
+    return sPageSize;
+}
 
 #if defined(__LP64__)
 static int sJemallocMapbitsBaseIdx = -1;
@@ -368,6 +384,9 @@ static void logCurrentThreadBacktrace() {
 
 static void safe_free(void *ptr) {
     if (ptr == nullptr) return;
+
+    initRealLibcFree();
+
 #if defined(__LP64__)
     uintptr_t uptr = untagPtr(ptr);
     if (uptr < 0x10000ULL) {
@@ -377,6 +396,11 @@ static void safe_free(void *ptr) {
     uintptr_t chunk = uptr & ~uintptr_t(0x1FFFFF);
     size_t pageind = (uptr - chunk) >> 12;
     if (pageind >= 13 && pageind < 512) {
+        unsigned char vec[1];
+        if (mincore(reinterpret_cast<void *>(chunk), 4096, vec) != 0) {
+            // Chunk memory not mapped in address space, definitely invalid pointer
+            return;
+        }
         const auto *chunkWords = reinterpret_cast<const volatile size_t *>(chunk);
         uintptr_t arenaPtr = untagPtr(reinterpret_cast<const void *>(chunkWords[0]));
         if (arenaPtr >= 0x10000ULL && arenaPtr < UINT64_C(0x0001000000000000) && (arenaPtr & 0x7ULL) == 0) {
@@ -389,8 +413,10 @@ static void safe_free(void *ptr) {
         }
     }
 #endif
-    if (sOrigFree != nullptr) {
-        sOrigFree(ptr);
+    if (sRealLibcFree != nullptr) {
+        sRealLibcFree(ptr);
+    } else {
+        free(ptr);
     }
 }
 
@@ -478,10 +504,12 @@ static void safe_weakref_decWeak(void *refs, const void *id) {
 #if defined(__LP64__)
 static void patchGotSlotSafe(void **slot, void *replacement) {
     if (slot == nullptr || replacement == nullptr || *slot == replacement) return;
-    uintptr_t pageStart = reinterpret_cast<uintptr_t>(slot) & ~uintptr_t(0xFFF);
-    if (mprotect(reinterpret_cast<void *>(pageStart), 4096, PROT_READ | PROT_WRITE) == 0) {
+    size_t pageSize = getSysPageSize();
+    uintptr_t pageMask = ~(pageSize - 1);
+    uintptr_t pageStart = reinterpret_cast<uintptr_t>(slot) & pageMask;
+    if (mprotect(reinterpret_cast<void *>(pageStart), pageSize, PROT_READ | PROT_WRITE) == 0) {
         *slot = replacement;
-        mprotect(reinterpret_cast<void *>(pageStart), 4096, PROT_READ);
+        mprotect(reinterpret_cast<void *>(pageStart), pageSize, PROT_READ);
     }
 }
 
@@ -505,33 +533,23 @@ static void processElfRelaTable(uintptr_t baseAddr,
         } else if (strcmp(symName, "_ZdlPvm") == 0
                 || strcmp(symName, "_ZdaPvm") == 0) {
             patchGotSlotSafe(gotSlot, reinterpret_cast<void *>(safe_delete_sized));
-        } else if (strcmp(symName, "_ZNK7android7RefBase9decStrongEPKv") == 0
-                || strcmp(symName, "_ZN7android7RefBase9decStrongEPKv") == 0) {
-            patchGotSlotSafe(gotSlot, reinterpret_cast<void *>(safe_RefBase_decStrong));
-        } else if (strcmp(symName, "_ZN7android7RefBase12weakref_type7decWeakEPKv") == 0) {
-            patchGotSlotSafe(gotSlot, reinterpret_cast<void *>(safe_weakref_decWeak));
         }
     }
 }
 
-static int gotHookPhdrCallback(struct dl_phdr_info *info, size_t /*size*/, void * /*data*/) {
+static std::atomic<bool> sHdmpveGotHooked{false};
+
+static int hookHdmpveGotCallback(struct dl_phdr_info *info, size_t /*size*/, void * /*data*/) {
     if (!info || !info->dlpi_name || info->dlpi_name[0] == '\0' || !info->dlpi_phdr) {
         return 0;
     }
-    if (strstr(info->dlpi_name, "libFeaturesticCore.so") != nullptr
-            || strstr(info->dlpi_name, "/libc.so") != nullptr
-            || strstr(info->dlpi_name, "/ld-android.so") != nullptr
-            || strstr(info->dlpi_name, "linker64") != nullptr
-            || strstr(info->dlpi_name, "/libart.so") != nullptr
-            || strstr(info->dlpi_name, "libanort") != nullptr
-            || strstr(info->dlpi_name, "libCrashKit") != nullptr
-            || strstr(info->dlpi_name, "libanogs") != nullptr
-            || strstr(info->dlpi_name, "libhdmpve") != nullptr
-            || strstr(info->dlpi_name, "libgcloud") != nullptr
-            || strstr(info->dlpi_name, "libturing") != nullptr
-            || strstr(info->dlpi_name, "libtersafe") != nullptr) {
+    // Match only libhdmpve.so (and avoid matching anti-cheat / libc / UE4)
+    if (strstr(info->dlpi_name, "libhdmpve") == nullptr && strstr(info->dlpi_name, "hdmpve") == nullptr) {
         return 0;
     }
+
+    ALOGI("FeaturesticCore: Scoped GOT hook target detected: %s (base=%p)",
+          info->dlpi_name, reinterpret_cast<void *>(info->dlpi_addr));
 
     const Elf64_Dyn *dyn = nullptr;
     for (int i = 0; i < info->dlpi_phnum; ++i) {
@@ -585,8 +603,41 @@ static int gotHookPhdrCallback(struct dl_phdr_info *info, size_t /*size*/, void 
         if (rela && relaSize >= sizeof(Elf64_Rela)) {
             processElfRelaTable(info->dlpi_addr, rela, relaSize / sizeof(Elf64_Rela), symtab, strtab);
         }
+        sHdmpveGotHooked.store(true, std::memory_order_release);
+        ALOGI("FeaturesticCore: Successfully hooked libhdmpve.so GOT entries for safe_free!");
+        return 1;
     }
     return 0;
+}
+
+static void tryHookHdmpveGot() {
+    if (sHdmpveGotHooked.load(std::memory_order_acquire)) {
+        return;
+    }
+    dl_iterate_phdr(hookHdmpveGotCallback, nullptr);
+}
+
+static void *hdmpveGotWatcherThreadMain(void * /*arg*/) {
+    prctl(PR_SET_NAME, reinterpret_cast<unsigned long>("hdmpve:guard"), 0, 0, 0);
+    for (int i = 0; i < 60; ++i) {
+        if (sHdmpveGotHooked.load(std::memory_order_acquire)) {
+            break;
+        }
+        tryHookHdmpveGot();
+        struct timespec ts{0, 500 * 1000 * 1000L}; // 500ms
+        nanosleep(&ts, nullptr);
+    }
+    return nullptr;
+}
+
+static void startHdmpveWatcherThread() {
+    static std::atomic<bool> sStarted{false};
+    bool expected = false;
+    if (sStarted.compare_exchange_strong(expected, true)) {
+        pthread_t tid;
+        pthread_create(&tid, nullptr, hdmpveGotWatcherThreadMain, nullptr);
+        pthread_detach(tid);
+    }
 }
 #endif
 
@@ -1241,20 +1292,8 @@ static void safe_android_log_assert(const char *cond, const char *tag, const cha
 }
 
 static void installHeapAndRefBaseSafetyGuards() {
-    static std::atomic<bool> sInstalled{false};
-    bool expected = false;
-    if (!sInstalled.compare_exchange_strong(expected, true)) {
-        return;
-    }
-
-#if defined(__aarch64__)
-    void *freeSym = dlsym(RTLD_DEFAULT, "free");
-    if (freeSym != nullptr && sOrigFree == nullptr) {
-        A64HookFunction(freeSym,
-                        reinterpret_cast<void *>(safe_free),
-                        reinterpret_cast<void **>(&sOrigFree));
-        ALOGI("FeaturesticCore: Hooked free() with jemalloc unallocated drop guard");
-    }
+#if defined(__LP64__)
+    tryHookHdmpveGot();
 #endif
 }
 
@@ -1599,6 +1638,11 @@ void BoxCore::onNativeLibraryLoaded(const char *libPath) {
                 || strstr(libPath, "libCrashKit.so") != nullptr) {
             sGameLibLoadedCount.fetch_add(1, std::memory_order_relaxed);
         }
+        if (strstr(libPath, "libhdmpve") != nullptr || strstr(libPath, "hdmpve") != nullptr) {
+#if defined(__LP64__)
+            tryHookHdmpveGot();
+#endif
+        }
     }
     sanitizeInheritedPtyFileDescriptors();
     installHeapAndRefBaseSafetyGuards();
@@ -1742,6 +1786,9 @@ void init(JNIEnv *env, jobject clazz, jint api_level) {
     VMEnv.initialized = false;
     sCachedHostUid.store(static_cast<int>(getuid()), std::memory_order_relaxed);
     sanitizeInheritedPtyFileDescriptors();
+#if defined(__LP64__)
+    startHdmpveWatcherThread();
+#endif
 
     jclass localClass = env->FindClass(VMCORE_CLASS);
     if (localClass == nullptr) {
