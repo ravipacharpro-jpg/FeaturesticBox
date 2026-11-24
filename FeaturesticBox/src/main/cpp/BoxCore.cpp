@@ -545,6 +545,8 @@ static int safe_pthread_kill(pthread_t thread, int sig);
 static void safe_exit(int code);
 static void safe__exit(int code);
 static void safe_abort(void);
+static void safe_stack_chk_fail(void);
+static void safe_android_log_assert(const char *cond, const char *tag, const char *fmt, ...);
 static void terminateCallingThreadCleanly(int code);
 static long safe_syscall(long number, long a1 = 0, long a2 = 0, long a3 = 0, long a4 = 0, long a5 = 0, long a6 = 0);
 static int safe_stat(const char *pathname, struct stat *statbuf);
