@@ -50,6 +50,7 @@
 #include <link.h>
 #include <dlfcn.h>
 #include <unwind.h>
+#include <android/api-level.h>
 
 namespace {
 static struct sigaction sOldSigsegvAction{};
@@ -378,26 +379,28 @@ static void safe_free(void *ptr) {
 
     // 2. Suppress if address belongs to an unallocated jemalloc arena chunk page.
     // In Android Bionic jemalloc (2MB chunks, map_bias=13, map_bits offset 0x78):
-    // Passing an unallocated chunk page (mapbits bit 0 == 0) causes Bionic to call __libc_fatal
-    // and abort() with "Invalid %p passed to free: value not allocated, chunk: %p mapbits: %zx".
-    uintptr_t chunk = uptr & ~uintptr_t(0x1FFFFF);
-    size_t pageind = (uptr - chunk) >> 12;
-    if (pageind >= 13 && pageind < 512) {
-        if (isPageMappedSafe(chunk)) {
-            const auto *chunkWords = reinterpret_cast<const volatile size_t *>(chunk);
-            uintptr_t arenaPtr = untagPtr(reinterpret_cast<const void *>(chunkWords[0]));
-            if (arenaPtr >= 0x10000ULL && arenaPtr < UINT64_C(0x0001000000000000) && (arenaPtr & 0x7ULL) == 0) {
-                // Genuine jemalloc chunk header verified: read mapbits at chunk + 0x78 + (pageind - 13)*8
-                size_t mapbits = *reinterpret_cast<const volatile size_t *>(chunk + 0x78 + (pageind - 13) * sizeof(size_t));
-                if ((mapbits & 0x1ULL) == 0) {
-                    // Page is unallocated (e.g. mapbits == 0x5ff0, 0xdfe0, or 0xbff0) -> silently drop to prevent abort()!
-                    int cnt = ++sSuppressedFreeCount;
-                    char tname[32] = {0};
-                    prctl(PR_GET_NAME, reinterpret_cast<unsigned long>(tname), 0, 0, 0);
-                    ALOGW("HeapGuard: SUPPRESSED unallocated chunk free(%p, chunk=%p, pageind=%zu, mapbits=0x%zx) caller=%p [tid=%d, %s]",
-                          ptr, reinterpret_cast<void *>(chunk), pageind, mapbits,
-                          __builtin_return_address(0), static_cast<int>(gettid()), tname[0] ? tname : "?");
-                    return;
+    // NOTE: Android 11+ (API >= 30) uses Scudo, which does NOT use jemalloc chunk headers!
+    // Running this on Android 11+ causes false-positive suppression of valid frees.
+    if ((VMEnv.api_level > 0 ? VMEnv.api_level : android_get_device_api_level()) < 30) {
+        uintptr_t chunk = uptr & ~uintptr_t(0x1FFFFF);
+        size_t pageind = (uptr - chunk) >> 12;
+        if (pageind >= 13 && pageind < 512) {
+            if (isPageMappedSafe(chunk)) {
+                const auto *chunkWords = reinterpret_cast<const volatile size_t *>(chunk);
+                uintptr_t arenaPtr = untagPtr(reinterpret_cast<const void *>(chunkWords[0]));
+                if (arenaPtr >= 0x10000ULL && arenaPtr < UINT64_C(0x0001000000000000) && (arenaPtr & 0x7ULL) == 0) {
+                    // Genuine jemalloc chunk header verified: read mapbits at chunk + 0x78 + (pageind - 13)*8
+                    size_t mapbits = *reinterpret_cast<const volatile size_t *>(chunk + 0x78 + (pageind - 13) * sizeof(size_t));
+                    if ((mapbits & 0x1ULL) == 0) {
+                        // Page is unallocated (e.g. mapbits == 0x5ff0, 0xdfe0, or 0xbff0) -> silently drop to prevent abort()!
+                        int cnt = ++sSuppressedFreeCount;
+                        char tname[32] = {0};
+                        prctl(PR_GET_NAME, reinterpret_cast<unsigned long>(tname), 0, 0, 0);
+                        ALOGW("HeapGuard: SUPPRESSED unallocated chunk free(%p, chunk=%p, pageind=%zu, mapbits=0x%zx) caller=%p [tid=%d, %s]",
+                              ptr, reinterpret_cast<void *>(chunk), pageind, mapbits,
+                              __builtin_return_address(0), static_cast<int>(gettid()), tname[0] ? tname : "?");
+                        return;
+                    }
                 }
             }
         }
@@ -735,7 +738,7 @@ static void safe_exit(int code) {
     prctl(PR_GET_NAME, reinterpret_cast<unsigned long>(tname), 0, 0, 0);
     ALOGW("FEATURESTIC GUARD: Intercepted exit(%d) from tid=%d (name=%s)",
           code, static_cast<int>(gettid()), tname[0] ? tname : "?");
-    if (!isCriticalGameOrMainThread() && gettid() != getpid()) {
+    if (!isCriticalGameOrMainThread() && !isGraphicsOrRenderThread(tname) && !isArtInternalDaemonThread(tname) && gettid() != getpid()) {
         ALOGW("FEATURESTIC GUARD: Quiescing worker thread calling exit(%d) tid=%d (%s) into sleep",
               code, static_cast<int>(gettid()), tname[0] ? tname : "?");
         while (true) {
@@ -751,6 +754,7 @@ static void safe_exit(int code) {
     syscall(SYS_exit_group, code);
 #endif
     if (sOrigExit) sOrigExit(code);
+    _exit(code);
 }
 
 static void safe__exit(int code) {
@@ -758,7 +762,7 @@ static void safe__exit(int code) {
     prctl(PR_GET_NAME, reinterpret_cast<unsigned long>(tname), 0, 0, 0);
     ALOGW("FEATURESTIC GUARD: Intercepted _exit(%d) from tid=%d (name=%s)",
           code, static_cast<int>(gettid()), tname[0] ? tname : "?");
-    if (!isCriticalGameOrMainThread() && gettid() != getpid()) {
+    if (!isCriticalGameOrMainThread() && !isGraphicsOrRenderThread(tname) && !isArtInternalDaemonThread(tname) && gettid() != getpid()) {
         ALOGW("FEATURESTIC GUARD: Quiescing worker thread calling _exit(%d) tid=%d (%s) into sleep",
               code, static_cast<int>(gettid()), tname[0] ? tname : "?");
         while (true) {
@@ -774,6 +778,7 @@ static void safe__exit(int code) {
     syscall(SYS_exit_group, code);
 #endif
     if (sOrig_Exit) sOrig_Exit(code);
+    _exit(code);
 }
 
 static void safe_abort(void) {
@@ -781,8 +786,8 @@ static void safe_abort(void) {
     prctl(PR_GET_NAME, reinterpret_cast<unsigned long>(tname), 0, 0, 0);
     ALOGW("FEATURESTIC GUARD: Intercepted abort() from tid=%d (name=%s)",
           static_cast<int>(gettid()), tname[0] ? tname : "?");
-    if (gettid() != getpid()) {
-        ALOGW("FEATURESTIC GUARD: Quiescing non-main thread calling abort() tid=%d (%s) into sleep",
+    if (!isCriticalGameOrMainThread() && !isGraphicsOrRenderThread(tname) && !isArtInternalDaemonThread(tname) && gettid() != getpid()) {
+        ALOGW("FEATURESTIC GUARD: Quiescing non-critical worker thread calling abort() tid=%d (%s) into sleep",
               static_cast<int>(gettid()), tname[0] ? tname : "?");
         while (true) {
             sleep(3600);
@@ -798,6 +803,32 @@ static void safe_abort(void) {
     syscall(SYS_exit_group, 0);
 #endif
     if (sOrigAbort) sOrigAbort();
+    _exit(0);
+}
+
+static void (*sOrigStackChkFail)(void) = nullptr;
+
+static void safe_stack_chk_fail(void) {
+    char tname[32] = {0};
+    prctl(PR_GET_NAME, reinterpret_cast<unsigned long>(tname), 0, 0, 0);
+    ALOGW("FEATURESTIC GUARD: Intercepted __stack_chk_fail() from tid=%d (%s)",
+          static_cast<int>(gettid()), tname[0] ? tname : "?");
+    if (!isCriticalGameOrMainThread() && !isGraphicsOrRenderThread(tname) && !isArtInternalDaemonThread(tname) && gettid() != getpid()) {
+        ALOGW("FEATURESTIC GUARD: Quiescing rogue thread stack failure tid=%d (%s) into sleep",
+              static_cast<int>(gettid()), tname[0] ? tname : "?");
+        while (true) {
+            sleep(3600);
+        }
+        return;
+    }
+#if defined(__aarch64__)
+    register long x8 __asm__("x8") = 94; // __NR_exit_group
+    register long x0 __asm__("x0") = 0;
+    __asm__ __volatile__("svc #0" : "+r"(x0) : "r"(x8) : "memory", "cc");
+#else
+    syscall(SYS_exit_group, 0);
+#endif
+    if (sOrigStackChkFail) sOrigStackChkFail();
     _exit(0);
 }
 
@@ -886,6 +917,8 @@ static void passiveNativeCrashDiagnosticsHandler(int sig, siginfo_t *info, void 
             static __thread int tConsecutiveFaults = 0;
             static __thread int tTotalFaults = 0;
             static __thread uint64_t tLastFaultTimeMs = 0;
+            static __thread uintptr_t tLastFaultPc = 0;
+            static __thread int tSamePcCount = 0;
 
             struct timespec ts{};
             clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -897,12 +930,19 @@ static void passiveNativeCrashDiagnosticsHandler(int sig, siginfo_t *info, void 
             tConsecutiveFaults++;
             tTotalFaults++;
 
-            bool isCritical = isCriticalGameOrMainThread() || (gettid() == getpid());
+            if (currentPc == tLastFaultPc) {
+                tSamePcCount++;
+            } else {
+                tLastFaultPc = currentPc;
+                tSamePcCount = 1;
+            }
+
+            bool isCritical = isCriticalGameOrMainThread() || isGraphicsOrRenderThread(tname) || (gettid() == getpid());
             bool isRogue = isRogueWorkerThread(tname);
 
             // Rogue worker thread stuck in an infinite cascade loop (> 4 faults in 2s or > 8 lifetime faults):
             // Quiesce into low-power kernel sleep so OS thread remains valid for ART GC without burning CPU!
-            if ((tConsecutiveFaults > 4 || tTotalFaults > 8) && !isCritical && gettid() != getpid()) {
+            if ((tConsecutiveFaults > 4 || tTotalFaults > 8) && !isCritical && !isArtInternalDaemonThread(tname) && gettid() != getpid()) {
                 ALOGW("FEATURESTIC RESCUE: Quiescing runaway worker thread tid=%d (%s) after %d cascade faults into sleep",
                       static_cast<int>(gettid()), tname[0] ? tname : "?", tConsecutiveFaults);
                 while (true) {
@@ -912,106 +952,92 @@ static void passiveNativeCrashDiagnosticsHandler(int sig, siginfo_t *info, void 
             }
 
             if (tConsecutiveFaults <= 5) {
-                ALOGW("FEATURESTIC RESCUE: Rescuing signal %d at PC %p (addr=%p) on tid=%d (%s) [fault #%d]",
+                ALOGW("FEATURESTIC RESCUE: Rescuing signal %d at PC %p (addr=%p) on tid=%d (%s) [fault #%d, samePcCount=%d]",
                       sig, reinterpret_cast<void *>(currentPc), reinterpret_cast<void *>(fAddr),
-                      static_cast<int>(gettid()), tname[0] ? tname : "?", tConsecutiveFaults);
+                      static_cast<int>(gettid()), tname[0] ? tname : "?", tConsecutiveFaults, tSamePcCount);
             }
 
-            uintptr_t lr = static_cast<uintptr_t>(uc->uc_mcontext.regs[30]);
-            uintptr_t fp = static_cast<uintptr_t>(uc->uc_mcontext.regs[29]);
-
-            // Determine if LR is a genuine external caller or just an intra-function return address
-            uintptr_t callerPc = 0;
-            bool isDirectLrValid = (lr >= 0x10000 && isPageMappedSafe(lr));
-            bool isIntraFunctionLr = isDirectLrValid && (labs((intptr_t)lr - (intptr_t)currentPc) < 4096);
-
-            if (isDirectLrValid && !isIntraFunctionLr) {
-                callerPc = lr;
-            } else if (fp >= 0x10000 && (fp & 0x7) == 0 && isPageMappedSafe(fp) && isPageMappedSafe(fp + 8)) {
-                // Inspect standard ARM64 stack frame record: fp points to [saved_fp, saved_lr]
-                uintptr_t savedLr = *reinterpret_cast<const uintptr_t *>(fp + 8);
-                if (savedLr >= 0x10000 && isPageMappedSafe(savedLr) && labs((intptr_t)savedLr - (intptr_t)currentPc) >= 4096) {
-                    callerPc = savedLr;
-                    uintptr_t savedFp = *reinterpret_cast<const uintptr_t *>(fp);
-                    if (savedFp > fp && isPageMappedSafe(savedFp)) {
-                        uc->uc_mcontext.regs[29] = savedFp;
-                        uc->uc_mcontext.sp = fp + 16;
-                    }
-                }
-            }
-
-            static __thread uintptr_t tPrevCaller1 = 0;
-            static __thread uintptr_t tPrevCaller2 = 0;
-            static __thread int tPingPongCount = 0;
-
-            if (callerPc != 0 && (callerPc == tPrevCaller1 || callerPc == tPrevCaller2)) {
-                tPingPongCount++;
-            } else if (callerPc != 0) {
-                tPrevCaller1 = tPrevCaller2;
-                tPrevCaller2 = callerPc;
-                tPingPongCount = 0;
-            }
-
-            if (tPingPongCount > 3 && !isCritical && gettid() != getpid()) {
-                ALOGW("FEATURESTIC RESCUE: Quiescing ping-pong worker thread tid=%d (%s) after %d bounces into sleep",
-                      static_cast<int>(gettid()), tname[0] ? tname : "?", tPingPongCount);
-                while (true) {
-                    sleep(3600);
-                }
-                return;
-            }
-
-            // 1. Universal Cascade Detection on ANY thread:
-            // Safely return to external caller. On graphics/render threads, point x0 to the
-            // zeroed memory safety cushion so subsequent caller dereferences ([x0]) never fault!
-            if (tConsecutiveFaults > 1) {
-                if (callerPc != 0) {
-                    uintptr_t retVal = isGraphicsOrRenderThread(tname) ? sLowMemoryCushionBase : 0;
-                    ALOGW("FEATURESTIC RESCUE: Safely aborting failing call on tid=%d (%s) -> returning to caller PC %p (x0=%p)",
-                          static_cast<int>(gettid()), tname[0] ? tname : "?", reinterpret_cast<void *>(callerPc),
-                          reinterpret_cast<void *>(retVal));
-                    uc->uc_mcontext.pc = callerPc;
-                    uc->uc_mcontext.regs[0] = retVal;
-                    if (tConsecutiveFaults > 2) {
-                        usleep(10000); // 10ms throttle: drops CPU burn down to 0% while remaining responsive
-                    }
-                    return;
-                }
-            }
-
-            // 2. If PC is invalid or unmapped, recover via mapped external caller
-            if ((currentPc < 0x10000 || !isPageMappedSafe(currentPc)) && callerPc != 0) {
-                uintptr_t retVal = isGraphicsOrRenderThread(tname) ? sLowMemoryCushionBase : 0;
-                uc->uc_mcontext.pc = callerPc;
-                uc->uc_mcontext.regs[0] = retVal;
-                if (tConsecutiveFaults > 2) {
-                    usleep(10000);
-                }
-                return;
-            }
-
-            // 3. Single-fault instruction advance (throttled if consecutive to preserve 0% CPU without deadlocks)
+            // CASE 1: Active mapped function (currentPc is valid executable code in process)
+            // NEVER forge returns to callerPc from inside an active function!
+            // Doing so destroys the stack frame, corrupts frame pointer/canary, and triggers __stack_chk_fail!
             if (currentPc >= 0x10000 && isPageMappedSafe(currentPc)) {
-                if (tConsecutiveFaults > 2) {
-                    usleep(10000); // 10ms throttle: eliminates 100% CPU spins and ANRs
-                }
                 uint32_t instr = *reinterpret_cast<const uint32_t *>(currentPc);
-                if ((instr & 0x00400000) != 0) {
-                    int rt = instr & 0x1F;
-                    if (rt < 31) {
-                        uc->uc_mcontext.regs[rt] = isGraphicsOrRenderThread(tname) ? sLowMemoryCushionBase : 0;
+                uint32_t op0 = (instr >> 25) & 0xF;
+                bool isLoadStore = (op0 == 4 || op0 == 6 || op0 == 12 || op0 == 13);
+
+                // 1A. Low-memory null-pointer dereference repair:
+                // In ARM64, the base register Rn is encoded in bits [9:5] for ALL load and store variants.
+                // If Rn points to null or unmapped memory, redirect Rn to our 2MB zeroed cushion
+                // and RE-EXECUTE the instruction without moving PC!
+                if (isLoadStore) {
+                    int rn = (instr >> 5) & 0x1F;
+                    if (rn < 31 && tSamePcCount <= 2) {
+                        uintptr_t rnVal = static_cast<uintptr_t>(uc->uc_mcontext.regs[rn]);
+                        if (rnVal < 0x10000 || !isPageMappedSafe(rnVal)) {
+                            ALOGW("FEATURESTIC RESCUE: Redirecting base reg x%d (%p) to safety cushion %p on tid=%d (%s) PC %p",
+                                  rn, reinterpret_cast<void *>(rnVal),
+                                  reinterpret_cast<void *>(sLowMemoryCushionBase),
+                                  static_cast<int>(gettid()), tname[0] ? tname : "?",
+                                  reinterpret_cast<void *>(currentPc));
+                            uc->uc_mcontext.regs[rn] = sLowMemoryCushionBase;
+                            return; // Re-execute instruction naturally with zeroed memory cushion!
+                        }
                     }
                 }
+
+                // 1B. If instruction still faults after repair or isn't a simple Rn dereference:
+                // Step past the instruction safely (pc += 4)
+                if (tConsecutiveFaults > 3) {
+                    usleep(5000); // 5ms throttle to eliminate 100% CPU spins without deadlocks
+                }
+
+                // If it is a load instruction, set destination register(s) to safety cushion or 0
+                // so subsequent dependent instructions don't fault on garbage!
+                int rt = instr & 0x1F;
+                uintptr_t safeVal = isGraphicsOrRenderThread(tname) ? sLowMemoryCushionBase : 0;
+                if (rt < 31) {
+                    uc->uc_mcontext.regs[rt] = safeVal;
+                }
+                // Check for LDP (Load Pair): bits [29:28] == 10, bit 22 == 1 -> also populate Rt2 (bits 14:10)
+                if ((instr & 0x3A400000) == 0x28400000) {
+                    int rt2 = (instr >> 10) & 0x1F;
+                    if (rt2 < 31) {
+                        uc->uc_mcontext.regs[rt2] = safeVal;
+                    }
+                }
+
                 uc->uc_mcontext.pc += 4;
                 return;
-            } else if (callerPc != 0) {
+            }
+
+            // CASE 2: Unmapped or null PC (currentPc < 0x10000 or unmapped):
+            // The thread attempted an indirect call (blr) to a null or invalid function pointer.
+            // Because the callee function was never entered, no stack frame was created:
+            // sp and fp are still the CALLER'S stack frame!
+            // Recover safely by returning to callerPc (lr) with return value x0 = 0!
+            uintptr_t lr = static_cast<uintptr_t>(uc->uc_mcontext.regs[30]);
+            uintptr_t fp = static_cast<uintptr_t>(uc->uc_mcontext.regs[29]);
+            uintptr_t callerPc = 0;
+            if (lr >= 0x10000 && isPageMappedSafe(lr)) {
+                callerPc = lr;
+            } else if (fp >= 0x10000 && (fp & 0x7) == 0 && isPageMappedSafe(fp) && isPageMappedSafe(fp + 8)) {
+                uintptr_t savedLr = *reinterpret_cast<const uintptr_t *>(fp + 8);
+                if (savedLr >= 0x10000 && isPageMappedSafe(savedLr)) {
+                    callerPc = savedLr;
+                }
+            }
+
+            if (callerPc != 0) {
                 uintptr_t retVal = isGraphicsOrRenderThread(tname) ? sLowMemoryCushionBase : 0;
+                ALOGW("FEATURESTIC RESCUE: Returning to caller PC %p (x0=%p) from unmapped PC %p on tid=%d (%s)",
+                      reinterpret_cast<void *>(callerPc), reinterpret_cast<void *>(retVal),
+                      reinterpret_cast<void *>(currentPc), static_cast<int>(gettid()), tname[0] ? tname : "?");
                 uc->uc_mcontext.pc = callerPc;
                 uc->uc_mcontext.regs[0] = retVal;
                 return;
             }
 
-            // 4. Fallback for unmapped PC & unmapped caller on rogue worker: quiesce into sleep cleanly
+            // Fallback for completely unrecoverable rogue worker thread:
             if (!isCritical && !isArtInternalDaemonThread(tname) && isRogue) {
                 ALOGW("FEATURESTIC RESCUE: Quiescing unrecoverable rogue worker tid=%d (%s) on signal %d into sleep",
                       static_cast<int>(gettid()), tname[0] ? tname : "?", sig);
@@ -1020,7 +1046,9 @@ static void passiveNativeCrashDiagnosticsHandler(int sig, siginfo_t *info, void 
                 }
                 return;
             }
-            usleep(20000);
+
+            // Critical thread fallback: avoid freeze by stepping past
+            uc->uc_mcontext.pc += 4;
             return;
         }
     }
@@ -1295,6 +1323,7 @@ static void installHeapAndRefBaseSafetyGuards() {
         void *exitSym = dlsym(RTLD_DEFAULT, "exit");
         void *_exitSym = dlsym(RTLD_DEFAULT, "_exit");
         void *_ExitSym = dlsym(RTLD_DEFAULT, "_Exit");
+        void *stackChkFailSym = dlsym(RTLD_DEFAULT, "__stack_chk_fail");
         void *pthreadSigmaskSym = dlsym(RTLD_DEFAULT, "pthread_sigmask");
         void *sigprocmaskSym = dlsym(RTLD_DEFAULT, "sigprocmask");
         void *sigprocmask64Sym = dlsym(RTLD_DEFAULT, "sigprocmask64");
@@ -1380,6 +1409,11 @@ static void installHeapAndRefBaseSafetyGuards() {
             A64HookFunction(_ExitSym,
                             reinterpret_cast<void *>(safe__exit),
                             nullptr);
+        }
+        if (stackChkFailSym) {
+            A64HookFunction(stackChkFailSym,
+                            reinterpret_cast<void *>(safe_stack_chk_fail),
+                            reinterpret_cast<void **>(&sOrigStackChkFail));
         }
         if (dlIteratePhdrSym) {
             A64HookFunction(dlIteratePhdrSym,
