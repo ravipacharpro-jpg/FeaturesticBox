@@ -192,7 +192,52 @@ static bool isArtInternalDaemonThread(const char *tname) {
             || strcasestr(tname, "signal catcher") != nullptr
             || strcasestr(tname, "jit thread") != nullptr
             || strcasestr(tname, "queued-work") != nullptr
-            || strcasestr(tname, "daemon") != nullptr;
+            || strcasestr(tname, "daemon") != nullptr
+            || strcasestr(tname, "compiler") != nullptr
+            || strcasestr(tname, "profile saver") != nullptr;
+}
+
+static bool isArtOrManagedCode(uintptr_t pc, uintptr_t faultAddr, uint32_t instr) {
+    // 1. Canonical ARM64 ART implicit suspend check: ldr x21, [x21] (0xf94002b5u)
+    if (instr == 0xf94002b5u) {
+        return true;
+    }
+
+    if (pc < 0x10000) {
+        return false;
+    }
+
+    // 2. Check loaded module name via xdl_addr
+    void *xdlCache = nullptr;
+    xdl_info_t pcInfo{};
+    bool isManaged = false;
+    if (xdl_addr(reinterpret_cast<void *>(pc), &pcInfo, &xdlCache) != 0 && pcInfo.dli_fname != nullptr) {
+        const char *fname = pcInfo.dli_fname;
+        if (strstr(fname, "libart.so") != nullptr
+                || strstr(fname, "libart-compiler.so") != nullptr
+                || strstr(fname, "libopenjdk.so") != nullptr
+                || strstr(fname, "libsigchain.so") != nullptr
+                || strstr(fname, "com.android.art") != nullptr
+                || strstr(fname, "com.android.runtime") != nullptr
+                || strstr(fname, ".oat") != nullptr
+                || strstr(fname, ".odex") != nullptr
+                || strstr(fname, ".vdex") != nullptr
+                || strstr(fname, ".art") != nullptr
+                || strstr(fname, "dalvik") != nullptr) {
+            isManaged = true;
+        }
+    } else {
+        // xdl_addr returned 0: PC is in anonymous memory (stack, heap, or JIT code cache)
+        // If it's an implicit null check (faultAddr < 4096) or suspend check, treat as ART JIT code
+        if (faultAddr < 4096 || instr == 0xf94002b5u) {
+            isManaged = true;
+        }
+    }
+
+    if (xdlCache != nullptr) {
+        xdl_addr_clean(&xdlCache);
+    }
+    return isManaged;
 }
 
 static bool isGraphicsOrRenderThread(const char *tname) {
@@ -690,7 +735,12 @@ static void safe_exit(int code) {
     ALOGW("FEATURESTIC GUARD: Intercepted exit(%d) from tid=%d (name=%s)",
           code, static_cast<int>(gettid()), tname[0] ? tname : "?");
     if (!isCriticalGameOrMainThread() && gettid() != getpid()) {
-        syscall(__NR_exit, 0);
+        ALOGW("FEATURESTIC GUARD: Quiescing worker thread calling exit(%d) tid=%d (%s) into sleep",
+              code, static_cast<int>(gettid()), tname[0] ? tname : "?");
+        while (true) {
+            sleep(3600);
+        }
+        return;
     }
 #if defined(__aarch64__)
     register long x8 __asm__("x8") = 94; // __NR_exit_group: cleanly terminate process without hang
@@ -708,7 +758,12 @@ static void safe__exit(int code) {
     ALOGW("FEATURESTIC GUARD: Intercepted _exit(%d) from tid=%d (name=%s)",
           code, static_cast<int>(gettid()), tname[0] ? tname : "?");
     if (!isCriticalGameOrMainThread() && gettid() != getpid()) {
-        syscall(__NR_exit, 0);
+        ALOGW("FEATURESTIC GUARD: Quiescing worker thread calling _exit(%d) tid=%d (%s) into sleep",
+              code, static_cast<int>(gettid()), tname[0] ? tname : "?");
+        while (true) {
+            sleep(3600);
+        }
+        return;
     }
 #if defined(__aarch64__)
     register long x8 __asm__("x8") = 94; // __NR_exit_group: cleanly terminate process without hang
@@ -726,13 +781,12 @@ static void safe_abort(void) {
     ALOGW("FEATURESTIC GUARD: Intercepted abort() from tid=%d (name=%s)",
           static_cast<int>(gettid()), tname[0] ? tname : "?");
     if (!isCriticalGameOrMainThread() && gettid() != getpid()) {
-#if defined(__aarch64__)
-        register long x8 __asm__("x8") = 93; // __NR_exit: terminate ONLY this worker thread
-        register long x0 __asm__("x0") = 0;
-        __asm__ __volatile__("svc #0" : "+r"(x0) : "r"(x8) : "memory", "cc");
-#else
-        syscall(__NR_exit, 0);
-#endif
+        ALOGW("FEATURESTIC GUARD: Quiescing worker thread calling abort() tid=%d (%s) into sleep",
+              static_cast<int>(gettid()), tname[0] ? tname : "?");
+        while (true) {
+            sleep(3600);
+        }
+        return;
     }
     // Cleanly exit via exit_group instead of an infinite while(true) usleep() freeze!
 #if defined(__aarch64__)
@@ -807,28 +861,24 @@ static void passiveNativeCrashDiagnosticsHandler(int sig, siginfo_t *info, void 
             }
 
             if (!isCriticalGameOrMainThread() && gettid() != getpid()) {
-                ALOGW("FEATURESTIC RESCUE: Terminating runaway illegal instruction thread tid=%d (%s)",
+                ALOGW("FEATURESTIC RESCUE: Quiescing runaway illegal instruction thread tid=%d (%s) into sleep",
                       static_cast<int>(gettid()), tname[0] ? tname : "?");
-                register long x8 __asm__("x8") = 93;
-                register long x0 __asm__("x0") = 0;
-                __asm__ __volatile__("svc #0" : "+r"(x0) : "r"(x8) : "memory", "cc");
+                while (true) {
+                    sleep(3600);
+                }
+                return;
             }
             return;
         }
 
-        // 3. Inspect PC: If the fault originates inside libart.so (ART runtime),
-        // ART's FaultManager handles implicit NullPointerExceptions, CMC GC compaction, and monitors.
-        // Never step over PC or forge returns inside libart.so!
-        if (currentPc >= 0x10000) {
-            void *xdlCache = nullptr;
-            xdl_info_t pcInfo{};
-            if (xdl_addr(reinterpret_cast<void *>(currentPc), &pcInfo, &xdlCache) != 0 && pcInfo.dli_fname != nullptr) {
-                if (strstr(pcInfo.dli_fname, "libart.so") != nullptr || strstr(pcInfo.dli_fname, "com.android.art") != nullptr) {
-                    if (xdlCache != nullptr) xdl_addr_clean(&xdlCache);
-                    return;
-                }
-            }
-            if (xdlCache != nullptr) xdl_addr_clean(&xdlCache);
+        // 3. Inspect PC & instruction: If fault is in ART runtime, boot image, OAT, ODEX,
+        // or JIT generated code, or is an implicit suspend/null check,
+        // let ART's FaultManager handle it naturally!
+        // Never step over PC or forge returns inside ART or compiled Java bytecode!
+        uint32_t currentInstr = (currentPc >= 0x10000 && isPageMappedSafe(currentPc))
+                ? *reinterpret_cast<const uint32_t *>(currentPc) : 0;
+        if (isArtOrManagedCode(currentPc, fAddr, currentInstr)) {
+            return;
         }
 
         if (sig == SIGBUS || sig == SIGSEGV) {
@@ -850,14 +900,13 @@ static void passiveNativeCrashDiagnosticsHandler(int sig, siginfo_t *info, void 
             bool isRogue = isRogueWorkerThread(tname);
 
             // Rogue worker thread stuck in an infinite cascade loop (> 4 faults in 2s or > 8 lifetime faults):
-            // Terminate JUST that failing worker thread cleanly via __NR_exit (syscall 93)
-            // to eliminate 100% CPU lockups, rescue spamming, and memory freezes!
+            // Quiesce into low-power kernel sleep so OS thread remains valid for ART GC without burning CPU!
             if ((tConsecutiveFaults > 4 || tTotalFaults > 8) && !isCritical && gettid() != getpid()) {
-                ALOGW("FEATURESTIC RESCUE: Terminating runaway worker thread tid=%d (%s) after %d cascade faults (total=%d)",
-                      static_cast<int>(gettid()), tname[0] ? tname : "?", tConsecutiveFaults, tTotalFaults);
-                register long x8 __asm__("x8") = 93; // __NR_exit
-                register long x0 __asm__("x0") = 0;
-                __asm__ __volatile__("svc #0" : "+r"(x0) : "r"(x8) : "memory", "cc");
+                ALOGW("FEATURESTIC RESCUE: Quiescing runaway worker thread tid=%d (%s) after %d cascade faults into sleep",
+                      static_cast<int>(gettid()), tname[0] ? tname : "?", tConsecutiveFaults);
+                while (true) {
+                    sleep(3600);
+                }
                 return;
             }
 
@@ -903,11 +952,11 @@ static void passiveNativeCrashDiagnosticsHandler(int sig, siginfo_t *info, void 
             }
 
             if (tPingPongCount > 3 && !isCritical && gettid() != getpid()) {
-                ALOGW("FEATURESTIC RESCUE: Terminating runaway ping-pong worker thread tid=%d (%s) after %d bounces",
+                ALOGW("FEATURESTIC RESCUE: Quiescing ping-pong worker thread tid=%d (%s) after %d bounces into sleep",
                       static_cast<int>(gettid()), tname[0] ? tname : "?", tPingPongCount);
-                register long x8 __asm__("x8") = 93; // __NR_exit
-                register long x0 __asm__("x0") = 0;
-                __asm__ __volatile__("svc #0" : "+r"(x0) : "r"(x8) : "memory", "cc");
+                while (true) {
+                    sleep(3600);
+                }
                 return;
             }
 
@@ -961,13 +1010,14 @@ static void passiveNativeCrashDiagnosticsHandler(int sig, siginfo_t *info, void 
                 return;
             }
 
-            // 4. Fallback for unmapped PC & unmapped caller on rogue worker: terminate that single thread cleanly in kernel
+            // 4. Fallback for unmapped PC & unmapped caller on rogue worker: quiesce into sleep cleanly
             if (!isCritical && !isArtInternalDaemonThread(tname) && isRogue) {
-                ALOGW("FEATURESTIC RESCUE: Terminating unrecoverable rogue worker tid=%d (%s) on signal %d",
+                ALOGW("FEATURESTIC RESCUE: Quiescing unrecoverable rogue worker tid=%d (%s) on signal %d into sleep",
                       static_cast<int>(gettid()), tname[0] ? tname : "?", sig);
-                register long x8 __asm__("x8") = 93;
-                register long x0 __asm__("x0") = 0;
-                __asm__ __volatile__("svc #0" : "+r"(x0) : "r"(x8) : "memory", "cc");
+                while (true) {
+                    sleep(3600);
+                }
+                return;
             }
             usleep(20000);
             return;
@@ -1047,6 +1097,13 @@ static int safe_sigaction_common(int sig,
         }
         // Protect SECCOMP-BPF trap handler: never allow third-party libs to strip our SIGSYS handler
         return 0;
+    }
+    if (sig == SIGQUIT) {
+        // Protect ART SignalCatcher from anti-cheat (CrashKit / Bugly) hijacking SIGQUIT
+        if (sSignalGuardInstalled) {
+            return 0; // Ignore anti-cheat overriding SIGQUIT
+        }
+        return origFn ? origFn(sig, act, oldact) : 0;
     }
     if (sig == SIGSEGV || sig == SIGBUS || sig == SIGABRT || sig == SIGILL) {
         struct sigaction *savedSlot = (sig == SIGSEGV) ? &sOldSigsegvAction
