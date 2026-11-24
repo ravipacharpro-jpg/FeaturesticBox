@@ -295,11 +295,9 @@ public class ActivityStack {
 	}
 
     public static Bundle ensureBalOptions(Bundle options) {
-        if (Build.VERSION.SDK_INT >= 34) {
+        if (android.os.Build.VERSION.SDK_INT >= 34) {
             try {
-                android.app.ActivityOptions actOpt = options != null
-                        ? android.app.ActivityOptions.fromBundle(options)
-                        : android.app.ActivityOptions.makeBasic();
+                android.app.ActivityOptions actOpt = android.app.ActivityOptions.makeBasic();
                 try {
                     java.lang.reflect.Method m = actOpt.getClass().getMethod("setPendingIntentBackgroundActivityStartMode", int.class);
                     m.invoke(actOpt, 1); // MODE_BACKGROUND_ACTIVITY_START_ALLOWED = 1
@@ -308,7 +306,15 @@ public class ActivityStack {
                     java.lang.reflect.Method m2 = actOpt.getClass().getMethod("setPendingIntentCreatorBackgroundActivityStartMode", int.class);
                     m2.invoke(actOpt, 1);
                 } catch (Throwable ignored) {}
-                return actOpt.toBundle();
+                Bundle balBundle = actOpt.toBundle();
+                if (balBundle != null) {
+                    if (options != null) {
+                        Bundle merged = new Bundle(options);
+                        merged.putAll(balBundle);
+                        return merged;
+                    }
+                    return balBundle;
+                }
             } catch (Throwable ignored) {}
         }
         return options;
