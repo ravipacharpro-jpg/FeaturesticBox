@@ -212,12 +212,12 @@ void SystemPropertiesHook::init(JNIEnv *env) {
 #if defined(__aarch64__)
         void *getSym = dlsym(RTLD_DEFAULT, "__system_property_get");
         if (getSym != nullptr) {
-            sOrigSystemPropertyGet = reinterpret_cast<system_property_get_fn_t>(getSym);
+            sOrigSystemPropertyGet = reinterpret_cast<int (*)(const char *, char *)>(getSym);
             ALOGI("SystemPropertiesHook: Resolved native __system_property_get (zero inline hook)");
         }
         void *findSym = dlsym(RTLD_DEFAULT, "__system_property_find");
         if (findSym != nullptr) {
-            sOrigSystemPropertyFind = reinterpret_cast<system_property_find_fn_t>(findSym);
+            sOrigSystemPropertyFind = reinterpret_cast<const prop_info *(*)(const char *)>(findSym);
             ALOGI("SystemPropertiesHook: Resolved native __system_property_find (zero inline hook)");
         }
 #endif
