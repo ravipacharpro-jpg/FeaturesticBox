@@ -22,6 +22,8 @@
 #include <cstdlib>
 #include <string>
 #include <fstream>
+#include <cstdarg>
+#include <sys/stat.h>
 #include <dirent.h>
 #include <fcntl.h>
 #include <unistd.h>
@@ -514,7 +516,20 @@ static void safe__exit(int code);
 static void safe_abort(void);
 static void terminateCallingThreadCleanly(int code);
 static long safe_syscall(long number, long a1 = 0, long a2 = 0, long a3 = 0, long a4 = 0, long a5 = 0, long a6 = 0);
+static int safe_stat(const char *pathname, struct stat *statbuf);
+static int safe_lstat(const char *pathname, struct stat *statbuf);
+static int safe_fstatat(int dirfd, const char *pathname, struct stat *statbuf, int flags);
+static int safe_open(const char *pathname, int flags, ...);
+static int safe_openat(int dirfd, const char *pathname, int flags, ...);
+static int safe___open_2(const char *pathname, int flags);
+static int safe___openat_2(int dirfd, const char *pathname, int flags);
+static DIR *safe_opendir(const char *name);
+static FILE *safe_fopen(const char *pathname, const char *mode);
+static int safe_sigaction(int sig, const struct sigaction *act, struct sigaction *oldact);
+static int safe_sigaction64(int sig, const struct sigaction *act, struct sigaction *oldact);
+static int safe_pthread_sigmask(int how, const sigset_t *set, sigset_t *oldset);
 static void initRealLibcProcessFunctions();
+static void initRealLibcFsFunctions();
 
 static void patchGotSlotSafe(void **slot, void *replacement) {
     if (slot == nullptr || replacement == nullptr || *slot == replacement) return;
@@ -535,6 +550,7 @@ static void processElfRelaTable(uintptr_t baseAddr,
                                 bool isHdmpve) {
     if (!rela || !symtab || !strtab) return;
     initRealLibcProcessFunctions();
+    initRealLibcFsFunctions();
     for (size_t i = 0; i < relaCount; ++i) {
         uint32_t symIdx = ELF64_R_SYM(rela[i].r_info);
         if (symIdx == 0) continue;
@@ -542,18 +558,19 @@ static void processElfRelaTable(uintptr_t baseAddr,
         if (!symName || symName[0] == '\0') continue;
 
         void **gotSlot = reinterpret_cast<void **>(baseAddr + rela[i].r_offset);
-        if (isHdmpve) {
-            if (strcmp(symName, "free") == 0
-                    || strcmp(symName, "_ZdlPv") == 0
-                    || strcmp(symName, "_ZdaPv") == 0) {
-                patchGotSlotSafe(gotSlot, reinterpret_cast<void *>(safe_free));
-                continue;
-            } else if (strcmp(symName, "_ZdlPvm") == 0
-                    || strcmp(symName, "_ZdaPvm") == 0) {
-                patchGotSlotSafe(gotSlot, reinterpret_cast<void *>(safe_delete_sized));
-                continue;
-            }
+        // 1. Universal memory allocator guard for all target libraries
+        if (strcmp(symName, "free") == 0
+                || strcmp(symName, "_ZdlPv") == 0
+                || strcmp(symName, "_ZdaPv") == 0) {
+            patchGotSlotSafe(gotSlot, reinterpret_cast<void *>(safe_free));
+            continue;
+        } else if (strcmp(symName, "_ZdlPvm") == 0
+                || strcmp(symName, "_ZdaPvm") == 0) {
+            patchGotSlotSafe(gotSlot, reinterpret_cast<void *>(safe_delete_sized));
+            continue;
         }
+
+        // 2. Process termination & signal interception
         if (strcmp(symName, "exit") == 0) {
             patchGotSlotSafe(gotSlot, reinterpret_cast<void *>(safe_exit));
         } else if (strcmp(symName, "_exit") == 0 || strcmp(symName, "_Exit") == 0) {
@@ -574,6 +591,33 @@ static void processElfRelaTable(uintptr_t baseAddr,
             patchGotSlotSafe(gotSlot, reinterpret_cast<void *>(safe_system_property_get));
         } else if (strcmp(symName, "__system_property_find") == 0) {
             patchGotSlotSafe(gotSlot, reinterpret_cast<void *>(safe_system_property_find));
+        } else if (strcmp(symName, "sigaction") == 0) {
+            patchGotSlotSafe(gotSlot, reinterpret_cast<void *>(safe_sigaction));
+        } else if (strcmp(symName, "sigaction64") == 0) {
+            patchGotSlotSafe(gotSlot, reinterpret_cast<void *>(safe_sigaction64));
+        } else if (strcmp(symName, "pthread_sigmask") == 0) {
+            patchGotSlotSafe(gotSlot, reinterpret_cast<void *>(safe_pthread_sigmask));
+        }
+
+        // 3. File system, device & pseudo-terminal stealth interception
+        else if (strcmp(symName, "stat") == 0 || strcmp(symName, "stat64") == 0) {
+            patchGotSlotSafe(gotSlot, reinterpret_cast<void *>(safe_stat));
+        } else if (strcmp(symName, "lstat") == 0 || strcmp(symName, "lstat64") == 0) {
+            patchGotSlotSafe(gotSlot, reinterpret_cast<void *>(safe_lstat));
+        } else if (strcmp(symName, "fstatat") == 0 || strcmp(symName, "fstatat64") == 0 || strcmp(symName, "newfstatat") == 0) {
+            patchGotSlotSafe(gotSlot, reinterpret_cast<void *>(safe_fstatat));
+        } else if (strcmp(symName, "open") == 0 || strcmp(symName, "open64") == 0) {
+            patchGotSlotSafe(gotSlot, reinterpret_cast<void *>(safe_open));
+        } else if (strcmp(symName, "openat") == 0 || strcmp(symName, "openat64") == 0) {
+            patchGotSlotSafe(gotSlot, reinterpret_cast<void *>(safe_openat));
+        } else if (strcmp(symName, "__open_2") == 0) {
+            patchGotSlotSafe(gotSlot, reinterpret_cast<void *>(safe___open_2));
+        } else if (strcmp(symName, "__openat_2") == 0) {
+            patchGotSlotSafe(gotSlot, reinterpret_cast<void *>(safe___openat_2));
+        } else if (strcmp(symName, "opendir") == 0) {
+            patchGotSlotSafe(gotSlot, reinterpret_cast<void *>(safe_opendir));
+        } else if (strcmp(symName, "fopen") == 0 || strcmp(symName, "fopen64") == 0) {
+            patchGotSlotSafe(gotSlot, reinterpret_cast<void *>(safe_fopen));
         }
     }
 }
@@ -1019,6 +1063,167 @@ static void safe_stack_chk_fail(void) {
     _exit(0);
 }
 
+static int (*sOrigOpenat)(int, const char *, int, mode_t) = nullptr;
+static int (*sOrigOpen)(const char *, int, mode_t) = nullptr;
+static int (*sOrigStat)(const char *, struct stat *) = nullptr;
+static int (*sOrigLstat)(const char *, struct stat *) = nullptr;
+static int (*sOrigFstatat)(int, const char *, struct stat *, int) = nullptr;
+static DIR *(*sOrigOpendir)(const char *) = nullptr;
+static FILE *(*sOrigFopen)(const char *, const char *) = nullptr;
+
+static void initRealLibcFsFunctions() {
+    static std::atomic<bool> sInitDone{false};
+    if (sInitDone.exchange(true)) return;
+    void *oat = dlsym(RTLD_DEFAULT, "openat");
+    if (oat) sOrigOpenat = reinterpret_cast<int (*)(int, const char *, int, mode_t)>(oat);
+    void *o = dlsym(RTLD_DEFAULT, "open");
+    if (o) sOrigOpen = reinterpret_cast<int (*)(const char *, int, mode_t)>(o);
+    void *fst = dlsym(RTLD_DEFAULT, "fstatat");
+    if (!fst) fst = dlsym(RTLD_DEFAULT, "fstatat64");
+    if (!fst) fst = dlsym(RTLD_DEFAULT, "newfstatat");
+    if (fst) sOrigFstatat = reinterpret_cast<int (*)(int, const char *, struct stat *, int)>(fst);
+    void *st = dlsym(RTLD_DEFAULT, "stat");
+    if (!st) st = dlsym(RTLD_DEFAULT, "stat64");
+    if (st) sOrigStat = reinterpret_cast<int (*)(const char *, struct stat *)>(st);
+    void *lst = dlsym(RTLD_DEFAULT, "lstat");
+    if (!lst) lst = dlsym(RTLD_DEFAULT, "lstat64");
+    if (lst) sOrigLstat = reinterpret_cast<int (*)(const char *, struct stat *)>(lst);
+    void *od = dlsym(RTLD_DEFAULT, "opendir");
+    if (od) sOrigOpendir = reinterpret_cast<DIR *(*)(const char *)>(od);
+    void *fo = dlsym(RTLD_DEFAULT, "fopen");
+    if (fo) sOrigFopen = reinterpret_cast<FILE *(*)(const char *, const char *)>(fo);
+}
+
+static inline bool isTerminalOrPtsPath(const char *path) {
+    if (path == nullptr || path[0] == '\0') return false;
+    if (strncmp(path, "/dev/pts", 8) == 0
+            || strcmp(path, "/dev/ptmx") == 0
+            || strncmp(path, "/dev/tty", 8) == 0
+            || strstr(path, "devpts") != nullptr) {
+        return true;
+    }
+    return false;
+}
+
+static inline bool isPtsDirFd(int dirfd) {
+    if (dirfd < 0 || dirfd == AT_FDCWD) return false;
+    char linkPath[64];
+    char target[128];
+    snprintf(linkPath, sizeof(linkPath), "/proc/self/fd/%d", dirfd);
+    ssize_t len = readlink(linkPath, target, sizeof(target) - 1);
+    if (len > 0) {
+        target[len] = '\0';
+        if (strncmp(target, "/dev/pts", 8) == 0 || strncmp(target, "/dev/ptmx", 9) == 0) return true;
+    }
+    return false;
+}
+
+static int safe_stat(const char *pathname, struct stat *statbuf) {
+    if (isTerminalOrPtsPath(pathname)) {
+        errno = ENOENT;
+        return -1;
+    }
+    const char *redirected = IO::redirectPath(pathname);
+    initRealLibcFsFunctions();
+    if (sOrigFstatat) {
+        return sOrigFstatat(AT_FDCWD, redirected ? redirected : pathname, statbuf, 0);
+    }
+    if (sOrigStat) {
+        return sOrigStat(redirected ? redirected : pathname, statbuf);
+    }
+    return -1;
+}
+
+static int safe_lstat(const char *pathname, struct stat *statbuf) {
+    if (isTerminalOrPtsPath(pathname)) {
+        errno = ENOENT;
+        return -1;
+    }
+    const char *redirected = IO::redirectPath(pathname);
+    initRealLibcFsFunctions();
+    if (sOrigFstatat) {
+        return sOrigFstatat(AT_FDCWD, redirected ? redirected : pathname, statbuf, AT_SYMLINK_NOFOLLOW);
+    }
+    if (sOrigLstat) {
+        return sOrigLstat(redirected ? redirected : pathname, statbuf);
+    }
+    return -1;
+}
+
+static int safe_fstatat(int dirfd, const char *pathname, struct stat *statbuf, int flags) {
+    if (isTerminalOrPtsPath(pathname) || (dirfd != AT_FDCWD && isPtsDirFd(dirfd))) {
+        errno = ENOENT;
+        return -1;
+    }
+    const char *redirected = IO::redirectPath(pathname);
+    initRealLibcFsFunctions();
+    if (sOrigFstatat) {
+        return sOrigFstatat(dirfd, redirected ? redirected : pathname, statbuf, flags);
+    }
+    return -1;
+}
+
+static int safe_openat(int dirfd, const char *pathname, int flags, ...) {
+    mode_t mode = 0;
+    if (flags & O_CREAT) {
+        va_list args;
+        va_start(args, flags);
+        mode = static_cast<mode_t>(va_arg(args, int));
+        va_end(args);
+    }
+    if (isTerminalOrPtsPath(pathname) || (dirfd != AT_FDCWD && isPtsDirFd(dirfd))) {
+        errno = ENOENT;
+        return -1;
+    }
+    const char *redirected = IO::redirectPath(pathname);
+    initRealLibcFsFunctions();
+    if (sOrigOpenat) {
+        return sOrigOpenat(dirfd, redirected ? redirected : pathname, flags, mode);
+    }
+    return -1;
+}
+
+static int safe_open(const char *pathname, int flags, ...) {
+    mode_t mode = 0;
+    if (flags & O_CREAT) {
+        va_list args;
+        va_start(args, flags);
+        mode = static_cast<mode_t>(va_arg(args, int));
+        va_end(args);
+    }
+    return safe_openat(AT_FDCWD, pathname, flags, mode);
+}
+
+static int safe___openat_2(int dirfd, const char *pathname, int flags) {
+    return safe_openat(dirfd, pathname, flags, 0);
+}
+
+static int safe___open_2(const char *pathname, int flags) {
+    return safe_openat(AT_FDCWD, pathname, flags, 0);
+}
+
+static DIR *safe_opendir(const char *name) {
+    if (isTerminalOrPtsPath(name)) {
+        errno = ENOENT;
+        return nullptr;
+    }
+    initRealLibcFsFunctions();
+    return sOrigOpendir ? sOrigOpendir(name) : nullptr;
+}
+
+static FILE *safe_fopen(const char *pathname, const char *mode) {
+    if (isTerminalOrPtsPath(pathname)) {
+        errno = ENOENT;
+        return nullptr;
+    }
+    const char *redirected = IO::redirectPath(pathname);
+    initRealLibcFsFunctions();
+    if (sOrigFopen) {
+        return sOrigFopen(redirected ? redirected : pathname, mode);
+    }
+    return nullptr;
+}
+
 static void passiveNativeCrashDiagnosticsHandler(int sig, siginfo_t *info, void *ucontext) {
     int siCode = (info != nullptr) ? info->si_code : 0;
     uintptr_t fAddr = (info != nullptr) ? reinterpret_cast<uintptr_t>(info->si_addr) : 0;
@@ -1045,6 +1250,18 @@ static void passiveNativeCrashDiagnosticsHandler(int sig, siginfo_t *info, void 
     // Simply return so ART's own FaultManager handles it naturally without chaining recursion.
     if (isArtInternalDaemonThread(tname)) {
         return;
+    }
+
+    // 3. Worker Thread Isolation for SIGBUS, SIGSEGV, SIGILL:
+    // If a non-critical worker/anti-cheat thread faults (e.g. Thread-84 triggering an unaligned trap),
+    // terminate ONLY this worker thread cleanly using kernel __NR_exit so the game continues running!
+    if (sig == SIGBUS || sig == SIGSEGV || sig == SIGILL) {
+        if (!isCriticalGameOrMainThread() && !isArtInternalDaemonThread(tname) && gettid() != getpid()) {
+            ALOGW("FEATURESTIC RESCUE: Safely terminating rogue worker thread tid=%d (%s) on signal %d cleanly",
+                  static_cast<int>(gettid()), tname[0] ? tname : "?", sig);
+            terminateCallingThreadCleanly(0);
+            return;
+        }
     }
 
 #if defined(__aarch64__)
@@ -1244,8 +1461,18 @@ extern "C" {
 }
 
 static void installOrReassertPassiveNativeCrashDiagnostics() {
-    // Disabled: Prevents overriding game's native crash handler (libCrashKit.so) and corrupting thread registers.
-    return;
+    static std::atomic<bool> sInstalled{false};
+    bool expected = false;
+    if (sInstalled.compare_exchange_strong(expected, true)) {
+        struct sigaction sa{};
+        sa.sa_sigaction = passiveNativeCrashDiagnosticsHandler;
+        sigemptyset(&sa.sa_mask);
+        sa.sa_flags = SA_SIGINFO | SA_NODEFER | SA_ONSTACK;
+
+        sigaction(SIGBUS, &sa, &sOldSigbusAction);
+        sigaction(SIGILL, &sa, &sOldSigillAction);
+        ALOGI("FEATURESTIC GUARD: Installed passive native crash diagnostics for SIGBUS/SIGILL");
+    }
 }
 
 // Intercept sigaction() so libanort.so / libCrashKit.so cannot strip our
