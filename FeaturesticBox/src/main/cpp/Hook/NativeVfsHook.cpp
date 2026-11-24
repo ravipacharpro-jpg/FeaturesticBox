@@ -1500,7 +1500,7 @@ void init() {
     if (readlinkSym) sOrigReadlink = reinterpret_cast<readlink_fn_t>(readlinkSym);
 
     ALOGI("NativeVfsHook: Libc inline hooks safely disabled: zero tampering on libc.so text segment for Tencent Anti-Cheat");
-    installSeccompVfsFilter();
+    // Keep seccomp disabled: Android Bionic pthread_create masks SIGSYS and causes immediate Signal 31
 #endif
 }
 
