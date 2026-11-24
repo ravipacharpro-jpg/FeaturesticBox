@@ -294,6 +294,26 @@ public class ActivityStack {
 		return getStartStubActivityIntentInner(intent,targetApp.bpid,userId,stubRecord,info);
 	}
 
+    public static Bundle ensureBalOptions(Bundle options) {
+        if (Build.VERSION.SDK_INT >= 34) {
+            try {
+                android.app.ActivityOptions actOpt = options != null
+                        ? android.app.ActivityOptions.fromBundle(options)
+                        : android.app.ActivityOptions.makeBasic();
+                try {
+                    java.lang.reflect.Method m = actOpt.getClass().getMethod("setPendingIntentBackgroundActivityStartMode", int.class);
+                    m.invoke(actOpt, 1); // MODE_BACKGROUND_ACTIVITY_START_ALLOWED = 1
+                } catch (Throwable ignored) {}
+                try {
+                    java.lang.reflect.Method m2 = actOpt.getClass().getMethod("setPendingIntentCreatorBackgroundActivityStartMode", int.class);
+                    m2.invoke(actOpt, 1);
+                } catch (Throwable ignored) {}
+                return actOpt.toBundle();
+            } catch (Throwable ignored) {}
+        }
+        return options;
+    }
+
     private int startActivityInNewTaskLocked(int userId, Intent intent, ActivityInfo activityInfo, IBinder resultTo, int launchMode) {
 		ActivityRecord record = newActivityRecord(intent, activityInfo, resultTo, userId);
 		Intent shadow = startActivityProcess(userId, intent, activityInfo, record);
@@ -306,7 +326,7 @@ public class ActivityStack {
 		shadow.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
 		shadow.addFlags(launchMode);
 		try {
-			FeaturesticBoxCore.getContext().startActivity(shadow);
+			FeaturesticBoxCore.getContext().startActivity(shadow, ensureBalOptions(null));
 			return 0;
 		} catch (Exception e) {
 			Log.e(TAG, "Failed to start activity: " + e.getMessage());
@@ -331,6 +351,7 @@ public class ActivityStack {
             flags &= ~ActivityManagerCompat.START_FLAG_NATIVE_DEBUGGING;
             flags &= ~ActivityManagerCompat.START_FLAG_TRACK_ALLOCATION;
             IntentRedirectCompat.collectNestedIntentKeys(intent);
+            options = ensureBalOptions(options);
             if (invokePlatformStartActivity(appThread, FeaturesticBoxCore.getHostPkg(), intent, resolvedType, resultTo, resultWho, requestCode, flags, options)) {
                 return 0;
             }

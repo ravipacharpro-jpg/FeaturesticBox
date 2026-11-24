@@ -159,6 +159,16 @@ static bool isCriticalGameOrMainThread() {
                 || strcasestr(tname, "dalvik") != nullptr
                 || strcasestr(tname, "itop") != nullptr
                 || strcasestr(tname, "imsdk") != nullptr
+                || strcasestr(tname, "slate") != nullptr
+                || strcasestr(tname, "shader") != nullptr
+                || strcasestr(tname, "texture") != nullptr
+                || strcasestr(tname, "pool") != nullptr
+                || strcasestr(tname, "worker") != nullptr
+                || strcasestr(tname, "task") != nullptr
+                || strcasestr(tname, "load") != nullptr
+                || strcasestr(tname, "asset") != nullptr
+                || strcasestr(tname, "gcloud") != nullptr
+                || strcasestr(tname, "hdmpve") != nullptr
                 || strcasestr(tname, "timer") != nullptr
                 || strcasestr(tname, "async") != nullptr) {
             return true;
@@ -168,18 +178,14 @@ static bool isCriticalGameOrMainThread() {
 }
 
 static bool isRogueWorkerThread(const char *tname) {
-    if (!tname || tname[0] == '\0' || strcmp(tname, "?") == 0) return true;
-    if (strncmp(tname, "Thread-", 7) == 0) return true;
-    if (strncmp(tname, "pool-", 5) == 0) return true;
+    if (!tname || tname[0] == '\0') return false;
     if (strcasestr(tname, "crashkit") != nullptr
             || strcasestr(tname, "anort") != nullptr
             || strcasestr(tname, "anogs") != nullptr
             || strcasestr(tname, "tersafe") != nullptr
             || strcasestr(tname, "tp_") != nullptr
             || strcasestr(tname, "guard") != nullptr
-            || strcasestr(tname, "turing") != nullptr
-            || strcasestr(tname, "gcloud") != nullptr
-            || strcasestr(tname, "hdmpve") != nullptr) {
+            || strcasestr(tname, "turing") != nullptr) {
         return true;
     }
     return false;
@@ -733,17 +739,25 @@ static int safe_raise(int sig) {
 static void (*sOrigExit)(int) = nullptr;
 static void (*sOrig_Exit)(int) = nullptr;
 
+static void terminateCallingThreadCleanly(int code = 0) {
+#if defined(__aarch64__)
+    register long x8 __asm__("x8") = 93; // __NR_exit: terminate ONLY calling worker thread cleanly
+    register long x0 __asm__("x0") = static_cast<long>(code);
+    __asm__ __volatile__("svc #0" : "+r"(x0) : "r"(x8) : "memory", "cc");
+#else
+    syscall(SYS_exit, code);
+#endif
+}
+
 static void safe_exit(int code) {
     char tname[32] = {0};
     prctl(PR_GET_NAME, reinterpret_cast<unsigned long>(tname), 0, 0, 0);
     ALOGW("FEATURESTIC GUARD: Intercepted exit(%d) from tid=%d (name=%s)",
           code, static_cast<int>(gettid()), tname[0] ? tname : "?");
     if (!isCriticalGameOrMainThread() && !isGraphicsOrRenderThread(tname) && !isArtInternalDaemonThread(tname) && gettid() != getpid()) {
-        ALOGW("FEATURESTIC GUARD: Quiescing worker thread calling exit(%d) tid=%d (%s) into sleep",
+        ALOGW("FEATURESTIC GUARD: Terminating worker thread calling exit(%d) tid=%d (%s) cleanly",
               code, static_cast<int>(gettid()), tname[0] ? tname : "?");
-        while (true) {
-            sleep(3600);
-        }
+        terminateCallingThreadCleanly(code);
         return;
     }
 #if defined(__aarch64__)
@@ -763,11 +777,9 @@ static void safe__exit(int code) {
     ALOGW("FEATURESTIC GUARD: Intercepted _exit(%d) from tid=%d (name=%s)",
           code, static_cast<int>(gettid()), tname[0] ? tname : "?");
     if (!isCriticalGameOrMainThread() && !isGraphicsOrRenderThread(tname) && !isArtInternalDaemonThread(tname) && gettid() != getpid()) {
-        ALOGW("FEATURESTIC GUARD: Quiescing worker thread calling _exit(%d) tid=%d (%s) into sleep",
+        ALOGW("FEATURESTIC GUARD: Terminating worker thread calling _exit(%d) tid=%d (%s) cleanly",
               code, static_cast<int>(gettid()), tname[0] ? tname : "?");
-        while (true) {
-            sleep(3600);
-        }
+        terminateCallingThreadCleanly(code);
         return;
     }
 #if defined(__aarch64__)
@@ -787,11 +799,9 @@ static void safe_abort(void) {
     ALOGW("FEATURESTIC GUARD: Intercepted abort() from tid=%d (name=%s)",
           static_cast<int>(gettid()), tname[0] ? tname : "?");
     if (!isCriticalGameOrMainThread() && !isGraphicsOrRenderThread(tname) && !isArtInternalDaemonThread(tname) && gettid() != getpid()) {
-        ALOGW("FEATURESTIC GUARD: Quiescing non-critical worker thread calling abort() tid=%d (%s) into sleep",
+        ALOGW("FEATURESTIC GUARD: Terminating non-critical worker thread calling abort() tid=%d (%s) cleanly",
               static_cast<int>(gettid()), tname[0] ? tname : "?");
-        while (true) {
-            sleep(3600);
-        }
+        terminateCallingThreadCleanly(0);
         return;
     }
     // Cleanly exit via exit_group instead of an infinite while(true) usleep() freeze!
@@ -814,11 +824,9 @@ static void safe_stack_chk_fail(void) {
     ALOGW("FEATURESTIC GUARD: Intercepted __stack_chk_fail() from tid=%d (%s)",
           static_cast<int>(gettid()), tname[0] ? tname : "?");
     if (!isCriticalGameOrMainThread() && !isGraphicsOrRenderThread(tname) && !isArtInternalDaemonThread(tname) && gettid() != getpid()) {
-        ALOGW("FEATURESTIC GUARD: Quiescing rogue thread stack failure tid=%d (%s) into sleep",
+        ALOGW("FEATURESTIC GUARD: Terminating rogue thread stack failure tid=%d (%s) cleanly",
               static_cast<int>(gettid()), tname[0] ? tname : "?");
-        while (true) {
-            sleep(3600);
-        }
+        terminateCallingThreadCleanly(0);
         return;
     }
 #if defined(__aarch64__)
@@ -893,11 +901,9 @@ static void passiveNativeCrashDiagnosticsHandler(int sig, siginfo_t *info, void 
             }
 
             if (!isCriticalGameOrMainThread() && gettid() != getpid()) {
-                ALOGW("FEATURESTIC RESCUE: Quiescing runaway illegal instruction thread tid=%d (%s) into sleep",
+                ALOGW("FEATURESTIC RESCUE: Terminating runaway illegal instruction thread tid=%d (%s) cleanly",
                       static_cast<int>(gettid()), tname[0] ? tname : "?");
-                while (true) {
-                    sleep(3600);
-                }
+                terminateCallingThreadCleanly(0);
                 return;
             }
             return;
@@ -943,11 +949,9 @@ static void passiveNativeCrashDiagnosticsHandler(int sig, siginfo_t *info, void 
             // Rogue worker thread stuck in an infinite cascade loop (> 4 faults in 2s or > 8 lifetime faults):
             // Quiesce into low-power kernel sleep so OS thread remains valid for ART GC without burning CPU!
             if ((tConsecutiveFaults > 4 || tTotalFaults > 8) && !isCritical && !isArtInternalDaemonThread(tname) && gettid() != getpid()) {
-                ALOGW("FEATURESTIC RESCUE: Quiescing runaway worker thread tid=%d (%s) after %d cascade faults into sleep",
+                ALOGW("FEATURESTIC RESCUE: Terminating runaway worker thread tid=%d (%s) after %d cascade faults cleanly",
                       static_cast<int>(gettid()), tname[0] ? tname : "?", tConsecutiveFaults);
-                while (true) {
-                    sleep(3600);
-                }
+                terminateCallingThreadCleanly(0);
                 return;
             }
 
@@ -991,10 +995,10 @@ static void passiveNativeCrashDiagnosticsHandler(int sig, siginfo_t *info, void 
                     usleep(5000); // 5ms throttle to eliminate 100% CPU spins without deadlocks
                 }
 
-                // If it is a load instruction, set destination register(s) to safety cushion or 0
-                // so subsequent dependent instructions don't fault on garbage!
+                // If it is a load instruction, set destination register(s) to safety cushion
+                // so subsequent dependent instructions don't fault on garbage/null!
                 int rt = instr & 0x1F;
-                uintptr_t safeVal = isGraphicsOrRenderThread(tname) ? sLowMemoryCushionBase : 0;
+                uintptr_t safeVal = sLowMemoryCushionBase;
                 if (rt < 31) {
                     uc->uc_mcontext.regs[rt] = safeVal;
                 }
@@ -1039,11 +1043,9 @@ static void passiveNativeCrashDiagnosticsHandler(int sig, siginfo_t *info, void 
 
             // Fallback for completely unrecoverable rogue worker thread:
             if (!isCritical && !isArtInternalDaemonThread(tname) && isRogue) {
-                ALOGW("FEATURESTIC RESCUE: Quiescing unrecoverable rogue worker tid=%d (%s) on signal %d into sleep",
+                ALOGW("FEATURESTIC RESCUE: Terminating unrecoverable rogue worker tid=%d (%s) on signal %d cleanly",
                       static_cast<int>(gettid()), tname[0] ? tname : "?", sig);
-                while (true) {
-                    sleep(3600);
-                }
+                terminateCallingThreadCleanly(0);
                 return;
             }
 
