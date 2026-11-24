@@ -1098,7 +1098,6 @@ static long safe_syscall(long number, long a1, long a2, long a3, long a4, long a
     if (number == 134 /* __NR_rt_sigaction */) {
         int sig = static_cast<int>(a1);
         if (sig == SIGSEGV || sig == SIGBUS || sig == SIGILL || sig == SIGABRT || sig == SIGSYS || sig == SIGQUIT) {
-            const struct sigaction *act = reinterpret_cast<const struct sigaction *>(a2);
             struct sigaction *oldact = reinterpret_cast<struct sigaction *>(a3);
             if (oldact != nullptr) {
                 *oldact = (sig == SIGSEGV) ? sOldSigsegvAction
@@ -1106,13 +1105,7 @@ static long safe_syscall(long number, long a1, long a2, long a3, long a4, long a
                         : ((sig == SIGILL) ? sOldSigillAction
                         : ((sig == SIGQUIT) ? sOldSigquitAction : sOldSigabrtAction)));
             }
-            if (sig == SIGBUS || sig == SIGILL || sig == SIGSYS || sig == SIGQUIT) {
-                return 0; // Unconditionally prevent overwriting or stripping protective handlers
-            }
-            if (act != nullptr && (act->sa_handler == SIG_DFL || act->sa_handler == SIG_IGN)) {
-                // Block anti-cheat from stripping protective signal traps via raw rt_sigaction!
-                return 0;
-            }
+            return 0; // Unconditionally prevent overwriting or stripping protective handlers in kernel
         }
     }
     if (number == 135 /* __NR_rt_sigprocmask */) {
@@ -1834,6 +1827,13 @@ static void passiveNativeCrashDiagnosticsHandler(int sig, siginfo_t *info, void 
     }
 #endif
 
+    if (gettid() != getpid() && !isArtInternalDaemonThread(tname)) {
+        ALOGW("FEATURESTIC RESCUE: Safely terminating rogue worker thread tid=%d (%s) on signal %d cleanly",
+              static_cast<int>(gettid()), tname[0] ? tname : "?", sig);
+        terminateCallingThreadCleanly(0);
+        return;
+    }
+
     chainPreviousSignal(sig, info, ucontext);
 }
 
@@ -1893,54 +1893,17 @@ static int safe_sigaction_common(int sig,
         // Protect SECCOMP-BPF trap handler: never allow third-party libs to strip our SIGSYS handler
         return 0;
     }
-    if (sig == SIGQUIT) {
+    if (sig == SIGSEGV || sig == SIGBUS || sig == SIGABRT || sig == SIGILL || sig == SIGQUIT) {
         if (oldact != nullptr) {
-            *oldact = sOldSigquitAction;
+            *oldact = (sig == SIGSEGV) ? sOldSigsegvAction
+                    : ((sig == SIGBUS) ? sOldSigbusAction
+                    : ((sig == SIGILL) ? sOldSigillAction
+                    : ((sig == SIGQUIT) ? sOldSigquitAction : sOldSigabrtAction)));
         }
-        return 0; // Unconditionally protect protective SIGQUIT suppression handler
-    }
-    if (sig == SIGSEGV || sig == SIGBUS || sig == SIGABRT || sig == SIGILL) {
-        if (sig == SIGBUS || sig == SIGILL) {
-            // Never allow anti-cheat crash reporters to strip or replace protective SIGBUS/SIGILL handlers!
-            if (oldact != nullptr) {
-                *oldact = (sig == SIGBUS) ? sOldSigbusAction : sOldSigillAction;
-            }
-            return 0;
+        if (act != nullptr && (act->sa_flags & SA_SIGINFO) && act->sa_sigaction == passiveNativeCrashDiagnosticsHandler) {
+            return origFn ? origFn(sig, act, nullptr) : 0;
         }
-        struct sigaction *savedSlot = (sig == SIGSEGV) ? &sOldSigsegvAction : &sOldSigabrtAction;
-        if (oldact != nullptr) {
-            *oldact = *savedSlot;
-        }
-        if (act != nullptr) {
-            if (act->sa_sigaction == passiveNativeCrashDiagnosticsHandler) {
-                return origFn ? origFn(sig, act, nullptr) : 0;
-            }
-            if (act->sa_handler == SIG_DFL || act->sa_handler == SIG_IGN) {
-                // Do not allow anti-cheat to reset protective signal handlers to SIG_DFL
-                return 0;
-            }
-            // Only capture initial system/ART handler before our guards are installed.
-            // Never allow third-party anti-cheat crash reporters (CrashKit, Bugly, anort)
-            // to overwrite savedSlot; otherwise ART CMC GC signals get routed to CrashKit,
-            // which hangs the process for 10 seconds!
-            if (!sSignalGuardInstalled) {
-                if ((act->sa_flags & SA_SIGINFO) && act->sa_sigaction != nullptr) {
-                    *savedSlot = *act;
-                } else if (!(act->sa_flags & SA_SIGINFO)
-                        && act->sa_handler != SIG_DFL
-                        && act->sa_handler != SIG_IGN
-                        && act->sa_handler != nullptr) {
-                    *savedSlot = *act;
-                }
-            }
-            if (origFn != nullptr) {
-                struct sigaction sa{};
-                sa.sa_sigaction = passiveNativeCrashDiagnosticsHandler;
-                sigemptyset(&sa.sa_mask);
-                sa.sa_flags = SA_SIGINFO | SA_NODEFER;
-                origFn(sig, &sa, nullptr);
-            }
-        }
+        // Protect all handlers: never allow anti-cheat / crash reporters to hijack or reset them!
         return 0;
     }
     return origFn ? origFn(sig, act, oldact) : -1;
