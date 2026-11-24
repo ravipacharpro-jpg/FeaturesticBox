@@ -418,44 +418,30 @@ static void safe_free(void *ptr) {
 
 #if defined(__LP64__)
     uintptr_t uptr = untagPtr(ptr);
-    if (uptr < 0x10000ULL) {
+    if (uptr < 0x10000ULL || uptr >= UINT64_C(0x0001000000000000)) {
         return;
     }
 
-    // 1. Suppress if memory address is unmapped in process address space
-    if (!isPageMappedSafe(uptr)) {
-        int cnt = ++sSuppressedFreeCount;
-        if (cnt <= 32) {
-            ALOGW("HeapGuard: SUPPRESSED unmapped free(%p) caller=%p (count=%d, tid=%d)",
-                  ptr, __builtin_return_address(0), cnt, static_cast<int>(gettid()));
-        }
-        return;
-    }
-
-    // 2. Jemalloc 2MB chunk verification (Android Bionic jemalloc)
-    // In Android Bionic jemalloc (2MB chunks, map_bias=13):
-    // When an unallocated page (bit 0 == 0, e.g. mapbits: 0xbff0, 0x5ff0, 0xdfe0)
+    // Jemalloc 2MB chunk verification (Android Bionic jemalloc)
+    // In Android Bionic jemalloc (2MB chunks, map_bias=13, map_bits offset 0x78):
+    // When an unallocated page (bit 0 == 0, e.g. mapbits: 0x5ff0)
     // is passed to libc free(), jemalloc aborts with "Invalid %p passed to free: value not allocated".
+    // We inspect mapbits directly with zero syscalls in the fast path:
     uintptr_t chunk = uptr & ~uintptr_t(0x1FFFFF);
     size_t pageind = (uptr - chunk) >> 12;
     if (pageind >= 13 && pageind < 512) {
-        if (isPageMappedSafe(chunk)) {
-            static const size_t kCandidateOffsets[] = {0x78, 0x70, 0x80, 0x68, 0x60, 0x88};
-            for (size_t offset : kCandidateOffsets) {
-                uintptr_t mapSlot = chunk + offset + (pageind - 13) * sizeof(size_t);
-                if (isPageMappedSafe(mapSlot)) {
-                    size_t mapbits = *reinterpret_cast<const volatile size_t *>(mapSlot);
-                    if ((mapbits & 0x1ULL) == 0 && mapbits != 0) {
-                        // Page is unallocated in jemalloc (e.g. mapbits: 0x5ff0) -> silently drop to eliminate abort!
-                        int cnt = ++sSuppressedFreeCount;
-                        if (cnt <= 32) {
-                            ALOGW("HeapGuard: SUPPRESSED unallocated jemalloc chunk free(%p, chunk=%p, pageind=%zu, mapbits=0x%zx, offset=0x%zx) [tid=%d, count=%d]",
-                                  ptr, reinterpret_cast<void *>(chunk), pageind, mapbits, offset,
-                                  static_cast<int>(gettid()), cnt);
-                        }
-                        return;
-                    }
+        uintptr_t arenaPtr = untagPtr(*reinterpret_cast<void *const volatile *>(chunk));
+        if (arenaPtr >= 0x10000ULL && arenaPtr < UINT64_C(0x0001000000000000) && (arenaPtr & 0x7ULL) == 0) {
+            uintptr_t mapSlot = chunk + 0x78 + (pageind - 13) * sizeof(size_t);
+            size_t mapbits = *reinterpret_cast<const volatile size_t *>(mapSlot);
+            if ((mapbits & 0x1ULL) == 0) {
+                int cnt = ++sSuppressedFreeCount;
+                if (cnt <= 32) {
+                    ALOGW("HeapGuard: SUPPRESSED unallocated jemalloc chunk free(%p, chunk=%p, pageind=%zu, mapbits=0x%zx) [tid=%d, count=%d]",
+                          ptr, reinterpret_cast<void *>(chunk), pageind, mapbits,
+                          static_cast<int>(gettid()), cnt);
                 }
+                return;
             }
         }
     }
@@ -477,22 +463,13 @@ static void safe_RefBase_decStrong(void *self, const void *id) {
     if (self == nullptr || sOrigRefBaseDecStrong == nullptr) return;
 #if defined(__LP64__)
     uintptr_t uSelf = untagPtr(self);
-    if (uSelf < 0x10000ULL || (uSelf & 0x7ULL) != 0) {
-        return;
-    }
-    if (!isPageMappedSafe(uSelf)) {
-        int cnt = ++sSuppressedRefBaseCount;
-        if (cnt <= 32) {
-            ALOGE("RefBaseGuard: SUPPRESSED unmapped decStrong(%p) (count=%d, tid=%d)",
-                  self, cnt, static_cast<int>(gettid()));
-        }
+    if (uSelf < 0x10000ULL || uSelf >= UINT64_C(0x0001000000000000) || (uSelf & 0x7ULL) != 0) {
         return;
     }
     uintptr_t vptr = untagPtr(*reinterpret_cast<void *const *>(uSelf));
     void *refs = *reinterpret_cast<void *const *>(uSelf + sizeof(void *));
     uintptr_t uRefs = untagPtr(refs);
-    if (vptr < 0x10000ULL || refs == nullptr || uRefs < 0x10000ULL || (uRefs & 0x7ULL) != 0
-            || !isPageMappedSafe(uRefs)) {
+    if (vptr < 0x10000ULL || refs == nullptr || uRefs < 0x10000ULL || uRefs >= UINT64_C(0x0001000000000000) || (uRefs & 0x7ULL) != 0) {
         int cnt = ++sSuppressedRefBaseCount;
         if (cnt <= 32) {
             ALOGE("RefBaseGuard: SUPPRESSED corrupt decStrong(%p) (count=%d, tid=%d)",
@@ -530,10 +507,7 @@ static void safe_weakref_decWeak(void *refs, const void *id) {
     if (refs == nullptr || sOrigWeakrefDecWeak == nullptr) return;
 #if defined(__LP64__)
     uintptr_t uRefs = untagPtr(refs);
-    if (uRefs < 0x10000ULL || (uRefs & 0x7ULL) != 0) {
-        return;
-    }
-    if (!isPageMappedSafe(uRefs)) {
+    if (uRefs < 0x10000ULL || uRefs >= UINT64_C(0x0001000000000000) || (uRefs & 0x7ULL) != 0) {
         return;
     }
     auto *weakAtomic = reinterpret_cast<std::atomic<int32_t> *>(uRefs + 4);
@@ -767,17 +741,18 @@ static int hookTargetLibrariesGotCallback(struct dl_phdr_info *info, size_t /*si
             || (strstr(name, "libpandora") != nullptr)
             || (strstr(name, "libbgmi") != nullptr)
             || (strstr(name, "libDARK") != nullptr)
-            || (strstr(name, "FeaturesticPlugin") != nullptr)
-            || (strstr(name, "/data/app/") != nullptr)
-            || (strstr(name, "/data/data/") != nullptr)
-            || (strstr(name, "/data/user/") != nullptr)
-            || (strstr(name, ".apk!") != nullptr);
+            || (strstr(name, "FeaturesticPlugin") != nullptr);
 
     if (!isGameTarget) {
         return 0;
     }
 
-    bool hookMemoryAllocator = isGameTarget && !isUE4;
+    // Only hook memory allocator for non-UE4 libraries with known unallocated free issues
+    bool hookMemoryAllocator = (strstr(name, "libtersafe") != nullptr || strstr(name, "tersafe") != nullptr)
+            || (strstr(name, "libanort") != nullptr)
+            || (strstr(name, "libanogs") != nullptr)
+            || (strstr(name, "libCrashKit") != nullptr || strstr(name, "CrashKit") != nullptr)
+            || isHdmpve;
 
     {
         std::lock_guard<std::mutex> lk(sHookedGotLibsMutex);
@@ -987,7 +962,15 @@ static void chainPreviousSignal(int sig, siginfo_t *info, void *ucontext) {
         prev->sa_handler(sig);
         return;
     }
-    // Return gracefully instead of letting the process crash or killing threads
+#if defined(__aarch64__)
+    // Never return to a faulting hardware instruction (causes 100% CPU infinite trap loop).
+    // Advance PC past instruction to allow execution to proceed.
+    if (ucontext != nullptr && (sig == SIGSEGV || sig == SIGBUS || sig == SIGILL)) {
+        auto *uc = reinterpret_cast<ucontext_t *>(ucontext);
+        uc->uc_mcontext.pc += 4;
+        return;
+    }
+#endif
 }
 
 static __thread int tThreadSegvAccerrCount = 0;
@@ -1628,16 +1611,7 @@ static void passiveNativeCrashDiagnosticsHandler(int sig, siginfo_t *info, void 
         return;
     }
 
-    // 5. Worker Thread Isolation for SIGSEGV, SIGILL:
-    // If a non-critical worker/anti-cheat thread faults, terminate ONLY this thread cleanly using kernel __NR_exit
-    if (sig == SIGSEGV || sig == SIGILL) {
-        if (!isCriticalGameOrMainThread() && !isArtInternalDaemonThread(tname) && gettid() != getpid()) {
-            ALOGW("FEATURESTIC RESCUE: Safely terminating rogue worker thread tid=%d (%s) on signal %d cleanly",
-                  static_cast<int>(gettid()), tname[0] ? tname : "?", sig);
-            terminateCallingThreadCleanly(0);
-            return;
-        }
-    }
+
 
 #if defined(__aarch64__)
     if (ucontext != nullptr) {
@@ -1687,6 +1661,7 @@ static void passiveNativeCrashDiagnosticsHandler(int sig, siginfo_t *info, void 
         uint32_t currentInstr = (currentPc >= 0x10000 && isPageMappedSafe(currentPc))
                 ? *reinterpret_cast<const uint32_t *>(currentPc) : 0;
         if (isArtOrManagedCode(currentPc, fAddr, currentInstr)) {
+            chainPreviousSignal(sig, info, ucontext);
             return;
         }
 
@@ -1827,7 +1802,7 @@ static void passiveNativeCrashDiagnosticsHandler(int sig, siginfo_t *info, void 
     }
 #endif
 
-    if (gettid() != getpid() && !isArtInternalDaemonThread(tname)) {
+    if (gettid() != getpid() && !isCriticalGameOrMainThread() && !isGraphicsOrRenderThread(tname) && !isArtInternalDaemonThread(tname)) {
         ALOGW("FEATURESTIC RESCUE: Safely terminating rogue worker thread tid=%d (%s) on signal %d cleanly",
               static_cast<int>(gettid()), tname[0] ? tname : "?", sig);
         terminateCallingThreadCleanly(0);
@@ -1901,6 +1876,9 @@ static int safe_sigaction_common(int sig,
                     : ((sig == SIGQUIT) ? sOldSigquitAction : sOldSigabrtAction)));
         }
         if (act != nullptr && (act->sa_flags & SA_SIGINFO) && act->sa_sigaction == passiveNativeCrashDiagnosticsHandler) {
+            if (!sSignalGuardInstalled) {
+                return origFn ? origFn(sig, act, oldact) : 0;
+            }
             return origFn ? origFn(sig, act, nullptr) : 0;
         }
         // Protect all handlers: never allow anti-cheat / crash reporters to hijack or reset them!
