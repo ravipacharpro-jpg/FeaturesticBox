@@ -664,6 +664,34 @@ public class FeaturesticBoxCore extends ClientConfiguration {
         return !GmsCore.isInstalledGoogleService(userId);
     }
 
+    public void setAnogsRetOffsets(String offsetsCsv) {
+        try {
+            Context ctx = getContext();
+            if (ctx == null || offsetsCsv == null || offsetsCsv.trim().isEmpty()) return;
+            java.io.File file = new java.io.File(ctx.getFilesDir(), "featurestic_anogs_offsets.txt");
+            try (java.io.FileOutputStream fos = new java.io.FileOutputStream(file, false)) {
+                fos.write(offsetsCsv.trim().getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            }
+        } catch (Throwable ignored) {
+        }
+    }
+
+    public String getDiscoveredAnogsOffsets() {
+        try {
+            Context ctx = getContext();
+            if (ctx == null) return "";
+            java.io.File file = new java.io.File(ctx.getFilesDir(), "featurestic_anogs_discovered.txt");
+            if (!file.exists()) return "";
+            byte[] buf = new byte[(int) Math.min(file.length(), 4096)];
+            try (java.io.FileInputStream fis = new java.io.FileInputStream(file)) {
+                int n = fis.read(buf);
+                return n > 0 ? new String(buf, 0, n, java.nio.charset.StandardCharsets.UTF_8).trim() : "";
+            }
+        } catch (Throwable ignored) {
+            return "";
+        }
+    }
+
     public IBinder getService(String name) {
         IBinder binder = mServices.get(name);
         if (binder != null && binder.isBinderAlive()) {

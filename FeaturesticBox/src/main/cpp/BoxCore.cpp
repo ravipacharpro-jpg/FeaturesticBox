@@ -845,6 +845,57 @@ static int hookTargetLibrariesGotCallback(struct dl_phdr_info *info, size_t /*si
 
 static std::atomic<uintptr_t> sPatchedAnogsBase{0};
 
+static std::string getHostPackageFromCmdline() {
+    char cmd[256] = {0};
+    int fd = NativeVfsHook::rawDirectOpen("/proc/self/cmdline", O_RDONLY, 0);
+    if (fd >= 0) {
+        ssize_t n = NativeVfsHook::rawDirectRead(fd, cmd, sizeof(cmd) - 1);
+        NativeVfsHook::rawDirectClose(fd);
+        if (n > 0) {
+            cmd[n] = '\0';
+            std::string proc(cmd);
+            size_t colon = proc.find(':');
+            if (colon != std::string::npos) proc = proc.substr(0, colon);
+            if (!proc.empty()) return proc;
+        }
+    }
+    return "com.featurestic.loader";
+}
+
+static std::string extractElfBuildIdHex(const struct dl_phdr_info *info) {
+    if (!info || !info->dlpi_phdr) return "";
+    for (Elf64_Half i = 0; i < info->dlpi_phnum; ++i) {
+        const Elf64_Phdr &ph = info->dlpi_phdr[i];
+        if (ph.p_type != PT_NOTE || ph.p_memsz == 0 || ph.p_memsz > 65536) continue;
+        uintptr_t start = static_cast<uintptr_t>(info->dlpi_addr) + ph.p_vaddr;
+        uintptr_t end = start + ph.p_memsz;
+        uintptr_t cur = start;
+        while (cur + sizeof(Elf64_Nhdr) <= end) {
+            const Elf64_Nhdr *nh = reinterpret_cast<const Elf64_Nhdr *>(cur);
+            uintptr_t nameOff = cur + sizeof(Elf64_Nhdr);
+            uintptr_t nameAligned = (nameOff + nh->n_namesz + 3) & ~uintptr_t(3);
+            uintptr_t descAligned = (nameAligned + nh->n_descsz + 3) & ~uintptr_t(3);
+            if (descAligned > end) break;
+            if (nh->n_type == 3 /* NT_GNU_BUILD_ID */ && nh->n_namesz == 4 &&
+                memcmp(reinterpret_cast<const void *>(nameOff), "GNU", 4) == 0 &&
+                nh->n_descsz > 0 && nh->n_descsz <= 64) {
+                const uint8_t *desc = reinterpret_cast<const uint8_t *>(nameAligned);
+                static const char hex[] = "0123456789abcdef";
+                std::string out;
+                out.reserve(nh->n_descsz * 2);
+                for (Elf64_Word j = 0; j < nh->n_descsz; ++j) {
+                    out.push_back(hex[(desc[j] >> 4) & 0xF]);
+                    out.push_back(hex[desc[j] & 0xF]);
+                }
+                return out;
+            }
+            if (descAligned <= cur) break;
+            cur = descAligned;
+        }
+    }
+    return "";
+}
+
 static int patchAnogsCrashFixerCallback(struct dl_phdr_info *info, size_t /*size*/, void * /*data*/) {
     if (!info || !info->dlpi_name || info->dlpi_addr == 0) return 0;
     if (strstr(info->dlpi_name, "libanogs.so") == nullptr) return 0;
@@ -853,20 +904,84 @@ static int patchAnogsCrashFixerCallback(struct dl_phdr_info *info, size_t /*size
     uintptr_t prev = sPatchedAnogsBase.load(std::memory_order_acquire);
     if (prev == base) return 1;
 
-    static constexpr uintptr_t kAnogsRetOffsets[] = {
-        0x2191B0,
-        0x302D18,
-        0x3B6E2C,
-        0x3379F0,
-        0x3251F4,
-    };
     static constexpr uint32_t kArm64RetInsn = 0xD65F03C0U;
+    static constexpr uint32_t kArm64BrX8Insn = 0xD61F0100U;
+    std::string hostPkg = getHostPackageFromCmdline();
+    std::string cfgPath = "/data/data/" + hostPkg + "/files/featurestic_anogs_offsets.txt";
+
+    std::vector<uintptr_t> offsets;
+    int cfgFd = NativeVfsHook::rawDirectOpen(cfgPath.c_str(), O_RDONLY, 0);
+    if (cfgFd >= 0) {
+        char buf[2048] = {0};
+        ssize_t n = NativeVfsHook::rawDirectRead(cfgFd, buf, sizeof(buf) - 1);
+        NativeVfsHook::rawDirectClose(cfgFd);
+        if (n > 0) {
+            buf[n] = '\0';
+            char *p = buf;
+            while (*p) {
+                while (*p == ' ' || *p == ',' || *p == '\n' || *p == '\r') ++p;
+                if (!*p) break;
+                char *endp = nullptr;
+                unsigned long long val = strtoull(p, &endp, 16);
+                if (endp > p && val >= 0x1000 && val < 0x10000000ULL) {
+                    offsets.push_back(static_cast<uintptr_t>(val));
+                }
+                p = (endp && endp > p) ? endp : (p + 1);
+            }
+        }
+    }
+    if (offsets.empty()) {
+        offsets = {0x2191B0, 0x302D18, 0x3B6E2C, 0x3379F0, 0x3251F4};
+    }
+
+    // Auto-discover ARM64 crash-trap stubs (MOV W8, #0..15 ... BR X8) in executable PT_LOAD
+    if (info->dlpi_phdr) {
+        for (Elf64_Half i = 0; i < info->dlpi_phnum; ++i) {
+            const Elf64_Phdr &ph = info->dlpi_phdr[i];
+            if (ph.p_type != PT_LOAD || (ph.p_flags & PF_X) == 0 || ph.p_memsz < 32) continue;
+            uintptr_t segStart = base + ph.p_vaddr;
+            uintptr_t segEnd = segStart + ph.p_memsz;
+            const uint32_t *insns = reinterpret_cast<const uint32_t *>(segStart);
+            size_t count = (segEnd - segStart) / sizeof(uint32_t);
+            for (size_t idx = 4; idx + 1 < count; ++idx) {
+                if (insns[idx] != kArm64BrX8Insn) continue;
+                bool hasSmallMovW8 = false;
+                for (size_t back = 1; back <= 3 && idx >= back; ++back) {
+                    uint32_t ins = insns[idx - back];
+                    // MOVZ W8, #imm (imm16 <= 15)
+                    if ((ins & 0xFFE0001FU) == 0x52800008U && ((ins >> 5) & 0xFFFFU) <= 15U) {
+                        hasSmallMovW8 = true;
+                        break;
+                    }
+                }
+                if (!hasSmallMovW8) continue;
+                size_t fnStart = idx;
+                for (size_t back = 1; back <= 10 && idx >= back; ++back) {
+                    uint32_t prevIns = insns[idx - back];
+                    if (prevIns == kArm64RetInsn || (prevIns & 0xFC000000U) == 0x14000000U) {
+                        fnStart = idx - back + 1;
+                        break;
+                    }
+                    fnStart = idx - back;
+                }
+                uintptr_t fnOff = (segStart + fnStart * sizeof(uint32_t)) - base;
+                bool exists = false;
+                for (uintptr_t o : offsets) {
+                    if (o == fnOff) { exists = true; break; }
+                }
+                if (!exists && offsets.size() < 24) {
+                    offsets.push_back(fnOff);
+                }
+            }
+        }
+    }
+
     long pageSize = sysconf(_SC_PAGESIZE);
     if (pageSize <= 0) pageSize = 4096;
     uintptr_t pageMask = ~static_cast<uintptr_t>(pageSize - 1);
 
     int patchedCount = 0;
-    for (uintptr_t off : kAnogsRetOffsets) {
+    for (uintptr_t off : offsets) {
         uintptr_t target = base + off;
         uintptr_t page = target & pageMask;
         if (mprotect(reinterpret_cast<void *>(page), static_cast<size_t>(pageSize),
@@ -888,9 +1003,22 @@ static int patchAnogsCrashFixerCallback(struct dl_phdr_info *info, size_t /*size
 
     if (patchedCount > 0) {
         sPatchedAnogsBase.store(base, std::memory_order_release);
-        ALOGI("FeaturesticCore: applyCrashFixer patched %d/%zu libanogs.so offsets at base=%p",
-              patchedCount, sizeof(kAnogsRetOffsets) / sizeof(kAnogsRetOffsets[0]),
-              reinterpret_cast<void *>(base));
+        std::string buildId = extractElfBuildIdHex(info);
+        std::string outLine = buildId + "|";
+        for (size_t i = 0; i < offsets.size(); ++i) {
+            char hexBuf[32];
+            snprintf(hexBuf, sizeof(hexBuf), "0x%zX", offsets[i]);
+            if (i > 0) outLine += ",";
+            outLine += hexBuf;
+        }
+        std::string discPath = "/data/data/" + hostPkg + "/files/featurestic_anogs_discovered.txt";
+        int outFd = NativeVfsHook::rawDirectOpen(discPath.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        if (outFd >= 0) {
+            NativeVfsHook::rawDirectWrite(outFd, outLine.c_str(), outLine.size());
+            NativeVfsHook::rawDirectClose(outFd);
+        }
+        ALOGI("FeaturesticCore: applyCrashFixer patched %d/%zu libanogs.so offsets (buildId=%s)",
+              patchedCount, offsets.size(), buildId.c_str());
     }
     return 1;
 }
