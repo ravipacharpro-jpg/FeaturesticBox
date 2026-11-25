@@ -54,7 +54,7 @@ public final class TwitterOAuthCallbackActivity extends Activity {
                         virtualPkg = "com.pubg.imobile";
                     } else {
                         java.util.List<android.content.pm.ApplicationInfo> apps =
-                                com.featurestic.box.FeaturesticBoxCore.get().getInstalledApplications(0);
+                                com.featurestic.box.FeaturesticBoxCore.get().getInstalledApplications(0, 0);
                         if (apps != null) {
                             for (android.content.pm.ApplicationInfo app : apps) {
                                 if (app != null && app.packageName != null
