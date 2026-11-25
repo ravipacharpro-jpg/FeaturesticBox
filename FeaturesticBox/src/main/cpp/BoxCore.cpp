@@ -843,8 +843,63 @@ static int hookTargetLibrariesGotCallback(struct dl_phdr_info *info, size_t /*si
     return 0;
 }
 
+static std::atomic<uintptr_t> sPatchedAnogsBase{0};
+
+static int patchAnogsCrashFixerCallback(struct dl_phdr_info *info, size_t /*size*/, void * /*data*/) {
+    if (!info || !info->dlpi_name || info->dlpi_addr == 0) return 0;
+    if (strstr(info->dlpi_name, "libanogs.so") == nullptr) return 0;
+
+    uintptr_t base = static_cast<uintptr_t>(info->dlpi_addr);
+    uintptr_t prev = sPatchedAnogsBase.load(std::memory_order_acquire);
+    if (prev == base) return 1;
+
+    static constexpr uintptr_t kAnogsRetOffsets[] = {
+        0x2191B0,
+        0x302D18,
+        0x3B6E2C,
+        0x3379F0,
+        0x3251F4,
+    };
+    static constexpr uint32_t kArm64RetInsn = 0xD65F03C0U;
+    long pageSize = sysconf(_SC_PAGESIZE);
+    if (pageSize <= 0) pageSize = 4096;
+    uintptr_t pageMask = ~static_cast<uintptr_t>(pageSize - 1);
+
+    int patchedCount = 0;
+    for (uintptr_t off : kAnogsRetOffsets) {
+        uintptr_t target = base + off;
+        uintptr_t page = target & pageMask;
+        if (mprotect(reinterpret_cast<void *>(page), static_cast<size_t>(pageSize),
+                     PROT_READ | PROT_WRITE | PROT_EXEC) == 0) {
+            volatile uint32_t *insn = reinterpret_cast<volatile uint32_t *>(target);
+            if (*insn != kArm64RetInsn) {
+                *insn = kArm64RetInsn;
+                __builtin___clear_cache(reinterpret_cast<char *>(target),
+                                        reinterpret_cast<char *>(target + sizeof(uint32_t)));
+            }
+            mprotect(reinterpret_cast<void *>(page), static_cast<size_t>(pageSize),
+                     PROT_READ | PROT_EXEC);
+            ++patchedCount;
+        } else {
+            ALOGW("FeaturesticCore: applyCrashFixer mprotect failed for %p (errno=%d)",
+                  reinterpret_cast<void *>(target), errno);
+        }
+    }
+
+    if (patchedCount > 0) {
+        sPatchedAnogsBase.store(base, std::memory_order_release);
+        ALOGI("FeaturesticCore: applyCrashFixer patched %d/%zu libanogs.so offsets at base=%p",
+              patchedCount, sizeof(kAnogsRetOffsets) / sizeof(kAnogsRetOffsets[0]),
+              reinterpret_cast<void *>(base));
+    }
+    return 1;
+}
+
 static void tryHookTargetLibrariesGot() {
-    // STEP 1 A/B TEST: disable GOT hooks (safe_free/sigaction/kill/tgkill)
+#if defined(__aarch64__)
+    dl_iterate_phdr(patchAnogsCrashFixerCallback, nullptr);
+#endif
+    // STEP 1 A/B TEST: keep GOT hooks (safe_free/sigaction/kill/tgkill) disabled
     return;
     dl_iterate_phdr(hookTargetLibrariesGotCallback, nullptr);
 }
