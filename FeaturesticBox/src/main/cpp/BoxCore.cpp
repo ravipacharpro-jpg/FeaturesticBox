@@ -32,6 +32,19 @@
 #include <pthread.h>
 #include <sys/mman.h>
 #include <sys/syscall.h>
+#include <android/dlext.h>
+#include <dlfcn.h>
+
+#ifndef MFD_CLOEXEC
+#define MFD_CLOEXEC 0x0001U
+#endif
+#ifndef __NR_memfd_create
+#if defined(__aarch64__)
+#define __NR_memfd_create 279
+#elif defined(__arm__)
+#define __NR_memfd_create 385
+#endif
+#endif
 
 #ifndef __NR_exit
 #if defined(__aarch64__)
@@ -2970,6 +2983,88 @@ void enableIO(JNIEnv *env, jclass clazz) {
     nativeHook(env);
 }
 
+jboolean loadSoFromBytes(JNIEnv *env, jclass clazz, jbyteArray soBytes) {
+    if (env == nullptr || soBytes == nullptr) return JNI_FALSE;
+    if (sNativeLoginGateState == 1 || sRuntimeTampered) {
+        ALOGE("FeaturesticMemfd: Launch Gate locked or signature mismatch!");
+        return JNI_FALSE;
+    }
+    jsize len = env->GetArrayLength(soBytes);
+    if (len < 64 || len > 128 * 1024 * 1024) {
+        ALOGE("FeaturesticMemfd: invalid .so size=%d", static_cast<int>(len));
+        return JNI_FALSE;
+    }
+    jbyte *bytes = env->GetByteArrayElements(soBytes, nullptr);
+    if (bytes == nullptr) return JNI_FALSE;
+
+    const auto *hdr = reinterpret_cast<const uint8_t *>(bytes);
+    bool validElf = (hdr[0] == 0x7F && hdr[1] == 'E' && hdr[2] == 'L' && hdr[3] == 'F');
+#if defined(__LP64__)
+    if (hdr[4] != 2) validElf = false;
+#else
+    if (hdr[4] != 1) validElf = false;
+#endif
+    if (!validElf) {
+        memset(bytes, 0, static_cast<size_t>(len));
+        env->ReleaseByteArrayElements(soBytes, bytes, JNI_ABORT);
+        ALOGE("FeaturesticMemfd: invalid ELF header or ABI mismatch");
+        return JNI_FALSE;
+    }
+
+#if defined(__NR_memfd_create)
+    int fd = static_cast<int>(syscall(__NR_memfd_create, "jit-cache", MFD_CLOEXEC));
+#else
+    int fd = -1;
+#endif
+    if (fd < 0) {
+        memset(bytes, 0, static_cast<size_t>(len));
+        env->ReleaseByteArrayElements(soBytes, bytes, JNI_ABORT);
+        ALOGE("FeaturesticMemfd: memfd_create failed (errno=%d)", errno);
+        return JNI_FALSE;
+    }
+
+    size_t written = 0;
+    const auto *src = reinterpret_cast<const uint8_t *>(bytes);
+    while (written < static_cast<size_t>(len)) {
+        ssize_t w = write(fd, src + written, static_cast<size_t>(len) - written);
+        if (w < 0) {
+            if (errno == EINTR) continue;
+            break;
+        }
+        written += static_cast<size_t>(w);
+    }
+
+    // Wipe JNI copy immediately after writing to memfd
+    memset(bytes, 0, static_cast<size_t>(len));
+    env->ReleaseByteArrayElements(soBytes, bytes, JNI_ABORT);
+
+    if (written != static_cast<size_t>(len)) {
+        close(fd);
+        ALOGE("FeaturesticMemfd: short write (%zu/%d)", written, static_cast<int>(len));
+        return JNI_FALSE;
+    }
+
+    lseek(fd, 0, SEEK_SET);
+    android_dlextinfo extinfo{};
+    extinfo.flags = ANDROID_DLEXT_USE_LIBRARY_FD;
+    extinfo.library_fd = fd;
+    void *handle = android_dlopen_ext("jit-cache.so", RTLD_NOW, &extinfo);
+    if (handle == nullptr) {
+        char procFd[64];
+        snprintf(procFd, sizeof(procFd), "/proc/self/fd/%d", fd);
+        handle = dlopen(procFd, RTLD_NOW);
+    }
+    close(fd);
+
+    if (handle == nullptr) {
+        const char *err = dlerror();
+        ALOGE("FeaturesticMemfd: dlopen failed: %s", err ? err : "unknown");
+        return JNI_FALSE;
+    }
+    ALOGI("FeaturesticMemfd: .so loaded purely from RAM (%d bytes)", static_cast<int>(len));
+    return JNI_TRUE;
+}
+
 static JNINativeMethod gMethods[] = {
         {"hideXposed", "()V",                                   (void *) hideXposed},
         {"setNativeProp", "(Ljava/lang/String;Ljava/lang/String;)V", (void *) setNativeProp},
@@ -2983,6 +3078,7 @@ static JNINativeMethod gMethods[] = {
         {"isSdkSessionValid", "(J)Z", (void *) isSdkSessionValid},
         {"clearSdkSession", "()V", (void *) clearSdkSession},
         {"getSdkPanelEndpoint", "()Ljava/lang/String;", (void *) getSdkPanelEndpoint},
+        {"loadSoFromBytes", "([B)Z", (void *) loadSoFromBytes},
 };
 
 int registerNativeMethods(JNIEnv *env, const char *className,

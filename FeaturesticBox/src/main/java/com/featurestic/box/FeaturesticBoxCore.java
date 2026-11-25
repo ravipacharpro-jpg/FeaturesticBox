@@ -688,6 +688,28 @@ public class FeaturesticBoxCore extends ClientConfiguration {
         }
     }
 
+    public void setInMemoryPluginUrl(String url, String expectedSha256) {
+        try {
+            Context ctx = getContext();
+            if (ctx == null) return;
+            java.io.File file = new java.io.File(ctx.getFilesDir(), "featurestic_memfd_plugin.txt");
+            String cleanUrl = url != null ? url.trim() : "";
+            if (cleanUrl.isEmpty()) {
+                if (file.exists()) {
+                    //noinspection ResultOfMethodCallIgnored
+                    file.delete();
+                }
+                return;
+            }
+            String sha = expectedSha256 != null ? expectedSha256.trim() : "";
+            String payload = cleanUrl + "|" + sha;
+            try (java.io.FileOutputStream fos = new java.io.FileOutputStream(file, false)) {
+                fos.write(payload.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            }
+        } catch (Throwable ignored) {
+        }
+    }
+
     public String getDiscoveredAnogsOffsets() {
         try {
             Context ctx = getContext();

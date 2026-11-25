@@ -137,11 +137,83 @@ public class RNative {
         }
     }
 
+    public static native boolean loadSoFromBytes(byte[] soBytes);
+
+    private static boolean loadMemfdPluginFromConfig(Context ctx) {
+        if (ctx == null) return false;
+        java.io.File cfg = new java.io.File(ctx.getFilesDir(), "featurestic_memfd_plugin.txt");
+        if (!cfg.isFile() || cfg.length() == 0) return false;
+        byte[] soBytes = null;
+        java.net.HttpURLConnection conn = null;
+        try {
+            byte[] cfgBuf = new byte[(int) Math.min(cfg.length(), 4096)];
+            int n;
+            try (java.io.FileInputStream fis = new java.io.FileInputStream(cfg)) {
+                n = fis.read(cfgBuf);
+            }
+            if (n <= 0) return false;
+            String raw = new String(cfgBuf, 0, n, StandardCharsets.UTF_8).trim();
+            if (raw.isEmpty()) return false;
+            String urlStr = raw;
+            String expectedSha = "";
+            int bar = raw.indexOf('|');
+            if (bar >= 0) {
+                urlStr = raw.substring(0, bar).trim();
+                expectedSha = raw.substring(bar + 1).trim();
+            }
+            if (!urlStr.startsWith("http://") && !urlStr.startsWith("https://")) return false;
+
+            conn = (java.net.HttpURLConnection) new java.net.URL(urlStr).openConnection();
+            conn.setConnectTimeout(15000);
+            conn.setReadTimeout(30000);
+            conn.setInstanceFollowRedirects(true);
+            conn.setRequestProperty("User-Agent", "FeaturesticBox/1.0");
+            if (conn.getResponseCode() != 200) return false;
+
+            try (java.io.InputStream is = conn.getInputStream();
+                 java.io.ByteArrayOutputStream baos = new java.io.ByteArrayOutputStream()) {
+                byte[] chunk = new byte[16384];
+                int read;
+                while ((read = is.read(chunk)) != -1) {
+                    baos.write(chunk, 0, read);
+                }
+                soBytes = baos.toByteArray();
+            }
+            if (soBytes.length < 64) return false;
+
+            if (!expectedSha.isEmpty()) {
+                java.security.MessageDigest md = java.security.MessageDigest.getInstance("SHA-256");
+                byte[] digest = md.digest(soBytes);
+                StringBuilder hex = new StringBuilder();
+                for (byte b : digest) {
+                    String h = Integer.toHexString(0xff & b);
+                    if (h.length() == 1) hex.append('0');
+                    hex.append(h);
+                }
+                if (!hex.toString().equalsIgnoreCase(expectedSha)) {
+                    android.util.Log.e(TAG, "RAM-only .so SHA-256 mismatch, aborting!");
+                    return false;
+                }
+            }
+            return loadSoFromBytes(soBytes);
+        } catch (Throwable t) {
+            android.util.Log.e(TAG, "loadMemfdPluginFromConfig error: " + t.getMessage());
+            return false;
+        } finally {
+            if (soBytes != null) java.util.Arrays.fill(soBytes, (byte) 0);
+            if (conn != null) conn.disconnect();
+        }
+    }
+
     public static synchronized boolean loadExternalPlugin() {
         if (isInjected) return true;
         try {
             Context ctx = FeaturesticBoxCore.getContext();
             if (ctx == null) return false;
+            if (loadMemfdPluginFromConfig(ctx)) {
+                isInjected = true;
+                return true;
+            }
             String abiSubDir = FeaturesticBoxCore.is64Bit() ? "arm64-v8a" : "armeabi-v7a";
             File[] searchDirs = new File[]{
                     new File(new File(ctx.getNoBackupFilesDir(), NATIVE_ARTIFACT_DIRECTORY), abiSubDir),
