@@ -1017,7 +1017,7 @@ static int patchAnogsCrashFixerCallback(struct dl_phdr_info *info, size_t /*size
     // 1) MOVZ W8, #0..15 ... BR X8 crash traps (e.g. sub_2191B0, sub_3B6E90)
     // 2) Adjacent small BL wrapper immediately preceding a BR X8 trap (e.g. sub_3B6E2C usleep wrapper)
     if (info->dlpi_phdr) {
-        for (Elf64_Half i = 0; i < info->dlpi_phdrnum; ++i) {
+        for (Elf64_Half i = 0; i < info->dlpi_phnum; ++i) {
             const Elf64_Phdr &ph = info->dlpi_phdr[i];
             if (ph.p_type != PT_LOAD || (ph.p_flags & PF_X) == 0 || ph.p_memsz < 64) continue;
             uintptr_t segStart = base + ph.p_vaddr;
