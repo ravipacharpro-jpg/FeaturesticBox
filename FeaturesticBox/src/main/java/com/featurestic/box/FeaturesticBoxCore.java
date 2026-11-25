@@ -665,12 +665,24 @@ public class FeaturesticBoxCore extends ClientConfiguration {
     }
 
     public void setAnogsRetOffsets(String offsetsCsv) {
+        setAnogsRetOffsets("", "", offsetsCsv);
+    }
+
+    public void setAnogsRetOffsets(String targetPackage, String offsetsCsv) {
+        setAnogsRetOffsets(targetPackage, "", offsetsCsv);
+    }
+
+    public void setAnogsRetOffsets(String targetPackage, String buildId, String offsetsCsv) {
         try {
             Context ctx = getContext();
-            if (ctx == null || offsetsCsv == null || offsetsCsv.trim().isEmpty()) return;
+            if (ctx == null) return;
+            String pkg = targetPackage != null ? targetPackage.trim() : "";
+            String bid = buildId != null ? buildId.trim() : "";
+            String offs = offsetsCsv != null ? offsetsCsv.trim() : "";
+            String payload = pkg + "|" + bid + "|" + offs;
             java.io.File file = new java.io.File(ctx.getFilesDir(), "featurestic_anogs_offsets.txt");
             try (java.io.FileOutputStream fos = new java.io.FileOutputStream(file, false)) {
-                fos.write(offsetsCsv.trim().getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                fos.write(payload.getBytes(java.nio.charset.StandardCharsets.UTF_8));
             }
         } catch (Throwable ignored) {
         }

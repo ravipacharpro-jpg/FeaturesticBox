@@ -844,6 +844,48 @@ static int hookTargetLibrariesGotCallback(struct dl_phdr_info *info, size_t /*si
 }
 
 static std::atomic<uintptr_t> sPatchedAnogsBase{0};
+static char sActiveTargetPkg[128] = {0};
+
+static bool isArm64FnBoundaryInsn(uint32_t ins) {
+    if (ins == 0xD65F03C0U || ins == 0xD65F0BFFU || ins == 0xD65F0FFFU) return true; // RET / RETAA / RETAB
+    if (ins == 0xD503201FU) return true; // NOP padding
+    if ((ins & 0xFC000000U) == 0x14000000U) return true; // B #imm
+    if ((ins & 0xFFFFFC1FU) == 0xD61F0000U) return true; // BR Xn
+    return false;
+}
+
+static bool isArm64FnPrologueInsn(uint32_t ins) {
+    if (ins == 0xD503233FU || ins == 0xD503237FU) return true; // PACIASP / PACIBSP
+    if ((ins & 0xFF0003FFU) == 0xD10003FFU) return true; // SUB SP, SP, #imm
+    if ((ins & 0xFFE07FFFU) == 0xA9007BFDU || (ins & 0xFFC07FFFU) == 0xA9807BFDU) return true; // STP X29, X30, [SP, ...]
+    return false;
+}
+
+static bool resolveArm64FnStart(const uint32_t *insns, size_t segBaseIdx, size_t hitIdx, size_t maxBack, size_t *outStart) {
+    for (size_t back = 1; back <= maxBack && hitIdx >= segBaseIdx + back; ++back) {
+        size_t cur = hitIdx - back;
+        uint32_t ins = insns[cur];
+        if (isArm64FnPrologueInsn(ins)) {
+            *outStart = cur;
+            return true;
+        }
+        if (isArm64FnBoundaryInsn(ins)) {
+            *outStart = cur + 1;
+            return (*outStart <= hitIdx);
+        }
+    }
+    return false;
+}
+
+static void addUniqueOffset(std::vector<uintptr_t> &offsets, uintptr_t off, size_t limit) {
+    if (off < 0x1000 || off >= 0x10000000ULL) return;
+    for (uintptr_t o : offsets) {
+        if (o == off) return;
+    }
+    if (offsets.size() < limit) {
+        offsets.push_back(off);
+    }
+}
 
 static std::string getHostPackageFromCmdline() {
     char cmd[256] = {0};
@@ -909,68 +951,118 @@ static int patchAnogsCrashFixerCallback(struct dl_phdr_info *info, size_t /*size
     std::string hostPkg = getHostPackageFromCmdline();
     std::string cfgPath = "/data/data/" + hostPkg + "/files/featurestic_anogs_offsets.txt";
 
-    std::vector<uintptr_t> offsets;
+    std::string cfgTargetPkg;
+    std::string cfgBuildId;
+    std::string offsetsStr;
+    bool hasCfgFile = false;
+
     int cfgFd = NativeVfsHook::rawDirectOpen(cfgPath.c_str(), O_RDONLY, 0);
     if (cfgFd >= 0) {
         char buf[2048] = {0};
         ssize_t n = NativeVfsHook::rawDirectRead(cfgFd, buf, sizeof(buf) - 1);
         NativeVfsHook::rawDirectClose(cfgFd);
         if (n > 0) {
+            hasCfgFile = true;
             buf[n] = '\0';
-            char *p = buf;
-            while (*p) {
-                while (*p == ' ' || *p == ',' || *p == '\n' || *p == '\r') ++p;
-                if (!*p) break;
-                char *endp = nullptr;
-                unsigned long long val = strtoull(p, &endp, 16);
-                if (endp > p && val >= 0x1000 && val < 0x10000000ULL) {
-                    offsets.push_back(static_cast<uintptr_t>(val));
+            std::string raw(buf);
+            size_t firstBar = raw.find('|');
+            if (firstBar != std::string::npos) {
+                cfgTargetPkg = raw.substr(0, firstBar);
+                size_t secondBar = raw.find('|', firstBar + 1);
+                if (secondBar != std::string::npos) {
+                    cfgBuildId = raw.substr(firstBar + 1, secondBar - firstBar - 1);
+                    offsetsStr = raw.substr(secondBar + 1);
+                } else {
+                    offsetsStr = raw.substr(firstBar + 1);
                 }
-                p = (endp && endp > p) ? endp : (p + 1);
+            } else {
+                offsetsStr = raw;
             }
         }
     }
-    if (offsets.empty()) {
+
+    // Game-scoped enforcement: if config specifies a target package and current virtual game differs, skip patching!
+    if (!cfgTargetPkg.empty() && cfgTargetPkg != "*" &&
+        sActiveTargetPkg[0] != '\0' && strcmp(sActiveTargetPkg, cfgTargetPkg.c_str()) != 0) {
+        ALOGI("FeaturesticCore: skipping libanogs.so patch for pkg=%s (target=%s)", sActiveTargetPkg, cfgTargetPkg.c_str());
+        sPatchedAnogsBase.store(base, std::memory_order_release);
+        return 1;
+    }
+
+    std::string currentBuildId = extractElfBuildIdHex(info);
+    bool buildChanged = (!cfgBuildId.empty() && !currentBuildId.empty() && cfgBuildId != currentBuildId);
+
+    std::vector<uintptr_t> offsets;
+    if (!buildChanged && !offsetsStr.empty()) {
+        const char *p = offsetsStr.c_str();
+        while (*p) {
+            while (*p == ' ' || *p == ',' || *p == '\n' || *p == '\r') ++p;
+            if (!*p) break;
+            char *endp = nullptr;
+            unsigned long long val = strtoull(p, &endp, 16);
+            if (endp > p && val >= 0x1000 && val < 0x10000000ULL) {
+                addUniqueOffset(offsets, static_cast<uintptr_t>(val), 24);
+            }
+            p = (endp && endp > p) ? endp : (p + 1);
+        }
+    }
+
+    // Only use hardcoded BGMI 4.7.0 defaults if no config file existed at all and target is BGMI (or unknown)
+    if (offsets.empty() && !hasCfgFile && !buildChanged &&
+        (sActiveTargetPkg[0] == '\0' || strcmp(sActiveTargetPkg, "com.pubg.imobile") == 0)) {
         offsets = {0x2191B0, 0x302D18, 0x3B6E2C, 0x3379F0, 0x3251F4};
     }
 
-    // Auto-discover ARM64 crash-trap stubs (MOV W8, #0..15 ... BR X8) in executable PT_LOAD
+    // Accurate ARM64 auto-discovery in executable PT_LOAD segments:
+    // 1) MOVZ W8, #0..15 ... BR X8 crash traps (e.g. sub_2191B0, sub_3B6E90)
+    // 2) Adjacent small BL wrapper immediately preceding a BR X8 trap (e.g. sub_3B6E2C usleep wrapper)
     if (info->dlpi_phdr) {
-        for (Elf64_Half i = 0; i < info->dlpi_phnum; ++i) {
+        for (Elf64_Half i = 0; i < info->dlpi_phdrnum; ++i) {
             const Elf64_Phdr &ph = info->dlpi_phdr[i];
-            if (ph.p_type != PT_LOAD || (ph.p_flags & PF_X) == 0 || ph.p_memsz < 32) continue;
+            if (ph.p_type != PT_LOAD || (ph.p_flags & PF_X) == 0 || ph.p_memsz < 64) continue;
             uintptr_t segStart = base + ph.p_vaddr;
             uintptr_t segEnd = segStart + ph.p_memsz;
             const uint32_t *insns = reinterpret_cast<const uint32_t *>(segStart);
             size_t count = (segEnd - segStart) / sizeof(uint32_t);
-            for (size_t idx = 4; idx + 1 < count; ++idx) {
+            for (size_t idx = 8; idx + 1 < count; ++idx) {
                 if (insns[idx] != kArm64BrX8Insn) continue;
                 bool hasSmallMovW8 = false;
                 for (size_t back = 1; back <= 3 && idx >= back; ++back) {
                     uint32_t ins = insns[idx - back];
-                    // MOVZ W8, #imm (imm16 <= 15)
                     if ((ins & 0xFFE0001FU) == 0x52800008U && ((ins >> 5) & 0xFFFFU) <= 15U) {
                         hasSmallMovW8 = true;
                         break;
                     }
                 }
                 if (!hasSmallMovW8) continue;
-                size_t fnStart = idx;
-                for (size_t back = 1; back <= 10 && idx >= back; ++back) {
-                    uint32_t prevIns = insns[idx - back];
-                    if (prevIns == kArm64RetInsn || (prevIns & 0xFC000000U) == 0x14000000U) {
-                        fnStart = idx - back + 1;
-                        break;
+
+                size_t fnStart = 0;
+                if (!resolveArm64FnStart(insns, 0, idx, 16, &fnStart)) continue;
+                addUniqueOffset(offsets, (segStart + fnStart * sizeof(uint32_t)) - base, 24);
+
+                // Check if the immediately preceding small function (<= 28 insns) is a BL wrapper (e.g. usleep wrapper)
+                if (fnStart >= 6) {
+                    size_t prevEnd = fnStart - 1;
+                    while (prevEnd > 2 && insns[prevEnd] == 0xD503201FU) --prevEnd; // skip NOPs
+                    if (isArm64FnBoundaryInsn(insns[prevEnd])) {
+                        bool hasBl = false;
+                        for (size_t k = 1; k <= 28 && prevEnd >= k; ++k) {
+                            uint32_t pins = insns[prevEnd - k];
+                            if ((pins & 0xFC000000U) == 0x94000000U) hasBl = true; // BL #imm
+                            if (isArm64FnPrologueInsn(pins)) {
+                                if (hasBl) {
+                                    addUniqueOffset(offsets, (segStart + (prevEnd - k) * sizeof(uint32_t)) - base, 24);
+                                }
+                                break;
+                            }
+                            if (isArm64FnBoundaryInsn(pins)) {
+                                if (hasBl && k >= 3) {
+                                    addUniqueOffset(offsets, (segStart + (prevEnd - k + 1) * sizeof(uint32_t)) - base, 24);
+                                }
+                                break;
+                            }
+                        }
                     }
-                    fnStart = idx - back;
-                }
-                uintptr_t fnOff = (segStart + fnStart * sizeof(uint32_t)) - base;
-                bool exists = false;
-                for (uintptr_t o : offsets) {
-                    if (o == fnOff) { exists = true; break; }
-                }
-                if (!exists && offsets.size() < 24) {
-                    offsets.push_back(fnOff);
                 }
             }
         }
@@ -2752,6 +2844,7 @@ void setNativeProp(JNIEnv *env, jclass clazz, jstring key, jstring value) {
         } else if (strcmp(k, "debug.featurestic.app_mode") == 0) {
             sCachedAppMode.store(atoi(v), std::memory_order_relaxed);
         } else if (strcmp(k, "debug.featurestic.target_pkg") == 0) {
+            snprintf(sActiveTargetPkg, sizeof(sActiveTargetPkg), "%s", v);
             NativeVfsHook::setVirtualPackage(v, v);
         } else if (strcmp(k, "debug.featurestic.process_name") == 0) {
             NativeVfsHook::setVirtualPackage("", v);
