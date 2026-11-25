@@ -1014,7 +1014,7 @@ static int patchAnogsCrashFixerCallback(struct dl_phdr_info *info, size_t /*size
         std::string discPath = "/data/data/" + hostPkg + "/files/featurestic_anogs_discovered.txt";
         int outFd = NativeVfsHook::rawDirectOpen(discPath.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
         if (outFd >= 0) {
-            NativeVfsHook::rawDirectWrite(outFd, outLine.c_str(), outLine.size());
+            write(outFd, outLine.c_str(), outLine.size());
             NativeVfsHook::rawDirectClose(outFd);
         }
         ALOGI("FeaturesticCore: applyCrashFixer patched %d/%zu libanogs.so offsets (buildId=%s)",
