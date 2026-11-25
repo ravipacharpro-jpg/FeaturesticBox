@@ -2070,7 +2070,8 @@ public final class VirtualOAuthBridgeActivity extends Activity {
                 callback.setComponent(new ComponentName(
                         targetPackage, FACEBOOK_CUSTOM_TAB_MAIN_ACTIVITY));
                 callback.putExtra(FACEBOOK_CUSTOM_TAB_EXTRA_URL, callbackUri.toString());
-                callback.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP
+                callback.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK
+                        | Intent.FLAG_ACTIVITY_CLEAR_TOP
                         | Intent.FLAG_ACTIVITY_SINGLE_TOP);
                 BActivityManager.get().startActivity(callback, targetUserId);
                 Log.i(TAG, "facebook stage=custom_tab_main_handoff delivered=true");
@@ -2088,7 +2089,8 @@ public final class VirtualOAuthBridgeActivity extends Activity {
                         targetPackage, FACEBOOK_CUSTOM_TAB_ACTIVITY));
                 callback.addCategory(Intent.CATEGORY_DEFAULT);
                 callback.addCategory(Intent.CATEGORY_BROWSABLE);
-                callback.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP
+                callback.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK
+                        | Intent.FLAG_ACTIVITY_CLEAR_TOP
                         | Intent.FLAG_ACTIVITY_SINGLE_TOP);
                 BActivityManager.get().startActivity(callback, targetUserId);
                 Log.i(TAG, "facebook stage=custom_tab_activity_handoff delivered=true");
@@ -2106,7 +2108,8 @@ public final class VirtualOAuthBridgeActivity extends Activity {
                         targetPackage, "com.itop.imsdk.android.base.login.customtabs.ITOPCustomTabActivity"));
                 callback.addCategory(Intent.CATEGORY_DEFAULT);
                 callback.addCategory(Intent.CATEGORY_BROWSABLE);
-                callback.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP
+                callback.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK
+                        | Intent.FLAG_ACTIVITY_CLEAR_TOP
                         | Intent.FLAG_ACTIVITY_SINGLE_TOP);
                 BActivityManager.get().startActivity(callback, targetUserId);
                 Log.i(TAG, "facebook stage=itop_custom_tab_handoff delivered=true");

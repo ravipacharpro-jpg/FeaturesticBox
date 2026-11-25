@@ -884,10 +884,13 @@ public final class ExternalAuthRouter {
         }
         String host = uri.getHost();
         host = host == null ? "" : host.toLowerCase(Locale.US);
+        String path = uri.getPath();
+        path = path == null ? "" : path.toLowerCase(Locale.US);
         return "twitter.com".equals(host)
                 || "x.com".equals(host)
                 || host.endsWith(".twitter.com")
-                || host.endsWith(".x.com");
+                || host.endsWith(".x.com")
+                || (("globh.com".equals(host) || host.endsWith(".globh.com")) && path.contains("twitter"));
     }
 
     private static boolean isLikelyTwitterOAuthUri(Uri uri) {

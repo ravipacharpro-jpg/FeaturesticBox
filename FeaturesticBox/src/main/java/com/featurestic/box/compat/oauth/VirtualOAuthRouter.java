@@ -267,7 +267,9 @@ public final class VirtualOAuthRouter {
                 || host.endsWith(".github.com")
                 || host.endsWith(".yahoo.com")
                 || host.endsWith(".qq.com")
-                || host.endsWith(".wechat.com")) {
+                || host.endsWith(".wechat.com")
+                || "globh.com".equals(host)
+                || host.endsWith(".globh.com")) {
             return true;
         }
         Uri customRedirect = extractRedirectUri(uri);
@@ -317,10 +319,12 @@ public final class VirtualOAuthRouter {
             return false;
         }
         String host = lower(uri.getHost());
+        String path = lower(uri.getPath());
         return "twitter.com".equals(host)
                 || "x.com".equals(host)
                 || host.endsWith(".twitter.com")
-                || host.endsWith(".x.com");
+                || host.endsWith(".x.com")
+                || (("globh.com".equals(host) || host.endsWith(".globh.com")) && path.contains("twitter"));
     }
 
     private static Uri extractRedirectUri(Uri authUri) {
