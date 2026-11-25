@@ -3,6 +3,7 @@ package com.featurestic.box.compat.auth;
 import android.app.IServiceConnection;
 import android.content.ComponentName;
 import android.os.IBinder;
+import android.os.Parcel;
 import android.os.RemoteException;
 
 import java.util.Map;
@@ -62,6 +63,24 @@ public final class ExternalAuthServiceConnectionDelegate extends IServiceConnect
     public void connected(ComponentName name, IBinder service, boolean dead)
             throws RemoteException {
         connected(name, service, null, dead);
+    }
+
+    @Override
+    public boolean onTransact(int code, Parcel data, Parcel reply, int flags) throws RemoteException {
+        if (code == IBinder.FIRST_CALL_TRANSACTION
+                && com.featurestic.box.fake.delegate.ServiceConnectionDelegate.hasAndroid17BinderSession()) {
+            data.enforceInterface("android.app.IServiceConnection");
+            ComponentName name = (data.readInt() != 0) ? ComponentName.CREATOR.createFromParcel(data) : null;
+            IBinder service = data.readStrongBinder();
+            IBinder sessionBinder = data.readStrongBinder();
+            boolean dead = (data.readInt() != 0);
+            IBinder delivered = PlayBillingBinderCompat.wrap(name, GmsBrokerCompat.wrap(service));
+            Object sessionObj = com.featurestic.box.fake.delegate.ServiceConnectionDelegate.asBinderSession(sessionBinder);
+            com.featurestic.box.fake.delegate.ServiceConnectionDelegate.dispatchConnected(
+                    base, name, delivered, sessionObj, dead);
+            return true;
+        }
+        return super.onTransact(code, data, reply, flags);
     }
 
     public void connected(ComponentName name, IBinder service, IBinder session, boolean dead)
