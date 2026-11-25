@@ -2844,7 +2844,9 @@ void setNativeProp(JNIEnv *env, jclass clazz, jstring key, jstring value) {
         } else if (strcmp(k, "debug.featurestic.app_mode") == 0) {
             sCachedAppMode.store(atoi(v), std::memory_order_relaxed);
         } else if (strcmp(k, "debug.featurestic.target_pkg") == 0) {
+#if defined(__aarch64__)
             snprintf(sActiveTargetPkg, sizeof(sActiveTargetPkg), "%s", v);
+#endif
             NativeVfsHook::setVirtualPackage(v, v);
         } else if (strcmp(k, "debug.featurestic.process_name") == 0) {
             NativeVfsHook::setVirtualPackage("", v);
