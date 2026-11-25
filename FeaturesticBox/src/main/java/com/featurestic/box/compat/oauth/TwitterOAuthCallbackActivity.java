@@ -46,18 +46,41 @@ public final class TwitterOAuthCallbackActivity extends Activity {
                 TwitterOAuthSessionStore.release(claim.generation);
             }
         } else {
-            // Direct relay to guest container if no active session
+            // Direct relay to guest container when opened from Chrome CustomTab without a session
             try {
                 String virtualPkg = com.featurestic.box.app.BActivityThread.getAppPackageName();
-                if (virtualPkg != null) {
-                    Intent forward = new Intent(Intent.ACTION_VIEW, callback);
-                    forward.addCategory(Intent.CATEGORY_DEFAULT);
-                    forward.addCategory(Intent.CATEGORY_BROWSABLE);
-                    forward.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_SINGLE_TOP);
-                    forward.setComponent(new android.content.ComponentName(
-                            virtualPkg,
-                            "com.itop.imsdk.android.base.login.customtabs.ITOPCustomTabActivity"));
-                    com.featurestic.box.FeaturesticBoxCore.getBActivityManager().startActivity(forward, 0);
+                if (virtualPkg == null || virtualPkg.trim().isEmpty()) {
+                    if (com.featurestic.box.FeaturesticBoxCore.get().isInstalled("com.pubg.imobile", 0)) {
+                        virtualPkg = "com.pubg.imobile";
+                    } else {
+                        java.util.List<android.content.pm.ApplicationInfo> apps =
+                                com.featurestic.box.FeaturesticBoxCore.get().getInstalledApplications(0);
+                        if (apps != null) {
+                            for (android.content.pm.ApplicationInfo app : apps) {
+                                if (app != null && app.packageName != null
+                                        && !com.featurestic.box.core.GmsCore.isGoogleAppOrService(app.packageName)) {
+                                    virtualPkg = app.packageName;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+                if (virtualPkg != null && !virtualPkg.trim().isEmpty()) {
+                    boolean delivered = VirtualOAuthBridgeActivity.dispatchFacebookCallback(
+                            virtualPkg, 0, callback);
+                    if (!delivered) {
+                        Intent forward = new Intent(Intent.ACTION_VIEW, callback);
+                        forward.addCategory(Intent.CATEGORY_DEFAULT);
+                        forward.addCategory(Intent.CATEGORY_BROWSABLE);
+                        forward.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK
+                                | Intent.FLAG_ACTIVITY_CLEAR_TOP
+                                | Intent.FLAG_ACTIVITY_SINGLE_TOP);
+                        forward.setComponent(new android.content.ComponentName(
+                                virtualPkg,
+                                "com.itop.imsdk.android.base.login.customtabs.ITOPCustomTabActivity"));
+                        com.featurestic.box.FeaturesticBoxCore.getBActivityManager().startActivity(forward, 0);
+                    }
                 }
             } catch (Throwable ignored) {
             }
