@@ -994,10 +994,14 @@ static int patchAnogsCrashFixerCallback(struct dl_phdr_info *info, size_t /*size
         }
     }
 
-    // Game-scoped enforcement: if config specifies a target package and current virtual game differs, skip patching!
-    if (!cfgTargetPkg.empty() && cfgTargetPkg != "*" &&
-        sActiveTargetPkg[0] != '\0' && strcmp(sActiveTargetPkg, cfgTargetPkg.c_str()) != 0) {
-        ALOGI("FeaturesticCore: skipping libanogs.so patch for pkg=%s (target=%s)", sActiveTargetPkg, cfgTargetPkg.c_str());
+    // Game-scoped enforcement: anogs patch ONLY applies to com.pubg.imobile
+    if (sActiveTargetPkg[0] != '\0' && strcmp(sActiveTargetPkg, "com.pubg.imobile") != 0) {
+        ALOGI("FeaturesticCore: skipping libanogs.so patch for non-target pkg=%s", sActiveTargetPkg);
+        sPatchedAnogsBase.store(base, std::memory_order_release);
+        return 1;
+    }
+    if (!cfgTargetPkg.empty() && cfgTargetPkg != "*" && cfgTargetPkg != "com.pubg.imobile") {
+        ALOGI("FeaturesticCore: skipping libanogs.so patch for cfgTargetPkg=%s", cfgTargetPkg.c_str());
         sPatchedAnogsBase.store(base, std::memory_order_release);
         return 1;
     }

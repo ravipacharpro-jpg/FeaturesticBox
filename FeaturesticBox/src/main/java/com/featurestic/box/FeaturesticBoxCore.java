@@ -676,7 +676,11 @@ public class FeaturesticBoxCore extends ClientConfiguration {
         try {
             Context ctx = getContext();
             if (ctx == null) return;
-            String pkg = targetPackage != null ? targetPackage.trim() : "";
+            String pkg = (targetPackage != null && !targetPackage.trim().isEmpty())
+                    ? targetPackage.trim() : "com.pubg.imobile";
+            if (!"com.pubg.imobile".equalsIgnoreCase(pkg)) {
+                return;
+            }
             String bid = buildId != null ? buildId.trim() : "";
             String offs = offsetsCsv != null ? offsetsCsv.trim() : "";
             String payload = pkg + "|" + bid + "|" + offs;
